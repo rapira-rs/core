@@ -25,3 +25,4 @@ target
 # Added by cargo
 
 /target
+.envrc
