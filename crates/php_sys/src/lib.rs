@@ -1,6 +1,9 @@
-mod types;
-mod module;
+mod boot;
 mod callbacks;
+mod context;
+mod module;
+mod types;
+mod workers;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs")); // all bindgen types/fns/consts
 

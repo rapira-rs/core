@@ -1,7 +1,7 @@
+use bytes::Bytes;
 use std::ffi::CString;
 use std::io::Read;
 use std::path::PathBuf;
-use bytes::Bytes;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -15,8 +15,8 @@ pub enum Frame {
     Body(Bytes),
 }
 
-struct Job {
-    ctx: Context,
+pub(crate) struct Job {
+    pub(crate) ctx: Context,
 }
 
 pub struct Request {
@@ -41,13 +41,13 @@ pub struct ResponseHead {
     pub headers: Vec<(String, String)>,
 }
 
-struct ReqC {
-    method: CString,
-    query: CString,
-    uri: CString,
-    script: CString,
-    ctype: Option<CString>,
-    cookie: CString,
+pub(crate) struct ReqC {
+    pub(crate) method: CString,
+    pub(crate) query: CString,
+    pub(crate) uri: CString,
+    pub(crate) script: CString,
+    pub(crate) ctype: Option<CString>,
+    pub(crate) cookie: CString,
 }
 
 impl ReqC {
@@ -74,9 +74,9 @@ impl ReqC {
     }
 }
 
-pub struct Context {
-    req: Request,
-    c: ReqC,
+pub(crate) struct Context {
+    pub(crate) req: Request,
+    pub(crate) c: ReqC,
     pub(crate) tx: Option<mpsc::UnboundedSender<Frame>>,
     pub(crate) headers_sent: bool,
 }
