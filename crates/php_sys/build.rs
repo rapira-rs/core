@@ -1,9 +1,9 @@
 #[macro_use]
 mod macros;
 
+use std::env;
 use std::path::PathBuf;
-use std::process::{Command, Output};
-use std::{any, env};
+use std::process::Command;
 
 use anyhow::Context;
 

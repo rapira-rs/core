@@ -1,9 +1,6 @@
-#![allow(
-    non_camel_case_types,
-    non_snake_case,
-    non_upper_case_globals,
-    dead_code
-)]
+#[allow(clippy::all)]
+pub mod bindings;
+
 pub mod boot;
 pub mod callbacks;
 pub mod classic_worker;
@@ -14,13 +11,12 @@ pub mod module;
 pub mod rapira_worker;
 pub mod types;
 
-use std::os::raw::c_int;
-
+pub use bindings::*;
 pub use boot::Rapira;
 pub use dispatcher::RapiraHandle;
 pub use types::{Context, Frame, Mode, Request, ResponseHead};
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs")); // bindgen types/fns/consts
+use std::os::raw::c_int;
 
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;

@@ -40,9 +40,9 @@ impl Rapira {
         let started = unsafe {
             php_tsrm_startup_ex(num_threads as c_int);
             sapi_startup(&mut module);
-            module.startup.map_or(false, |start| {
-                start(&mut module) == ZEND_RESULT_CODE_SUCCESS
-            })
+            module
+                .startup
+                .is_some_and(|start| start(&mut module) == ZEND_RESULT_CODE_SUCCESS)
         };
 
         if !started {
@@ -59,7 +59,7 @@ impl Rapira {
         let mut inboxes: Vec<mpsc::Sender<Job>> = Vec::with_capacity(num_threads);
 
         let workers: Vec<JoinHandle<()>> = (0..num_threads)
-            .map(|id| {
+            .map(|id: usize| {
                 let (inbox_tx, inbox_rx) = mpsc::channel::<Job>(1);
                 inboxes.push(inbox_tx);
                 let (idle, m) = (idle_tx.clone(), mode.clone());
@@ -72,9 +72,9 @@ impl Rapira {
             thread::spawn(move || dispatcher_loop(intake_rx, idle_rx, inboxes));
 
         Ok(Self {
-            intake: intake,
-            dispatcher: dispatcher,
-            workers: workers,
+            intake,
+            dispatcher,
+            workers,
         })
     }
 

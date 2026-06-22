@@ -1,10 +1,10 @@
-use std::{ffi::CString, path::PathBuf};
+use std::{ffi::CString, path::Path};
 
 use crate::{
     php_execute_script, zend_destroy_file_handle, zend_file_handle, zend_stream_init_filename,
 };
 
-pub unsafe fn run_script(script: &PathBuf) {
+pub unsafe fn run_script(script: &Path) {
     unsafe {
         let c_script: CString =
             CString::new(script.to_string_lossy().as_bytes()).unwrap_or_default();

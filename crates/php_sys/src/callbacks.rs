@@ -89,13 +89,6 @@ pub(crate) unsafe extern "C" fn ub_write(buf: *const c_char, len: usize) -> usiz
     })
 }
 
-fn split_header_line(line: &[u8]) -> Option<(String, String)> {
-    let i = line.iter().position(|&b| b == b':')?;
-    let k = String::from_utf8_lossy(&line[..i]).trim().to_string();
-    let v = String::from_utf8_lossy(&line[i + 1..]).trim().to_string();
-    (!k.is_empty()).then_some((k, v))
-}
-
 pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
     guard(SAPI_HEADER_SEND_FAILED as c_int, || {
         let Some(ctx) = ctx() else {
@@ -186,9 +179,9 @@ pub(crate) unsafe extern "C" fn getenv_cb(_n: *const c_char, _l: usize) -> *mut 
 
 pub(crate) unsafe extern "C" fn log_message(_message: *const c_char, _message_len: c_int) {
     // TODO: double check with php-src/other impl for the correct way to log messages from PHP
-    let s = unsafe { std::ffi::CStr::from_ptr(_message) }
+    let s: String = unsafe { std::ffi::CStr::from_ptr(_message) }
         .to_string_lossy()
-        .to_owned();
+        .into_owned();
     eprintln!("[php] {s}");
 }
 

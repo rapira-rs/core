@@ -1,4 +1,4 @@
-use std::{cell::RefCell, path::PathBuf, ptr::null_mut, sync::Mutex};
+use std::{cell::RefCell, path::PathBuf};
 
 use tokio::sync::mpsc;
 
@@ -10,12 +10,12 @@ use crate::{
     php_output_activate, php_output_deactivate, php_output_end_all, php_request_shutdown,
     php_request_startup, rapira_eg, rapira_pg, rapira_run_handler, sapi_activate, sapi_deactivate,
     types::Job,
-    zend_activate_auto_globals, zend_call_destructors, zend_call_function, zend_fcall_info,
-    zend_fcall_info_cache, zend_fcall_info_init, zend_hash_str_del, zval, zval_ptr_dtor,
+    zend_activate_auto_globals, zend_fcall_info, zend_fcall_info_cache, zend_hash_str_del,
+    zval_ptr_dtor,
 };
 
 thread_local! {
-    static WORKER: RefCell<Option<WorkerChan>> = RefCell::new(None);
+    static WORKER: RefCell<Option<WorkerChan>> = const { RefCell::new(None) };
 }
 
 struct WorkerChan {
@@ -23,7 +23,7 @@ struct WorkerChan {
     inbox: mpsc::Receiver<Job>,
     idle: mpsc::UnboundedSender<usize>,
     first_call: bool,
-    wc_served: usize, // TODO: not used - use
+    _wc_served: usize, // TODO: not used - use
 }
 
 pub fn rapira_worker(
@@ -38,7 +38,7 @@ pub fn rapira_worker(
             inbox,
             idle,
             first_call: true,
-            wc_served: 0,
+            _wc_served: 0,
         })
     });
 
@@ -55,6 +55,7 @@ pub fn rapira_worker(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_handle_request(
+    // Safety: not safe
     fci: *mut zend_fcall_info,
     fcc: *mut zend_fcall_info_cache,
 ) -> bool {
@@ -98,14 +99,14 @@ pub unsafe extern "C" fn rapira_rs_handle_request(
 
             let outcome = rapira_run_handler(fci, fcc);
             let is_err = matches!(outcome, 1 /* BAILOUT */ | 3 /* THROW */);
-            if is_err && !job.ctx.headers_sent {
-                if let Some(tx) = &job.ctx.tx {
-                    let _ =
-                        tx.blocking_send(crate::types::Frame::Head(crate::types::ResponseHead {
-                            status: 500,
-                            headers: vec![],
-                        }));
-                }
+            if is_err
+                && !job.ctx.headers_sent
+                && let Some(tx) = &job.ctx.tx
+            {
+                let _ = tx.blocking_send(crate::types::Frame::Head(crate::types::ResponseHead {
+                    status: 500,
+                    headers: vec![],
+                }));
             }
             php_output_end_all();
             php_output_deactivate();
@@ -136,22 +137,5 @@ unsafe fn reset_super_globals() {
         zval_ptr_dtor(files);
         *files = std::mem::zeroed();
         let _ = zend_hash_str_del(&mut (*rapira_eg()).symbol_table, c"_SESSION".as_ptr(), 8);
-    }
-}
-
-fn call_php_zval(handler: *mut zval) {
-    unsafe {
-        let mut retval: zval = std::mem::zeroed();
-        let mut fci: crate::zend_fcall_info = std::mem::zeroed();
-        let mut fcc: crate::zend_fcall_info_cache = std::mem::zeroed();
-
-        if zend_fcall_info_init(handler, 0, &mut fci, &mut fcc, null_mut(), null_mut())
-            == ZEND_RESULT_CODE_SUCCESS
-        {
-            fci.param_count = 0;
-            fci.retval = &mut retval;
-            zend_call_function(&mut fci, &mut fcc);
-        }
-        zval_ptr_dtor(&mut retval);
     }
 }
