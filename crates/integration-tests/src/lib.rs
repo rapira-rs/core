@@ -1,10 +1,3 @@
-//! Integration-test helpers + PHP fixtures for the rapira/core workspace.
-//!
-//! Each integration-test FILE under `tests/` becomes its own test binary, i.e. its own
-//! OS process — which matters here: PHP's embed SAPI global init (`php_tsrm_startup_ex` /
-//! `sapi_startup` / `php_module_startup`) is a process-global singleton, so a process may
-//! call `Rapira::boot()` **exactly once**. Keep one booting test per file.
-
 use php_sys::{Frame, Request};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;

@@ -62,7 +62,7 @@ jobs:
 
             - name: Sanity-check PHP is ZTS + embed
               run: |
-                  php -r 'exit(PHP_ZTS === 1 ? 0 : 1);'
+                  php -r 'exit(PHP_ZTS ? 0 : 1);'
                   test -f "${PHP_PREFIX}/lib/libphp.so"
 
             - uses: dtolnay/rust-toolchain@stable
