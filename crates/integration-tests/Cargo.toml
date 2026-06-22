@@ -1,0 +1,13 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# php_sys + tokio are used by the shared helpers in src/lib.rs, so they are normal deps.
+[dependencies]
+php_sys = { path = "../php_sys" }
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+anyhow = "1.0.102"

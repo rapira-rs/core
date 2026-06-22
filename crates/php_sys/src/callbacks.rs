@@ -1,16 +1,54 @@
+use crate::context::ctx;
 use crate::types::{Context, Frame, ResponseHead};
 use crate::*;
 use bytes::Bytes;
+use core::slice;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-fn ctx<'a>() -> Option<&'a mut Context> {
-    unsafe { ((*rapira_sg()).server_context as *mut Context).as_mut() }
+pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or(default)
 }
 
-fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
-    catch_unwind(AssertUnwindSafe(f)).unwrap_or(default)
+struct SapiHeaders(*mut sapi_headers_struct);
+
+impl SapiHeaders {
+    fn status(&self) -> u16 {
+        let h = unsafe { &*self.0 };
+        if h.http_response_code != 0 {
+            h.http_response_code as u16
+        } else {
+            200
+        }
+    }
+
+    fn lines(&self) -> impl Iterator<Item = SapiHeader> {
+        let mut el = unsafe { &mut *self.0 }.headers.head;
+        std::iter::from_fn(move || {
+            let e = unsafe { el.as_ref()? };
+            el = e.next;
+            Some(SapiHeader(e.data.as_ptr() as *const sapi_header_struct))
+        })
+    }
+}
+
+struct SapiHeader(*const sapi_header_struct);
+
+impl SapiHeader {
+    fn name_value(&self) -> Option<(String, String)> {
+        let sh = unsafe { &*self.0 };
+        if sh.header.is_null() || sh.header_len == 0 {
+            return None;
+        }
+
+        let line = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
+
+        let i = line.iter().position(|&b| b == b':')?;
+        let k = String::from_utf8_lossy(&line[..i]).trim().to_string();
+        let v = String::from_utf8_lossy(&line[i + 1..]).trim().to_string();
+        (!k.is_empty()).then_some((k, v))
+    }
 }
 
 pub(crate) unsafe extern "C" fn sapi_startup_cb(sapi_module: *mut sapi_module_struct) -> c_int {
@@ -32,24 +70,19 @@ pub(crate) unsafe extern "C" fn sapi_deactivate_cb() -> c_int {
 pub(crate) unsafe extern "C" fn ub_write(buf: *const c_char, len: usize) -> usize {
     guard(0, || {
         let Some(c) = ctx() else { return len };
-        if !c.headers_sent {
-            let status = unsafe {
-                let s = (*rapira_sg()).sapi_headers.http_response_code;
-                if s != 0 { s as u16 } else { 200 }
-            };
 
-            if let Some(tx) = &c.tx {
-                let _ = tx.send(Frame::Head(ResponseHead {
-                    status,
-                    headers: vec![],
-                }));
-                c.headers_sent = true;
-            }
+        if !c.headers_sent {
+            send_head(c);
         }
 
         if let Some(tx) = &c.tx {
-            let buf = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
-            let _ = tx.send(Frame::Body(Bytes::copy_from_slice(buf)));
+            let buf = unsafe { slice::from_raw_parts(buf as *const u8, len) };
+            if tx
+                .blocking_send(Frame::Body(Bytes::copy_from_slice(buf)))
+                .is_err()
+            {
+                return 0;
+            }
         }
 
         len
@@ -63,40 +96,21 @@ fn split_header_line(line: &[u8]) -> Option<(String, String)> {
     (!k.is_empty()).then_some((k, v))
 }
 
-pub(crate) unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
+pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
     guard(SAPI_HEADER_SEND_FAILED as c_int, || {
-        let Some(c) = ctx() else {
+        let Some(ctx) = ctx() else {
             return SAPI_HEADER_SEND_FAILED as c_int;
         };
-        let h = unsafe { &*h };
-        let status = if h.http_response_code != 0 {
-            h.http_response_code as u16
-        } else {
-            200
+
+        let h = SapiHeaders(h);
+        let headers = h.lines().filter_map(|l| l.name_value()).collect();
+        if let Some(tx) = &ctx.tx {
+            let _ = tx.blocking_send(Frame::Head(ResponseHead {
+                status: h.status(),
+                headers,
+            }));
         };
-        let mut headers = Vec::new();
-        let mut el = h.headers.head;
-
-        while !el.is_null() {
-            let e = unsafe { &*el };
-            let sh = unsafe { &*(e.data.as_ptr() as *const sapi_header_struct) };
-
-            if !sh.header.is_null() && sh.header_len > 0 {
-                let line =
-                    unsafe { std::slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
-
-                if let Some(kv) = split_header_line(line) {
-                    headers.push(kv);
-                }
-                el = e.next;
-            }
-        }
-
-        if let Some(tx) = &c.tx {
-            let _ = tx.send(Frame::Head(ResponseHead { status, headers }));
-            c.headers_sent = true;
-        }
-
+        ctx.headers_sent = true;
         SAPI_HEADER_SENT_SUCCESSFULLY as c_int
     })
 }
@@ -176,4 +190,19 @@ pub(crate) unsafe extern "C" fn log_message(_message: *const c_char, _message_le
         .to_string_lossy()
         .to_owned();
     eprintln!("[php] {s}");
+}
+
+fn send_head(c: &mut Context) {
+    if c.headers_sent {
+        return;
+    }
+    let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
+
+    if let Some(tx) = &c.tx {
+        let _ = tx.blocking_send(Frame::Head(ResponseHead {
+            status,
+            headers: vec![],
+        }));
+        c.headers_sent = true;
+    }
 }

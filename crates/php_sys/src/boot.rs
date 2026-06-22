@@ -1,9 +1,9 @@
 use std::thread::JoinHandle;
 use std::{os::raw::c_int, thread};
 use tokio::sync::mpsc;
-use types::{Context, Frame, Job, Request, ResponseHead};
+use types::Job;
 
-use crate::{types::Mode, workers::classic_worker, workers::wait_worker, *};
+use crate::{classic_worker::classic_worker, types::Mode, *};
 
 const INTAKE_CAP: usize = 1024;
 
@@ -27,27 +27,28 @@ impl Drop for PhpThread {
     }
 }
 
-struct Rapira {
-    intake: tokio::sync::mpsc::Sender<Job>, // producer side
-    dispatcher: JoinHandle<()>,             // os thread: routes jobs
-    workers: Vec<JoinHandle<()>>,           // os threads: execute PHP scripts
-    module: *mut sapi_module_struct,        // static data: shared across all threads
+pub struct Rapira {
+    pub intake: tokio::sync::mpsc::Sender<Job>, // producer side
+    dispatcher: JoinHandle<()>,                 // os thread: routes jobs
+    workers: Vec<JoinHandle<()>>,               // os threads: execute PHP scripts
 }
 
 impl Rapira {
-    pub fn boot(mode: Mode, num_threads: usize) -> anyhow::Result<Self> {
-        let module: *mut _sapi_module_struct = Box::into_raw(Box::new(module::build_sapi_module()));
+    pub fn boot(mode: Mode, req_threads: usize) -> anyhow::Result<Self> {
+        let num_threads = req_threads.max(1);
+        let mut module = module::build_sapi_module();
         let started = unsafe {
             php_tsrm_startup_ex(num_threads as c_int);
-            sapi_startup(module);
-            matches!((*module).startup, Some(start) if start(module) == ZEND_RESULT_CODE_SUCCESS)
+            sapi_startup(&mut module);
+            module.startup.map_or(false, |start| {
+                start(&mut module) == ZEND_RESULT_CODE_SUCCESS
+            })
         };
 
         if !started {
             unsafe {
                 sapi_shutdown();
                 tsrm_shutdown();
-                drop(Box::from_raw(module));
             }
 
             return Err(anyhow::anyhow!("php_module_startup failed"));
@@ -57,7 +58,7 @@ impl Rapira {
         let (idle_tx, idle_rx) = mpsc::unbounded_channel::<usize>();
         let mut inboxes: Vec<mpsc::Sender<Job>> = Vec::with_capacity(num_threads);
 
-        let workers = (0..num_threads)
+        let workers: Vec<JoinHandle<()>> = (0..num_threads)
             .map(|id| {
                 let (inbox_tx, inbox_rx) = mpsc::channel::<Job>(1);
                 inboxes.push(inbox_tx);
@@ -74,7 +75,6 @@ impl Rapira {
             intake: intake,
             dispatcher: dispatcher,
             workers: workers,
-            module,
         })
     }
 
@@ -88,7 +88,6 @@ impl Rapira {
             php_module_shutdown();
             sapi_shutdown();
             tsrm_shutdown();
-            drop(Box::from_raw(self.module));
         }
     }
 }
@@ -114,6 +113,6 @@ fn worker_main(
     let _php = PhpThread::new();
     match mode {
         Mode::Classic => classic_worker(id, inbox, idle),
-        Mode::Worker(script) => wait_worker(id, script, inbox, idle),
+        Mode::Worker(script) => rapira_worker::rapira_worker(id, script, inbox, idle),
     }
 }

@@ -10,13 +10,22 @@ pub enum Mode {
     Worker(PathBuf),
 }
 
+impl Mode {
+    pub fn auto(worker_script: Option<PathBuf>) -> Self {
+        match worker_script {
+            Some(path) => Mode::Worker(path),
+            None => Mode::Classic,
+        }
+    }
+}
+
 pub enum Frame {
     Head(ResponseHead),
     Body(Bytes),
 }
 
-pub(crate) struct Job {
-    pub(crate) ctx: Context,
+pub struct Job {
+    pub ctx: Context,
 }
 
 pub struct Request {
@@ -41,17 +50,17 @@ pub struct ResponseHead {
     pub headers: Vec<(String, String)>,
 }
 
-pub(crate) struct ReqC {
-    pub(crate) method: CString,
-    pub(crate) query: CString,
-    pub(crate) uri: CString,
-    pub(crate) script: CString,
-    pub(crate) ctype: Option<CString>,
-    pub(crate) cookie: CString,
+pub struct ReqC {
+    pub method: CString,
+    pub query: CString,
+    pub uri: CString,
+    pub script: CString,
+    pub ctype: Option<CString>,
+    pub cookie: CString,
 }
 
 impl ReqC {
-    fn build(r: &Request) -> Self {
+    pub fn build(r: &Request) -> Self {
         let cookie = r
             .headers
             .iter()
@@ -61,7 +70,7 @@ impl ReqC {
 
         Self {
             method: CString::new(r.method.as_bytes()).unwrap_or_default(),
-            query: CString::new(r.query.as_bytes()).unwrap_or_default(),
+            query: CString::new((r.query).as_bytes()).unwrap_or_default(),
             uri: CString::new(r.uri.as_bytes()).unwrap_or_default(),
             script: CString::new(r.script_filename.to_string_lossy().to_string())
                 .unwrap_or_default(),
@@ -74,15 +83,15 @@ impl ReqC {
     }
 }
 
-pub(crate) struct Context {
-    pub(crate) req: Request,
-    pub(crate) c: ReqC,
-    pub(crate) tx: Option<mpsc::UnboundedSender<Frame>>,
-    pub(crate) headers_sent: bool,
+pub struct Context {
+    pub req: Request,
+    pub c: ReqC,
+    pub tx: Option<mpsc::Sender<Frame>>,
+    pub headers_sent: bool,
 }
 
 impl Context {
-    fn new(req: Request, tx: mpsc::UnboundedSender<Frame>) -> Self {
+    pub fn new(req: Request, tx: mpsc::Sender<Frame>) -> Self {
         let c = ReqC::build(&req);
         Self {
             req,
@@ -92,7 +101,7 @@ impl Context {
         }
     }
 
-    fn finish(&mut self) {
+    pub fn finish(&mut self) {
         self.tx = None;
     }
 }

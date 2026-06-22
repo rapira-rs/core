@@ -1,0 +1,58 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "rapira: debug startup (classic)",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=core",
+          "--package=core"
+        ],
+        "filter": {
+          "name": "core",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated",
+      "sourceLanguages": [
+        "rust"
+      ],
+      "env": {
+        "LD_LIBRARY_PATH": "${env:HOME}/.local/php-zts/lib",
+        "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "rapira: debug startup (worker mode)",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=core",
+          "--package=core"
+        ],
+        "filter": {
+          "name": "core",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated",
+      "sourceLanguages": [
+        "rust"
+      ],
+      "env": {
+        "LD_LIBRARY_PATH": "${env:HOME}/.local/php-zts/lib",
+        "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config",
+        "RAPIRA_WORKER": "1"
+      }
+    }
+  ]
+}

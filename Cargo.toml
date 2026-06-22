@@ -7,3 +7,6 @@ edition = "2024"
 members = ["crates/*"]
 
 [dependencies]
+anyhow = "1.0.102"
+php_sys = { path = "crates/php_sys" }
+tokio = { version = "1", features = ["sync"] }
