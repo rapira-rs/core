@@ -13,7 +13,7 @@ bind! {
     zend_activate_auto_globals, php_tsrm_startup_ex, tsrm_shutdown, ts_resource_ex, ts_free_thread,  // ts_resource is a macro -> ts_resource_ex
     zend_call_function, zend_fcall_info_init, zval_ptr_dtor, zend_hash_str_del,  // zval_ptr_dtor_nogc is inline-only -> use zval_ptr_dtor
     php_default_post_reader, php_default_treat_data, php_default_input_filter, zend_call_destructors,
-    php_call_shutdown_functions, zend_observer_fcall_end_all,
+    php_call_shutdown_functions, zend_observer_fcall_end_all, zend_unset_timeout,
     // consts
     SAPI_HEADER_SENT_SUCCESSFULLY, SAPI_HEADER_SEND_FAILED, SAPI_HEADER_DO_SEND,
     TRACK_VARS_FILES, NUM_TRACK_VARS, IS_UNDEF, IS_TRUE, IS_FALSE, ZEND_OBSERVER_ENABLED,

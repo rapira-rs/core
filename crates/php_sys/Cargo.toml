@@ -6,7 +6,7 @@ build = "build.rs"
 
 [dependencies]
 anyhow = "1.0.102"
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["sync"] }
 bytes = "1.11.1"
 
 [build-dependencies]
@@ -16,7 +16,3 @@ cc = "1.2.64"
 
 [features]
 default = []
-php82 = []
-php83 = []
-php84 = []
-php85 = []

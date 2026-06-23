@@ -10,13 +10,13 @@ pub enum Mode {
     Worker(PathBuf),
 }
 
-impl Mode {
-    pub fn auto(worker_script: Option<PathBuf>) -> Self {
-        match worker_script {
-            Some(path) => Mode::Worker(path),
-            None => Mode::Classic,
-        }
-    }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Ok = 0,
+    Bailout = 1,
+    Exit = 2,
+    Throw = 3,
 }
 
 pub enum Frame {

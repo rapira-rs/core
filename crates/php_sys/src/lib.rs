@@ -16,7 +16,7 @@ pub use boot::Rapira;
 pub use dispatcher::RapiraHandle;
 pub use types::{Context, Frame, Mode, Request, ResponseHead};
 
-use std::os::raw::c_int;
+pub const IS_ZTS: bool = cfg!(php_zts); // for tests
 
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;
@@ -24,7 +24,12 @@ unsafe extern "C" {
     pub fn rapira_pg() -> *mut php_core_globals;
     pub fn rapira_cg() -> *mut zend_compiler_globals;
 
-    pub fn rapira_run_handler(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> c_int; //enum
+    pub fn rapira_init_call_stack();
+
+    pub fn rapira_run_handler(
+        fci: *mut zend_fcall_info,
+        fcc: *mut zend_fcall_info_cache,
+    ) -> types::Outcome; //enum
 
     pub static mut rapira_module_entry: zend_module_entry; // from module.c
 }

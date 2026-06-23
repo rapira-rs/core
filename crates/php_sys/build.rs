@@ -16,6 +16,7 @@ fn main() -> anyhow::Result<()> {
     let php_prefix = php_config("--prefix")?;
     // where is to search libs
     println!("cargo:rustc-link-search=native={php_prefix}/lib");
+    println!("cargo:rustc-link-search=native={php_prefix}/lib64");
     println!("cargo:rustc-link-lib=dylib=php");
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=PHP_CONFIG");
@@ -27,11 +28,10 @@ fn main() -> anyhow::Result<()> {
             println!("cargo:rustc-cfg=php{vmajor}{vminor}");
         }
     }
-    anyhow::ensure!(
-        abi.zts,
-        "PHP ZTS (Zend Thread Safety) is required to build this crate. Please install a ZTS-enabled PHP version."
-    );
-    println!("cargo:rustc-cfg=php_zts");
+
+    if abi.zts {
+        println!("cargo:rustc-cfg=php_zts");
+    }
 
     if abi.debug {
         println!("cargo:rustc-cfg=php_debug");
@@ -44,7 +44,10 @@ fn main() -> anyhow::Result<()> {
         .collect();
 
     let mut c = cc::Build::new();
-    c.file("wrapper.c").file("module.c").define("ZTS", None);
+    c.file("wrapper.c").file("module.c");
+    if abi.zts {
+        c.define("ZTS", None);
+    }
     for d in &includes {
         c.include(d);
     }
@@ -52,9 +55,12 @@ fn main() -> anyhow::Result<()> {
 
     let mut bindings = bindgen::Builder::default()
         .header("wrapper.h")
-        .clang_args(php_includes.split_whitespace())
-        .clang_arg("-DZTS")
-        .layout_tests(true); // size/offset asserts
+        .clang_args(php_includes.split_whitespace());
+    if abi.zts {
+        bindings = bindings.clang_arg("-DZTS");
+    }
+
+    bindings = bindings.layout_tests(true); // size/offset asserts
 
     for binding in ALLOWED_BINDINGS {
         bindings = bindings

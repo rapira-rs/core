@@ -11,11 +11,11 @@ pub fn fixture(name: &str) -> PathBuf {
 
 /// Build a minimal `GET` request for `uri`, with `$_SERVER` metadata pointing at `fixture_name`.
 pub fn req(uri: &str, fixture_name: &str) -> Request {
-    let query = uri.splitn(2, '?').nth(1).unwrap_or("").to_string();
+    let query = uri.split_once('?').map(|x: (&str, &str)| x.1);
     Request {
         method: "GET".into(),
         uri: uri.into(),
-        query,
+        query: query.unwrap_or("").into(),
         protocol: "HTTP/1.1".into(),
         remote_addr: "127.0.0.1".into(),
         server_name: "localhost".into(),

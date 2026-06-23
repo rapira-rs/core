@@ -1,9 +1,9 @@
+use crate::{callbacks::send_error_head, *};
 use std::{cell::RefCell, path::PathBuf};
-
-use tokio::sync::mpsc;
 
 use crate::{
     TRACK_VARS_FILES, ZEND_RESULT_CODE_SUCCESS,
+    boot::JobRx,
     callbacks::guard,
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
@@ -19,26 +19,15 @@ thread_local! {
 }
 
 struct WorkerChan {
-    id: usize,
-    inbox: mpsc::Receiver<Job>,
-    idle: mpsc::UnboundedSender<usize>,
+    rx: JobRx,
     first_call: bool,
-    _wc_served: usize, // TODO: not used - use
 }
 
-pub fn rapira_worker(
-    id: usize,
-    script: PathBuf,
-    inbox: mpsc::Receiver<Job>,
-    idle: mpsc::UnboundedSender<usize>,
-) {
-    WORKER.with(|w| {
+pub fn rapira_worker(script: PathBuf, rx: JobRx) {
+    WORKER.with(|w: &RefCell<Option<WorkerChan>>| {
         *w.borrow_mut() = Some(WorkerChan {
-            id,
-            inbox,
-            idle,
+            rx,
             first_call: true,
-            _wc_served: 0,
         })
     });
 
@@ -53,80 +42,76 @@ pub fn rapira_worker(
     }
 }
 
+/// # Safety
+/// Invoked from C (the `rapira_handle_request` PHP function) once per worker-loop
+/// iteration. `fci` and `fcc` must be valid, non-null pointers produced by
+/// `Z_PARAM_FUNC` and remain valid for the call. Must run on the resident worker
+/// thread whose `WORKER` thread-local is initialized, inside its active request.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_handle_request(
     // Safety: not safe
     fci: *mut zend_fcall_info,
     fcc: *mut zend_fcall_info_cache,
 ) -> bool {
-    guard(false, || {
-        let next = WORKER.with(|w| {
-            let mut b = w.borrow_mut();
-            let wc: &mut WorkerChan = b.as_mut()?;
-            if std::mem::replace(&mut wc.first_call, false) {
-                unsafe {
-                    php_output_end_all();
-                    sapi_deactivate();
-                }
-            }
-            wc.idle.send(wc.id).ok()?;
-            wc.inbox.blocking_recv()
-        });
+    guard(false, || handle_request_impl(fci, fcc))
+}
 
-        let mut job: Job = match next {
-            Some(j) => j,
-            None => return false,
-        };
+fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> bool {
+    let next: Option<Job> = next_job();
+    let mut job: Job = match next {
+        Some(j) => j,
+        None => return false,
+    };
 
-        bind_server_context(&mut job.ctx);
-        unsafe {
-            populate_request_context(&mut job.ctx);
-            php_output_activate();
-            sapi_activate();
-            reset_super_globals();
-            zend_activate_auto_globals();
+    bind_server_context(&mut job.ctx);
+    unsafe {
+        populate_request_context(&mut job.ctx);
+        php_output_activate();
+        sapi_activate();
+        reset_super_globals();
+        zend_activate_auto_globals();
+        let outcome: types::Outcome = rapira_run_handler(fci, fcc);
+        if matches!(outcome, types::Outcome::Bailout | types::Outcome::Throw) {
+            send_error_head(&job.ctx, 500);
         }
-        unsafe {
-            // main.c:1967
-            // if ZEND_OBSERVER_ENABLED {
-            // zend_observer_fcall_begin(handler);
-            // }
-            // call_php_zval(handler);
-            // if (*rapira_pg()).modules_activated {
-            //     // php_call_shutdown_functions();
-            // }
-            // zend_call_destructors();
+        php_output_end_all();
+        php_output_deactivate();
+        sapi_deactivate();
+    }
+    unbind_server_context();
+    job.ctx.finish();
+    true
+}
 
-            let outcome = rapira_run_handler(fci, fcc);
-            let is_err = matches!(outcome, 1 /* BAILOUT */ | 3 /* THROW */);
-            if is_err
-                && !job.ctx.headers_sent
-                && let Some(tx) = &job.ctx.tx
-            {
-                let _ = tx.blocking_send(crate::types::Frame::Head(crate::types::ResponseHead {
-                    status: 500,
-                    headers: vec![],
-                }));
+fn next_job() -> Option<Job> {
+    WORKER.with_borrow_mut(|w: &mut Option<WorkerChan>| {
+        let wc = w.as_mut()?;
+        if std::mem::take(&mut wc.first_call) {
+            unsafe {
+                php_output_end_all();
+                sapi_deactivate();
             }
-            php_output_end_all();
-            php_output_deactivate();
-            sapi_deactivate();
         }
-        unbind_server_context();
-        job.ctx.finish();
-        true
+        // TODO: no unwrap, handle error
+        wc.rx.lock().unwrap().blocking_recv()
     })
 }
 
+/// # Safety
+/// Invoked from C (the `rapira_finish_request` PHP function). Must run on a worker
+/// thread inside an active request whose `Context` is bound in `SG(server_context)`;
+/// it flushes output and finishes the response stream.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_finish_request() {
     guard((), || {
         unsafe {
             php_output_end_all();
         }
-        if let Some(c) = ctx() {
-            c.finish();
-        }
+        unsafe {
+            if let Some(c) = ctx() {
+                c.finish();
+            }
+        };
     })
 }
 

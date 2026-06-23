@@ -53,6 +53,51 @@
         "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config",
         "RAPIRA_WORKER": "1"
       }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug tests -- ZTS",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "-p",
+          "integration-tests"
+        ],
+        "env": {
+          "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config",
+          "CARGO_TARGET_DIR": "${workspaceFolder}/target/zts"
+        }
+      },
+      "args": [],
+      "env": {
+        "LD_LIBRARY_PATH": "${env:HOME}/.local/php-zts/lib"
+      },
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug tests -- NTS",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "-p",
+          "integration-tests"
+        ],
+        "env": {
+          "PHP_CONFIG": "/usr/bin/php-config",
+          "CARGO_TARGET_DIR": "${workspaceFolder}/target/nts",
+          "RUSTFLAGS": "-L native=/usr/lib64"
+        }
+      },
+      "args": [],
+      "env": {
+        "LD_LIBRARY_PATH": "/usr/lib64"
+      },
+      "cwd": "${workspaceFolder}"
     }
   ]
 }

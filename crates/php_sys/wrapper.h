@@ -19,4 +19,5 @@ sapi_globals_struct *rapira_sg(void);
 zend_executor_globals *rapira_eg(void);
 php_core_globals *rapira_pg(void);
 zend_compiler_globals *rapira_cg(void);
+void rapira_init_call_stack(void);
 #endif

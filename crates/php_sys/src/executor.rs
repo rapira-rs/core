@@ -4,6 +4,11 @@ use crate::{
     php_execute_script, zend_destroy_file_handle, zend_file_handle, zend_stream_init_filename,
 };
 
+/// # Safety
+/// Must be called on a thread with an initialized PHP interpreter (a live
+/// `ts_resource`) inside an active request (between `php_request_startup` and
+/// `php_request_shutdown`). Executes arbitrary PHP via `php_execute_script` and may
+/// `zend_bailout`, so the caller must establish a `zend_try` boundary where required.
 pub unsafe fn run_script(script: &Path) {
     unsafe {
         let c_script: CString =

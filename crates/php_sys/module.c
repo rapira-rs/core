@@ -61,6 +61,7 @@ exit calls zend_buildin_functions.c:142, and
 2. zend_throw_unwind_exit asserts that EG(exception)
 */
 
+// in rust with repr[c]
 enum {
     OK = 0,
     BAILOUT = 1,
@@ -68,7 +69,7 @@ enum {
     THROW = 3,
 };
 
-bool rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
+int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     int outcome = OK;
     zval retval;
     ZVAL_UNDEF(&retval);

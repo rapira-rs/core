@@ -36,7 +36,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         input_filter: Some(php_default_input_filter),
         ini_defaults: None,
         phpinfo_as_text: 0,
-        ini_entries: null(),
+        ini_entries: c"max_execution_time=0\nmax_input_time=-1\n".as_ptr(),
         additional_functions: null(),
         input_filter_init: None,
         sapi_error: Some(zend_error),

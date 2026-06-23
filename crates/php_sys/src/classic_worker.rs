@@ -1,24 +1,16 @@
 use crate::{
+    boot::JobRx,
+    callbacks::send_error_head,
     context::{bind_server_context, populate_request_context, unbind_server_context},
     executor::run_script,
-    types::{Frame, Job, ResponseHead},
+    types::Job,
     *,
 };
-use tokio::sync::mpsc;
-pub(crate) fn classic_worker(
-    id: usize,
-    mut inbox: mpsc::Receiver<Job>,
-    idle: mpsc::UnboundedSender<usize>,
-) {
+pub(crate) fn classic_worker(rx: JobRx) {
     loop {
-        if idle.send(id).is_err() {
-            // todo: log error
-            break;
-        }
-
-        let Some(mut job) = inbox.blocking_recv() else {
-            break;
-        };
+        // TODO: no unwrap, handle error
+        let job = rx.lock().unwrap().blocking_recv();
+        let Some(mut job) = job else { break };
 
         classic_executor(&mut job);
     }
@@ -29,17 +21,13 @@ fn classic_executor(job: &mut Job) {
     unsafe {
         populate_request_context(&mut job.ctx);
         if php_request_startup() == ZEND_RESULT_CODE_FAILURE {
-            if let Some(tx) = &job.ctx.tx {
-                let _ = tx.blocking_send(Frame::Head(ResponseHead {
-                    status: 500,
-                    headers: vec![],
-                }));
-            }
+            send_error_head(&job.ctx, 500);
             php_request_shutdown(std::ptr::null_mut());
             unbind_server_context();
             job.ctx.finish();
             return;
         }
+
         run_script(&job.ctx.req.script_filename);
         php_request_shutdown(std::ptr::null_mut());
     }

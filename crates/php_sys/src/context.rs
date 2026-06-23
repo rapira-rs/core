@@ -1,7 +1,15 @@
 use crate::{types::Context, *};
-use std::{ffi::c_char, os::raw::c_void};
+use std::{
+    ffi::c_char,
+    os::raw::c_void,
+    ptr::{null, null_mut},
+};
 
-pub fn ctx<'a>() -> Option<&'a mut Context> {
+/// # Safety
+/// The returned `&mut` aliases PHP's per-thread `SG(server_context)`. It is sound only because each
+/// worker thread services exactly one request at a time (context is bound at request start, cleared
+/// at finish). Callers must not hold the reference across another `ctx()` call on the same thread.
+pub unsafe fn ctx<'a>() -> Option<&'a mut Context> {
     unsafe { ((*rapira_sg()).server_context as *mut Context).as_mut() }
 }
 
@@ -13,7 +21,7 @@ pub(crate) fn bind_server_context(ctx: &mut Context) {
 
 pub(crate) fn unbind_server_context() {
     unsafe {
-        (*rapira_sg()).server_context = std::ptr::null_mut();
+        (*rapira_sg()).server_context = null_mut();
     }
 }
 
@@ -23,11 +31,7 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     ri.query_string = ctx.c.query.as_ptr() as *mut c_char;
     ri.request_uri = ctx.c.uri.as_ptr() as *mut c_char;
     ri.path_translated = ctx.c.script.as_ptr() as *mut c_char;
-    ri.content_type = ctx
-        .c
-        .ctype
-        .as_ref()
-        .map_or(std::ptr::null(), |s| s.as_ptr());
+    ri.content_type = ctx.c.ctype.as_ref().map_or(null(), |s| s.as_ptr());
     ri.content_length = ctx.req.content_length;
     ri.proto_num = match ctx.req.protocol.as_str() {
         "HTTP/1.0" => 1000,
