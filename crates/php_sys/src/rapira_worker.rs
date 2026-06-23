@@ -36,7 +36,7 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) {
             run_script(&script); // blocks in while(rapira_handle_request)) in PHP
         }
 
-        if WORKER.with(|w| w.borrow().as_ref().is_some_and(|wc| wc.first_call)) {
+        if WORKER.with(|w| w.borrow().as_ref().is_some_and(|wc: &WorkerChan| wc.first_call)) {
             php_request_shutdown(std::ptr::null_mut());
         }
     }
