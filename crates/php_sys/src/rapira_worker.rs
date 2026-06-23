@@ -24,8 +24,8 @@ struct WorkerChan {
 }
 
 pub fn rapira_worker(script: PathBuf, rx: JobRx) {
-    WORKER.with(|w: &RefCell<Option<WorkerChan>>| {
-        *w.borrow_mut() = Some(WorkerChan {
+    WORKER.with_borrow_mut(|w| {
+        *w = Some(WorkerChan {
             rx,
             first_call: true,
         })
@@ -35,8 +35,10 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) {
         if php_request_startup() == ZEND_RESULT_CODE_SUCCESS {
             run_script(&script); // blocks in while(rapira_handle_request)) in PHP
         }
+    }
 
-        if WORKER.with(|w| w.borrow().as_ref().is_some_and(|wc: &WorkerChan| wc.first_call)) {
+    if WORKER.with_borrow(|w| w.as_ref().is_some_and(|wc: &WorkerChan| wc.first_call)) {
+        unsafe {
             php_request_shutdown(std::ptr::null_mut());
         }
     }
@@ -89,6 +91,7 @@ fn next_job() -> Option<Job> {
         if std::mem::take(&mut wc.first_call) {
             unsafe {
                 php_output_end_all();
+                php_output_deactivate();
                 sapi_deactivate();
             }
         }
