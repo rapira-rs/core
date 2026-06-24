@@ -2,7 +2,7 @@ use bytes::Bytes;
 use std::ffi::CString;
 use std::io::Read;
 use std::path::PathBuf;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -31,13 +31,16 @@ pub struct Job {
 pub struct Request {
     pub method: String,
     pub uri: String,
+    pub https: bool,
     pub query: String,
     pub protocol: String,
     pub remote_addr: String,
     pub server_name: String,
     pub server_port: String,
-    pub script_filename: PathBuf,
+    pub remote_port: String,
     pub script_name: String,
+    pub document_root: String,
+    pub script_filename: PathBuf,
     pub headers: Vec<(String, String)>,
     pub server_vars: Vec<(String, String)>,
     pub content_type: Option<String>,
@@ -57,6 +60,7 @@ pub struct ReqC {
     pub script: CString,
     pub ctype: Option<CString>,
     pub cookie: CString,
+    pub authorization: CString,
 }
 
 impl ReqC {
@@ -68,6 +72,13 @@ impl ReqC {
             .map(|(_, v)| v.clone())
             .unwrap_or_default();
 
+        let authorization: String = r
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+
         Self {
             method: CString::new(r.method.as_bytes()).unwrap_or_default(),
             query: CString::new((r.query).as_bytes()).unwrap_or_default(),
@@ -75,6 +86,7 @@ impl ReqC {
             script: CString::new(r.script_filename.to_string_lossy().to_string())
                 .unwrap_or_default(),
             cookie: CString::new(cookie.as_bytes()).unwrap_or_default(),
+            authorization: CString::new(authorization.as_bytes()).unwrap_or_default(),
             ctype: r
                 .content_type
                 .as_deref()
@@ -86,22 +98,22 @@ impl ReqC {
 pub struct Context {
     pub req: Request,
     pub c: ReqC,
-    pub tx: Option<mpsc::Sender<Frame>>,
+    pub sender: Option<Sender<Frame>>,
     pub headers_sent: bool,
 }
 
 impl Context {
-    pub fn new(req: Request, tx: mpsc::Sender<Frame>) -> Self {
+    pub fn new(req: Request, sender: Sender<Frame>) -> Self {
         let c = ReqC::build(&req);
         Self {
             req,
             c,
-            tx: Some(tx),
+            sender: Some(sender),
             headers_sent: false,
         }
     }
 
     pub fn finish(&mut self) {
-        self.tx = None;
+        self.sender = None;
     }
 }

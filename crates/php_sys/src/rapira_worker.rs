@@ -1,3 +1,5 @@
+use log::error;
+
 use crate::{callbacks::send_error_head, *};
 use std::{cell::RefCell, path::PathBuf};
 
@@ -7,11 +9,10 @@ use crate::{
     callbacks::guard,
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
-    php_output_activate, php_output_deactivate, php_output_end_all, php_request_shutdown,
-    php_request_startup, rapira_eg, rapira_pg, rapira_run_handler, sapi_activate, sapi_deactivate,
+    php_output_activate, php_output_end_all, php_request_shutdown, php_request_startup, rapira_eg,
+    rapira_pg, rapira_run_handler, sapi_activate,
     types::Job,
-    zend_activate_auto_globals, zend_fcall_info, zend_fcall_info_cache, zend_hash_str_del,
-    zval_ptr_dtor,
+    zend_fcall_info, zend_fcall_info_cache, zend_hash_str_del, zval_ptr_dtor,
 };
 
 thread_local! {
@@ -37,7 +38,7 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) {
         }
     }
 
-    if WORKER.with_borrow(|w| w.as_ref().is_some_and(|wc: &WorkerChan| wc.first_call)) {
+    if WORKER.with_borrow(|w: &Option<WorkerChan>| w.as_ref().is_some_and(|wc: &WorkerChan| wc.first_call)) {
         unsafe {
             php_request_shutdown(std::ptr::null_mut());
         }
@@ -71,15 +72,21 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         php_output_activate();
         sapi_activate();
         reset_super_globals();
-        zend_activate_auto_globals();
-        let outcome: types::Outcome = rapira_run_handler(fci, fcc);
-        if matches!(outcome, types::Outcome::Bailout | types::Outcome::Throw) {
+        rapira_activate_auto_globals();
+        let h_outcome: types::Outcome = rapira_run_handler(fci, fcc);
+        if matches!(h_outcome, types::Outcome::Bailout | types::Outcome::Throw) {
             send_error_head(&job.ctx, 500);
         }
-        php_output_end_all();
-        php_output_deactivate();
-        sapi_deactivate();
+        let t_outcome: types::Outcome = rapira_request_teardown();
+        if matches!(t_outcome, types::Outcome::Bailout) {
+            error!(
+                "[rapira] rapira_request_teardown() failed on first call {},{}",
+                job.ctx.req.method, job.ctx.req.uri
+            );
+        }
     }
+
+    log_and_clear_last_error();
     unbind_server_context();
     job.ctx.finish();
     true
@@ -90,11 +97,14 @@ fn next_job() -> Option<Job> {
         let wc = w.as_mut()?;
         if std::mem::take(&mut wc.first_call) {
             unsafe {
-                php_output_end_all();
-                php_output_deactivate();
-                sapi_deactivate();
+                let outcome: types::Outcome = rapira_request_teardown();
+                if matches!(outcome, types::Outcome::Bailout) {
+                    error!("[rapira] rapira_request_teardown() failed on first call");
+                }
             }
         }
+
+        log_and_clear_last_error();
         // TODO: no unwrap, handle error
         wc.rx.lock().unwrap().blocking_recv()
     })
@@ -125,5 +135,19 @@ unsafe fn reset_super_globals() {
         zval_ptr_dtor(files);
         *files = std::mem::zeroed();
         let _ = zend_hash_str_del(&mut (*rapira_eg()).symbol_table, c"_SESSION".as_ptr(), 8);
+    }
+}
+
+fn log_and_clear_last_error() {
+    unsafe {
+        if !(*rapira_pg()).last_error_message.is_null() {
+            let msg = std::ffi::CStr::from_ptr((*rapira_pg()).last_error_message as *const i8);
+            error!(
+                "[rapira] rapira_request_teardown() failed on first call: {}",
+                msg.to_string_lossy()
+            );
+            // null out the last error message
+            rapira_clear_last_error();
+        }
     }
 }

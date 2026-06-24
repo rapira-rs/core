@@ -8,8 +8,8 @@ use crate::{
 };
 pub(crate) fn classic_worker(rx: JobRx) {
     loop {
-        // TODO: no unwrap, handle error
-        let job = rx.lock().unwrap().blocking_recv();
+        // TODO: boom, unwrap
+        let job: Option<Job> = rx.lock().unwrap().blocking_recv();
         let Some(mut job) = job else { break };
 
         classic_executor(&mut job);

@@ -5,15 +5,15 @@ pub mod boot;
 pub mod callbacks;
 pub mod classic_worker;
 pub mod context;
-pub mod dispatcher;
 pub mod executor;
+pub mod handler;
 pub mod module;
 pub mod rapira_worker;
 pub mod types;
 
 pub use bindings::*;
 pub use boot::Rapira;
-pub use dispatcher::RapiraHandle;
+pub use handler::RapiraHandle;
 pub use types::{Context, Frame, Mode, Request, ResponseHead};
 
 pub const IS_ZTS: bool = cfg!(php_zts); // for tests
@@ -23,8 +23,10 @@ unsafe extern "C" {
     pub fn rapira_eg() -> *mut zend_executor_globals;
     pub fn rapira_pg() -> *mut php_core_globals;
     pub fn rapira_cg() -> *mut zend_compiler_globals;
-
     pub fn rapira_init_call_stack();
+    pub unsafe fn rapira_clear_last_error();
+    pub unsafe fn rapira_activate_auto_globals();
+    pub fn rapira_request_teardown() -> types::Outcome; //enum
 
     pub fn rapira_run_handler(
         fci: *mut zend_fcall_info,

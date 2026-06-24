@@ -13,15 +13,19 @@ pub struct RapiraHandle {
 }
 
 impl Rapira {
-    pub fn handle(&self) -> RapiraHandle {
-        RapiraHandle {
-            intake: self.intake.clone(),
-        }
+    pub fn handle(&self) -> anyhow::Result<RapiraHandle> {
+        let intake: &mpsc::Sender<Job> = self
+            .intake
+            .as_ref()
+            .ok_or_else(|| anyhow!("Rapira intake is None"))?;
+        Ok(RapiraHandle {
+            intake: intake.clone(),
+        })
     }
 }
 
 impl RapiraHandle {
-    pub async fn dispatch(&self, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
+    pub async fn handle(&self, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
         self.intake
             .send(Job {
@@ -32,7 +36,7 @@ impl RapiraHandle {
         Ok(rx)
     }
 
-    pub fn dispatch_blocking(&self, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
+    pub fn handle_blocking(&self, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
         self.intake
             .blocking_send(Job {

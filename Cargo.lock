@@ -90,6 +90,7 @@ name = "core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "php_sys",
  "tokio",
 ]
@@ -182,6 +183,7 @@ dependencies = [
  "bindgen",
  "bytes",
  "cc",
+ "log",
  "tokio",
 ]
 

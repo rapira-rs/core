@@ -1,6 +1,9 @@
 use php_sys::{Frame, Request};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use tokio::sync::mpsc;
+
+static PHP_LOCK: Mutex<()> = Mutex::new(());
 
 /// Absolute path to a PHP fixture shipped with this crate (robust to the test's cwd).
 pub fn fixture(name: &str) -> PathBuf {
@@ -9,10 +12,17 @@ pub fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+pub fn php_lock() -> std::sync::MutexGuard<'static, ()> {
+    PHP_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Build a minimal `GET` request for `uri`, with `$_SERVER` metadata pointing at `fixture_name`.
 pub fn req(uri: &str, fixture_name: &str) -> Request {
     let query = uri.split_once('?').map(|x: (&str, &str)| x.1);
     Request {
+        remote_port: "8080".into(),
+        document_root: String::new(),
+        https: false,
         method: "GET".into(),
         uri: uri.into(),
         query: query.unwrap_or("").into(),

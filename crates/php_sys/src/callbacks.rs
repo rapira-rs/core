@@ -78,7 +78,7 @@ pub(crate) unsafe extern "C" fn ub_write(buf: *const c_char, len: usize) -> usiz
             send_head(ctx);
         }
 
-        if let Some(tx) = &ctx.tx {
+        if let Some(tx) = &ctx.sender {
             let buf = unsafe { slice::from_raw_parts(buf as *const u8, len) };
             if tx
                 .blocking_send(Frame::Body(Bytes::copy_from_slice(buf)))
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
             .lines()
             .filter_map(|l: SapiHeader| l.name_value())
             .collect();
-        if let Some(tx) = &ctx.tx {
+        if let Some(tx) = &ctx.sender {
             let _ = tx.blocking_send(Frame::Head(ResponseHead {
                 status: h.status(),
                 headers,
@@ -166,6 +166,21 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             );
         };
         // mapping trust policy: https://www.php.net/manual/en/reserved.variables.server.php
+        put("PHP_SELF", &ctx.req.script_name);
+        let doc_uri = ctx
+            .req
+            .uri
+            .split_once('?')
+            .map_or(ctx.req.uri.as_str(), |(p, _)| p);
+        put("DOCUMENT_URI", doc_uri);
+        put("DOCUMENT_ROOT", &ctx.req.document_root);
+        put(
+            "REQUEST_SCHEME",
+            if ctx.req.https { "https" } else { "http" },
+        );
+        put("REMOTE_HOST", &ctx.req.remote_addr);
+        put("REMOTE_PORT", &ctx.req.remote_port);
+        put("REMOTE_IDENT", ""); // RFC 1413: "The REMOTE_IDENT variable is not set by default"
         put("REQUEST_METHOD", &ctx.req.method);
         put("REQUEST_URI", &ctx.req.uri);
         put("QUERY_STRING", &ctx.req.query);
@@ -179,6 +194,21 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put("SERVER_NAME", &ctx.req.server_name);
         put("SERVER_PORT", &ctx.req.server_port);
         put("REMOTE_ADDR", &ctx.req.remote_addr);
+
+        let auth_type = ctx
+            .req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .and_then(|(_, v)| v.split_whitespace().next())
+            .unwrap_or("");
+
+        put("AUTH_TYPE", auth_type);
+        let auth_user = unsafe { (*rapira_sg()).request_info.auth_user };
+        if !auth_user.is_null() {
+            let user = unsafe { std::ffi::CStr::from_ptr(auth_user as *const i8) };
+            put("REMOTE_USER", &user.to_string_lossy());
+        }
 
         if let Some(ct) = &ctx.req.content_type {
             put("CONTENT_TYPE", ct);
@@ -217,7 +247,7 @@ fn send_head(c: &mut Context) {
     }
     let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
 
-    if let Some(tx) = &c.tx {
+    if let Some(tx) = &c.sender {
         let _ = tx.blocking_send(Frame::Head(ResponseHead {
             status,
             headers: vec![],
@@ -231,7 +261,7 @@ pub(crate) fn send_error_head(c: &Context, status: u16) {
         return;
     }
 
-    if let Some(tx) = &c.tx {
+    if let Some(tx) = &c.sender {
         let _ = tx.blocking_send(Frame::Head(ResponseHead {
             status,
             headers: vec![],

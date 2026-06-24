@@ -1,8 +1,12 @@
+use log::{error, info, trace};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use types::Job;
+
+#[cfg(not(php_zts))]
+use log::warn;
 
 #[cfg(php_zts)]
 use std::os::raw::c_int;
@@ -38,25 +42,27 @@ impl Drop for PhpThread {
 }
 
 pub struct Rapira {
-    pub(crate) intake: Sender<Job>, // producer side
-    workers: Vec<JoinHandle<()>>,   // os threads: execute PHP scripts
+    pub(crate) intake: Option<Sender<Job>>, // producer side
+    workers: Vec<JoinHandle<()>>,           // os threads: execute PHP scripts
 }
 
 impl Rapira {
     pub fn boot(mode: Mode, req_threads: usize) -> anyhow::Result<Self> {
+        info!("[rapira] booting with mode: {mode:?}, threads: {req_threads}");
         // NTS: 1 thread only
         #[cfg(not(php_zts))]
         let num_threads: usize = {
             if req_threads > 1 {
-                eprintln!("[rapira] ZTS not enabled, only 1 thread will be used");
+                warn!("[rapira] ZTS not enabled, only 1 thread will be used");
             }
             1
         };
+
         #[cfg(php_zts)]
         let num_threads: usize = req_threads.max(1);
 
         let mut module: _sapi_module_struct = module::build_sapi_module();
-        let started = unsafe {
+        let started: bool = unsafe {
             #[cfg(php_zts)]
             php_tsrm_startup_ex(num_threads as c_int);
             sapi_startup(&mut module);
@@ -66,6 +72,7 @@ impl Rapira {
         };
 
         if !started {
+            error!("[rapira] php_module_startup failed, shutting down");
             unsafe {
                 sapi_shutdown();
                 #[cfg(php_zts)]
@@ -81,16 +88,27 @@ impl Rapira {
         let workers: Vec<JoinHandle<()>> = (0..num_threads)
             .map(|_| {
                 let (rx, mode) = (rx.clone(), mode.clone());
+                trace!("[rapira] spawning worker thread");
                 thread::spawn(move || worker_main(mode, rx))
             })
             .collect();
 
-        Ok(Self { intake, workers })
+        Ok(Self {
+            intake: Some(intake),
+            workers,
+        })
     }
 
     pub fn shutdown(self) {
-        drop(self.intake); // intake closes -> dispatcher loop ends
-        for w in self.workers {
+        info!("[rapira] shutdown in noop, deinitialize in Drop");
+    }
+}
+
+impl Drop for Rapira {
+    fn drop(&mut self) {
+        info!("[rapira] shutting down, dropping");
+        self.intake = None;
+        for w in std::mem::take(&mut self.workers) {
             let _ = w.join();
         }
         unsafe {

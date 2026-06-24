@@ -5,12 +5,13 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-anyhow = "1.0.102"
-tokio = { version = "1.52", features = ["sync"] }
-bytes = "1.11.1"
+anyhow = { workspace = true }
+log = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["sync"] }
+bytes = { workspace = true }
 
 [build-dependencies]
-anyhow = "1.0.102"
+anyhow = { workspace = true }
 bindgen = "0.72.1"
 cc = "1.2.64"
 

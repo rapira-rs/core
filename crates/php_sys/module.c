@@ -111,5 +111,173 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     }
 
     php_free_shutdown_functions();
+    gc_protect(0); // reset gc_protect to 0, in case _zend_bailout left it at 1
     return outcome;
+}
+
+// per-request sapi teardown, returns 1 if any of the methods bailed out,
+// 0 otherwise.
+// main/main.c:1985,2002,2031 (source)
+int rapira_request_teardown(void) {
+    int bailed = OK;
+
+    zend_try { php_output_end_all(); }
+    zend_catch { bailed = BAILOUT; }
+    zend_end_try();
+
+    zend_try { php_output_deactivate(); }
+    zend_catch { bailed = BAILOUT; }
+    zend_end_try();
+
+    zend_try { sapi_deactivate(); }
+    zend_catch { bailed = BAILOUT; }
+    zend_end_try();
+
+    if (bailed == BAILOUT) {
+        // _zend_bailout left gc_protect(1), so all calls to gc_collect_cycles
+        // becomes a permanent no-op
+        // source: zend.c: 1263
+        // if (!EG(bailout)) {
+        //     zend_output_debug_string(
+        //         1, "%s(%d) : Bailed out without a bailout address!",
+        //         filename, lineno);
+        //     exit(-1);
+        // }
+        // gc_protect(1); <-------------- boooooooom
+        // CG(unclean_shutdown) = 1;
+        // CG(active_class_entry) = NULL;
+        // CG(in_compilation) = 0;
+        // CG(memoize_mode) = 0;
+        // EG(current_execute_data) = NULL;
+        // LONGJMP(*EG(bailout), FAILURE);
+        gc_protect(1);
+    }
+
+    return bailed;
+}
+
+// clears the last error
+// main.c: 2099
+// static void core_globals_dtor(php_core_globals *core_globals)
+// {
+// 	/* These should have been freed earlier. */
+// 	ZEND_ASSERT(!core_globals->last_error_message); <---- will fire if not
+// consumed
+
+// 	ZEND_ASSERT(!core_globals->last_error_file);
+
+// 	if (core_globals->php_binary) {
+// 		free(core_globals->php_binary);
+// 	}
+
+// 	php_shutdown_ticks(core_globals);
+// }
+
+// basic_functions: 1449
+/* {{{ Clear the last occurred error. */
+// PHP_FUNCTION(error_clear_last)
+// {
+// 	ZEND_PARSE_PARAMETERS_NONE();
+
+// 	if (PG(last_error_message)) {
+// 		PG(last_error_type) = 0;
+// 		PG(last_error_lineno) = 0;
+
+// 		zend_string_release(PG(last_error_message));
+// 		PG(last_error_message) = NULL;
+
+// 		if (PG(last_error_file)) {
+// 			zend_string_release(PG(last_error_file));
+// 			PG(last_error_file) = NULL;
+// 		}
+// 	}
+
+// 	zval_ptr_dtor(&EG(last_fatal_error_backtrace));
+// 	ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
+// }
+void rapira_clear_last_error(void) {
+    if (PG(last_error_message)) {
+        PG(last_error_type) = 0;
+        PG(last_error_lineno) = 0;
+        zend_string_release(PG(last_error_message));
+        PG(last_error_message) = NULL;
+
+        if (PG(last_error_file)) {
+            zend_string_release(PG(last_error_file));
+            PG(last_error_file) = NULL;
+        }
+    }
+}
+
+// all superglobals are registered as a zend_auto_global in the CG(auto_globals)
+// typedef bool (*zend_auto_global_callback)(zend_string *name);
+// typedef struct _zend_auto_global {
+// 	zend_string *name;
+// 	zend_auto_global_callback auto_global_callback;
+// 	bool jit;
+// 	bool armed; <-- means, that superglobal is still needs to be build
+// (true) or not (false)
+// } zend_auto_global;
+
+// ^ this is the struct that holds the superglobals
+//
+void rapira_activate_auto_globals(void) {
+    zend_auto_global *auto_global;
+    // 	_(ZEND_STR_AUTOGLOBAL_ENV,  "_ENV")
+    zend_string *_env = ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV);
+
+    // re-arm all = true for all superglobals, to be rebuilt
+    ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
+        auto_global->armed =
+            // jit here is bool
+            // auto_global_callback is a function pointer, which returns bool
+            auto_global->jit || auto_global->auto_global_callback;
+    }
+    ZEND_HASH_FOREACH_END();
+
+    // build only the non-jit once, leave jit armed, but not built
+    // because jit once will be set when script compiles in zend_is_auto_global
+    // zend_compile.c:2887,7798,8063,8098
+    // if (zend_is_auto_global(name)) {
+    // 	return FAILURE;
+    // }
+    // ----------
+    // if (zend_is_auto_global(name)) {
+    // 	zend_error_noreturn(E_COMPILE_ERROR, "Cannot re-assign auto-global
+    // variable %s", 		ZSTR_VAL(name));
+    // }
+    ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
+        // we leave $_ENV off, because it is not a real superglobal, and is
+        // built by the auto_global_callback for $_SERVER, which is always built
+        // (need to double check this)
+        if (auto_global->name == _env) {
+            // resule/explicit use will rebuild it, so we don't need to build it
+            // here
+            continue;
+        }
+        if (auto_global->auto_global_callback) {
+            auto_global->armed =
+                // static bool php_auto_globals_create_get(zend_string *name)
+                // for example, how this works
+                // _GET is a pointer to php_auto_globals_create_get
+                // (php_variables.c: 799)
+                // static bool php_auto_globals_create_get(zend_string *name)
+                // {
+                //     if (PG(variables_order) &&
+                //     (strchr(PG(variables_order),'G') || ...)) {
+                //         sapi_module.treat_data(PARSE_GET, NULL, NULL);
+                //     } else {
+                //         zval_ptr_dtor_nogc(&PG(http_globals)[TRACK_VARS_GET]);
+                //         array_init(&PG(http_globals)[TRACK_VARS_GET]);
+                //     }
+                //     zend_hash_update(&EG(symbol_table),
+                //     &PG(http_globals)[TRACK_VARS_GET]);
+                //     Z_ADDREF(PG(http_globals)[TRACK_VARS_GET]); // <- ref
+                //     counter
+                //    return false; <-- means - don't rearm
+                // }
+                auto_global->auto_global_callback(auto_global->name);
+        }
+    }
+    ZEND_HASH_FOREACH_END();
 }
