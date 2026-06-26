@@ -24,8 +24,8 @@ struct PhpThread;
 
 impl PhpThread {
     pub(crate) fn new() -> Self {
+        #[cfg(php_zts)]
         unsafe {
-            #[cfg(php_zts)]
             ts_resource_ex(0, null_mut());
         }
         Self
@@ -34,8 +34,8 @@ impl PhpThread {
 
 impl Drop for PhpThread {
     fn drop(&mut self) {
+        #[cfg(php_zts)]
         unsafe {
-            #[cfg(php_zts)]
             ts_free_thread();
         }
     }
