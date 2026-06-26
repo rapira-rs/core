@@ -1,7 +1,7 @@
 use log::error;
 
 use crate::{callbacks::send_error_head, *};
-use std::{cell::RefCell, path::PathBuf};
+use std::{cell::RefCell, os::raw::c_char, path::PathBuf};
 
 use crate::{
     TRACK_VARS_FILES, ZEND_RESULT_CODE_SUCCESS,
@@ -38,7 +38,9 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) {
         }
     }
 
-    if WORKER.with_borrow(|w: &Option<WorkerChan>| w.as_ref().is_some_and(|wc: &WorkerChan| wc.first_call)) {
+    if WORKER.with_borrow(|w: &Option<WorkerChan>| {
+        w.as_ref().is_some_and(|wc: &WorkerChan| wc.first_call)
+    }) {
         unsafe {
             php_request_shutdown(std::ptr::null_mut());
         }
@@ -60,10 +62,8 @@ pub unsafe extern "C" fn rapira_rs_handle_request(
 }
 
 fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> bool {
-    let next: Option<Job> = next_job();
-    let mut job: Job = match next {
-        Some(j) => j,
-        None => return false,
+    let Some(mut job) = next_job() else {
+        return false;
     };
 
     bind_server_context(&mut job.ctx);
@@ -141,7 +141,7 @@ unsafe fn reset_super_globals() {
 fn log_and_clear_last_error() {
     unsafe {
         if !(*rapira_pg()).last_error_message.is_null() {
-            let msg = std::ffi::CStr::from_ptr((*rapira_pg()).last_error_message as *const i8);
+            let msg = std::ffi::CStr::from_ptr((*rapira_pg()).last_error_message as *const c_char);
             error!(
                 "[rapira] rapira_request_teardown() failed on first call: {}",
                 msg.to_string_lossy()

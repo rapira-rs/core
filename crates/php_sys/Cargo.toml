@@ -3,6 +3,10 @@ name = "php_sys"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow = { workspace = true }

@@ -2,6 +2,8 @@
 name = "core"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+
 
 [workspace]
 members = ["crates/*"]
@@ -13,6 +15,11 @@ php_sys = { path = "crates/php_sys" }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 
+[workspace.package]
+rust-version = "1.96"
+
+[workspace.lints.clippy]
+all = "warn"
 
 [dependencies]
 anyhow = { workspace = true }

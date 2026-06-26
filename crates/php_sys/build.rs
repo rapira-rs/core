@@ -107,13 +107,11 @@ fn php_config(arg: &str) -> anyhow::Result<String> {
     let out = Command::new(&bin)
         .arg(arg)
         .output()
-        .with_context(|| format!("running {} {}", bin, arg))?;
+        .with_context(|| format!("running {bin} {arg}"))?;
 
     anyhow::ensure!(
         out.status.success(),
-        "{} {} failed: {}",
-        bin,
-        arg,
+        "{bin} {arg} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 

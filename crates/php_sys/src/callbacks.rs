@@ -206,7 +206,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put("AUTH_TYPE", auth_type);
         let auth_user = unsafe { (*rapira_sg()).request_info.auth_user };
         if !auth_user.is_null() {
-            let user = unsafe { std::ffi::CStr::from_ptr(auth_user as *const i8) };
+            let user = unsafe { std::ffi::CStr::from_ptr(auth_user as *const c_char) };
             put("REMOTE_USER", &user.to_string_lossy());
         }
 

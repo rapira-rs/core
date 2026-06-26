@@ -1,0 +1,70 @@
+name: CI (ZTS + debug, php-src master)
+on:
+    push: { branches: [main] }
+    pull_request:
+    workflow_dispatch:
+    schedule: [{ cron: "0 6 * * *" }]
+permissions:
+    contents: read
+
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        env:
+            PHP_PREFIX: ${{ github.workspace }}/.php-zts-debug
+        steps:
+            - uses: actions/checkout@v4
+              with: { persist-credentials: false }
+
+            - name: Install build deps (php-src from git + bindgen/cc)
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends \
+                    build-essential pkg-config curl git autoconf bison re2c \
+                    libclang-dev llvm-dev
+
+            - name: Resolve php-src master commit
+              id: phpsrc
+              run: echo "sha=$(git ls-remote https://github.com/php/php-src.git master | cut -f1)" >> "$GITHUB_OUTPUT"
+
+            - name: Cache ZTS+debug PHP (embed SAPI)
+              id: php
+              uses: actions/cache@v4
+              with:
+                  path: ${{ env.PHP_PREFIX }}
+                  key: php-zts-debug-${{ runner.os }}-${{ steps.phpsrc.outputs.sha }}-embed-nosignals-v1
+
+            - name: Build ZTS+debug PHP (embed SAPI) from php-src master
+              if: steps.php.outputs.cache-hit != 'true'
+              run: |
+                  git clone --depth 1 --branch master https://github.com/php/php-src.git
+                  cd php-src
+                  ./buildconf --force
+                  ./configure \
+                    --prefix="${PHP_PREFIX}" \
+                    --enable-zts \
+                    --enable-debug \
+                    --enable-embed=shared \
+                    --disable-zend-signals \
+                    --disable-all --disable-cgi --without-pear
+                  make -j"$(nproc)"
+                  make install
+
+            - name: Expose PHP to build + tests
+              run: |
+                  echo "${PHP_PREFIX}/bin" >> "$GITHUB_PATH"
+                  echo "LD_LIBRARY_PATH=${PHP_PREFIX}/lib" >> "$GITHUB_ENV"
+
+            - name: Sanity-check PHP is ZTS + debug + embed
+              run: |
+                  php -r 'exit(PHP_ZTS === 1 ? 0 : 1);'
+                  php -i | grep -q 'Debug Build => yes'
+                  test -f "${PHP_PREFIX}/lib/libphp.so"
+
+            - uses: dtolnay/rust-toolchain@stable
+              with: { components: clippy }
+            - uses: Swatinem/rust-cache@v2
+
+            - run: cargo clippy --workspace --all-targets -- -D warnings
+            - run: cargo build --workspace
+            - run: cargo test --workspace

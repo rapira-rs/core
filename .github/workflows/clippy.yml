@@ -1,0 +1,48 @@
+name: Lint
+on:
+    push: { branches: [main] }
+    pull_request:
+permissions:
+    contents: read
+
+jobs:
+    fmt:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with: { persist-credentials: false }
+            - uses: dtolnay/rust-toolchain@stable
+              with: { components: rustfmt }
+            - run: cargo fmt --all --check
+
+    clippy:
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                phpts: [ts, nts]
+        steps:
+            - uses: actions/checkout@v4
+              with: { persist-credentials: false }
+
+            - uses: shivammathur/setup-php@v2
+              with:
+                  php-version: "8.5"
+              env:
+                  phpts: ${{ matrix.phpts }}
+
+            - name: Build deps for bindgen/cc
+              run: sudo apt-get update && sudo apt-get install -y --no-install-recommends buiang-dev
+
+            - name: Expose embed lib if present (clippy doesn't link, but keeps the linker pa
+              run: |
+                  LIBPHP=$(find "$(php-config --prefix)" /usr/lib -name 'libphp*.so' 2>/dev/nul
+                  if [ -n "$LIBPHP" ]; then
+                    echo "LD_LIBRARY_PATH=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
+                    echo "RUSTFLAGS=-L native=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
+                  fi
+
+            - uses: dtolnay/rust-toolchain@stable
+              with: { components: clippy }
+            - uses: Swatinem/rust-cache@v2
+            - run: cargo clippy --workspace --all-targets -- -D warnings

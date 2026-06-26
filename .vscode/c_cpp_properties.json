@@ -1,23 +1,24 @@
 {
-  "version": 4,
-  "configurations": [
-    {
-      "name": "php-zts",
-      "includePath": [
-        "${workspaceFolder}/**",
-        "${env:HOME}/.local/php-zts/include/php",
-        "${env:HOME}/.local/php-zts/include/php/main",
-        "${env:HOME}/.local/php-zts/include/php/TSRM",
-        "${env:HOME}/.local/php-zts/include/php/Zend",
-        "${env:HOME}/.local/php-zts/include/php/ext",
-        "${env:HOME}/.local/php-zts/include/php/ext/date/lib"
-      ],
-      "defines": [
-        "ZTS=1"
-      ],
-      "compilerPath": "/usr/bin/clang",
-      "cStandard": "c17",
-      "intelliSenseMode": "linux-clang-x64"
-    }
-  ]
+    "version": 4,
+    "configurations": [
+        {
+            "name": "php-zts",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${env:HOME}/.local/php-zts/include/php",
+                "${env:HOME}/.local/php-zts/include/php/main",
+                "${env:HOME}/.local/php-zts/include/php/TSRM",
+                "${env:HOME}/.local/php-zts/include/php/Zend",
+                "${env:HOME}/.local/php-zts/include/php/ext",
+                "${env:HOME}/.local/php-zts/include/php/ext/date/lib"
+            ],
+            "defines": [
+                "ZTS=1"
+            ],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c23",
+            "intelliSenseMode": "linux-clang-x64",
+            "cppStandard": "c++20"
+        }
+    ]
 }
