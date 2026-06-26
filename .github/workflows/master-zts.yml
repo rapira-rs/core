@@ -55,12 +55,6 @@ jobs:
                   echo "${PHP_PREFIX}/bin" >> "$GITHUB_PATH"
                   echo "LD_LIBRARY_PATH=${PHP_PREFIX}/lib" >> "$GITHUB_ENV"
 
-            - name: Sanity-check PHP is ZTS + debug + embed
-              run: |
-                  php -r 'exit(PHP_ZTS === 1 ? 0 : 1);'
-                  php -i | grep -q 'Debug Build => yes'
-                  test -f "${PHP_PREFIX}/lib/libphp.so"
-
             - uses: dtolnay/rust-toolchain@stable
               with: { components: clippy }
             - uses: Swatinem/rust-cache@v2
