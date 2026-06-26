@@ -18,6 +18,10 @@ pub use types::{Context, Frame, Mode, Request, ResponseHead};
 
 pub const IS_ZTS: bool = cfg!(php_zts); // for tests
 
+// Zend status codes, which are different on master and 8.5 for example.
+pub const SUCCESS: core::ffi::c_int = 0;
+pub const FAILURE: core::ffi::c_int = -1;
+
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;
     pub fn rapira_eg() -> *mut zend_executor_globals;

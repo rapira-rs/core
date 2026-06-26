@@ -4,7 +4,7 @@ use crate::{callbacks::send_error_head, *};
 use std::{cell::RefCell, os::raw::c_char, path::PathBuf};
 
 use crate::{
-    TRACK_VARS_FILES, ZEND_RESULT_CODE_SUCCESS,
+    TRACK_VARS_FILES,
     boot::JobRx,
     callbacks::guard,
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
@@ -25,7 +25,7 @@ struct WorkerChan {
 }
 
 pub fn rapira_worker(script: PathBuf, rx: JobRx) {
-    WORKER.with_borrow_mut(|w| {
+    WORKER.with_borrow_mut(|w: &mut Option<WorkerChan>| {
         *w = Some(WorkerChan {
             rx,
             first_call: true,
@@ -33,7 +33,7 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) {
     });
 
     unsafe {
-        if php_request_startup() == ZEND_RESULT_CODE_SUCCESS {
+        if php_request_startup() == SUCCESS {
             run_script(&script); // blocks in while(rapira_handle_request)) in PHP
         }
     }

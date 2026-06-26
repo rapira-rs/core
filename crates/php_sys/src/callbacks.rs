@@ -60,11 +60,11 @@ pub(crate) unsafe extern "C" fn sapi_shutdown_cb(_sapi_module: *mut sapi_module_
     unsafe {
         php_module_shutdown();
     }
-    ZEND_RESULT_CODE_SUCCESS
+    SUCCESS
 }
 
 pub(crate) unsafe extern "C" fn sapi_deactivate_cb() -> c_int {
-    ZEND_RESULT_CODE_SUCCESS
+    SUCCESS
 }
 
 pub(crate) unsafe extern "C" fn ub_write(buf: *const c_char, len: usize) -> usize {

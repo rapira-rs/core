@@ -68,7 +68,7 @@ impl Rapira {
             sapi_startup(&mut module);
             module
                 .startup
-                .is_some_and(|start| start(&mut module) == ZEND_RESULT_CODE_SUCCESS)
+                .is_some_and(|start| start(&mut module) == SUCCESS)
         };
 
         if !started {

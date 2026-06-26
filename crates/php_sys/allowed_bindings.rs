@@ -4,7 +4,7 @@ bind! {
     sapi_globals_struct, zend_executor_globals, php_core_globals, zend_compiler_globals,
     zend_llist, zend_llist_element, zend_file_handle, zend_module_entry, zend_function_entry,
     zend_execute_data, zend_auto_global, zend_string, zval, HashTable, zend_array, zend_long,
-    zend_fcall_info, zend_fcall_info_cache, ZEND_RESULT_CODE,
+    zend_fcall_info, zend_fcall_info_cache,
     // functions
     sapi_startup, sapi_shutdown, sapi_activate, sapi_deactivate,
     php_module_startup, php_module_shutdown, php_request_startup, php_request_shutdown,

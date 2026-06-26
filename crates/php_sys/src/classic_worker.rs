@@ -20,7 +20,7 @@ fn classic_executor(job: &mut Job) {
     bind_server_context(&mut job.ctx);
     unsafe {
         populate_request_context(&mut job.ctx);
-        if php_request_startup() == ZEND_RESULT_CODE_FAILURE {
+        if php_request_startup() == FAILURE {
             send_error_head(&job.ctx, 500);
             php_request_shutdown(std::ptr::null_mut());
             unbind_server_context();
