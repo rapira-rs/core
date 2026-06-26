@@ -32,11 +32,11 @@ jobs:
                   phpts: ${{ matrix.phpts }}
 
             - name: Build deps for bindgen/cc
-              run: sudo apt-get update && sudo apt-get install -y --no-install-recommends buiang-dev
+              run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
 
-            - name: Expose embed lib if present (clippy doesn't link, but keeps the linker pa
+            - name: Expose embed lib if present (clippy doesn't link, but keeps the linker path set)
               run: |
-                  LIBPHP=$(find "$(php-config --prefix)" /usr/lib -name 'libphp*.so' 2>/dev/nul
+                  LIBPHP=$(find "$(php-config --prefix)" /usr/lib -name 'libphp*.so' 2>/dev/null | head -1)
                   if [ -n "$LIBPHP" ]; then
                     echo "LD_LIBRARY_PATH=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
                     echo "RUSTFLAGS=-L native=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
