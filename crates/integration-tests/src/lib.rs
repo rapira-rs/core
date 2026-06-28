@@ -4,6 +4,10 @@ use std::sync::{Mutex, PoisonError};
 use tokio::sync::mpsc;
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
+static PHP_ENV: std::sync::Once = std::sync::Once::new();
+// async sibling of PHP_LOCK for the #[tokio::test] suite — a std guard held across
+// .await trips clippy::await_holding_lock, so the async tests serialize on a tokio mutex.
+static PHP_LOCK_ASYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Absolute path to a PHP fixture shipped with this crate (robust to the test's cwd).
 pub fn fixture(name: &str) -> PathBuf {
@@ -13,6 +17,7 @@ pub fn fixture(name: &str) -> PathBuf {
 }
 
 pub fn php_lock() -> std::sync::MutexGuard<'static, ()> {
+    init_php_env();
     PHP_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -52,12 +57,9 @@ pub fn drain(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
     (status, String::from_utf8_lossy(&body).into_owned())
 }
 
-// async sibling of PHP_LOCK for the #[tokio::test] suite — a std guard held across
-// .await trips clippy::await_holding_lock, so the async tests serialize on a tokio mutex.
-static PHP_LOCK_ASYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 /// Async sibling of `php_lock` for `#[tokio::test]`.
 pub async fn php_lock_async() -> tokio::sync::MutexGuard<'static, ()> {
+    init_php_env();
     PHP_LOCK_ASYNC.lock().await
 }
 
@@ -71,4 +73,24 @@ pub async fn drain_async(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
         }
     }
     (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Point the embedded PHP at the test php.ini so request-level compile/fatal errors
+/// render into the response body. CI's php.ini-production defaults display_errors
+/// off, which routes the error to the log and leaves the body empty (failboot_classic).
+/// PHPRC replaces the ambient php.ini; the suite uses only core/standard, so nothing
+/// is dropped. Runs once, before the first Rapira::start in the process.
+fn init_php_env() {
+    PHP_ENV.call_once(|| {
+        // SAFETY: the Once runs this exactly once, before any Rapira::start /
+        // php_module_startup; mirrors the existing `unsafe { set_var }` usage in the
+        // test bodies (e.g. getenv_classic, basic_tests.rs).
+        unsafe {
+            std::env::set_var(
+                // https://www.php.net/manual/en/configuration.file.php
+                "PHPRC",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/php.ini"),
+            );
+        }
+    });
 }
