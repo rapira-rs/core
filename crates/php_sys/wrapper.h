@@ -14,6 +14,9 @@
 #include <main/php_output.h>
 #include <main/php_variables.h>
 // clang-format on
+#ifdef HAVE_PHP_SESSION
+#include <ext/session/php_session.h>
+#endif
 
 sapi_globals_struct *rapira_sg(void);
 zend_executor_globals *rapira_eg(void);

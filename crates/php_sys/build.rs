@@ -20,6 +20,7 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-link-lib=dylib=php");
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=PHP_CONFIG");
+    println!("cargo:rerun-if-env-changed=RAPIRA_ALLOWED_BINDINGS");
 
     let abi = detect_php_abi()?;
 
@@ -97,7 +98,7 @@ fn detect_debug(php_binary: &str) -> anyhow::Result<bool> {
 
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
-        .find_map(|l| l.split("Debug Build -> ").nth(1))
+        .find_map(|l| l.split("Debug Build => ").nth(1))
         .map(|v| v.trim() == "yes")
         .unwrap_or(false))
 }

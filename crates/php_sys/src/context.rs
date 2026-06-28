@@ -1,4 +1,4 @@
-use crate::{types::Context, *};
+use crate::{callbacks::guard, types::Context, *};
 use std::{
     ffi::c_char,
     os::raw::c_void,
@@ -11,6 +11,15 @@ use std::{
 /// at finish). Callers must not hold the reference across another `ctx()` call on the same thread.
 pub unsafe fn ctx<'a>() -> Option<&'a mut Context> {
     unsafe { ((*rapira_sg()).server_context as *mut Context).as_mut() }
+}
+
+/// Run `f` with the request's bound `Context`, guarded against unwind.
+/// Returns `default` on panic or when no context is bound.
+pub fn with_ctx<T: Copy>(default: T, f: impl FnOnce(&mut Context) -> T) -> T {
+    guard(default, move || match unsafe { ctx() } {
+        Some(ctx) => f(ctx),
+        None => default,
+    })
 }
 
 pub(crate) fn bind_server_context(ctx: &mut Context) {

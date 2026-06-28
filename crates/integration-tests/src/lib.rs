@@ -1,10 +1,12 @@
+use log;
 use php_sys::{Frame, Request};
+use std::env::set_var;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{self, Mutex, Once, PoisonError};
 use tokio::sync::mpsc;
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
-static PHP_ENV: std::sync::Once = std::sync::Once::new();
+static PHP_ENV: Once = Once::new();
 // async sibling of PHP_LOCK for the #[tokio::test] suite — a std guard held across
 // .await trips clippy::await_holding_lock, so the async tests serialize on a tokio mutex.
 static PHP_LOCK_ASYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -16,7 +18,7 @@ pub fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-pub fn php_lock() -> std::sync::MutexGuard<'static, ()> {
+pub fn php_lock() -> sync::MutexGuard<'static, ()> {
     init_php_env();
     PHP_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -86,11 +88,35 @@ fn init_php_env() {
         // php_module_startup; mirrors the existing `unsafe { set_var }` usage in the
         // test bodies (e.g. getenv_classic, basic_tests.rs).
         unsafe {
-            std::env::set_var(
+            set_var(
                 // https://www.php.net/manual/en/configuration.file.php
                 "PHPRC",
                 concat!(env!("CARGO_MANIFEST_DIR"), "/tests/php.ini"),
             );
         }
+    });
+}
+
+pub static LOG_CAPTURE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+struct CaptureLogger;
+impl log::Log for CaptureLogger {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record) {
+        if let Ok(mut buf) = LOG_CAPTURE.lock() {
+            buf.push(record.args().to_string());
+        }
+    }
+    fn flush(&self) {}
+}
+
+/// Install the capturing logger once (records all `log` output into `LOG_CAPTURE`).
+pub fn init_log_capture() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = log::set_boxed_logger(Box::new(CaptureLogger));
+        log::set_max_level(log::LevelFilter::Info);
     });
 }

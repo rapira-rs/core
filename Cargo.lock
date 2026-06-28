@@ -122,6 +122,7 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "php_sys",
  "tokio",
 ]

@@ -1,4 +1,4 @@
-use crate::context::ctx;
+use crate::context::{ctx, with_ctx};
 use crate::types::{Context, Frame, ResponseHead};
 use crate::*;
 use bytes::Bytes;
@@ -71,7 +71,11 @@ pub(crate) unsafe extern "C" fn sapi_deactivate_cb() -> c_int {
 pub(crate) unsafe extern "C" fn ub_write(buf: *const c_char, len: usize) -> usize {
     guard(0, || {
         let ctx = unsafe {
-            let Some(c) = ctx() else { return len };
+            let Some(c) = ctx() else {
+                let data = slice::from_raw_parts(buf as *const u8, len);
+                log::info!(target: "php", "{}", String::from_utf8_lossy(data));
+                return len;
+            };
             c
         };
 
@@ -102,7 +106,16 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
     guard(SAPI_HEADER_SEND_FAILED as c_int, || {
         let ctx = unsafe {
             let Some(ctx) = ctx() else {
-                return SAPI_HEADER_SEND_FAILED as c_int;
+                // the problem here, is that if we don't send
+                // SAPI_HEADER_SENT_SUCCESSFULLY, PHP will not cann ub_write
+                // so send this status to allow in bootstrap to use the ub_write
+                // php_output_header called first
+                // then we have a gate:
+                // if (context.out.data && context.out.used) {
+                //     php_output_header(); <-- our handler (this)
+                //     if (!(OG(flags) & PHP_OUTPUT_DISABLED)) { <-- if we sent failed
+                //         sapi_module.ub_write(...); <-- boom, we don't call ub_write when ctx is null
+                return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
             };
             ctx
         };
@@ -128,34 +141,26 @@ pub(crate) unsafe extern "C" fn flush(_sc: *mut c_void) {
 }
 
 pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usize {
-    guard(0, || {
-        let ctx = unsafe {
-            let Some(ctx) = ctx() else { return 0 };
-            ctx
-        };
-
+    with_ctx(0, |ctx| {
         let dst = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, count) };
-        ctx.req.body.read(dst).unwrap_or(0)
+        loop {
+            match ctx.req.body.read(dst) {
+                Ok(n) => return n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return 0,
+            }
+        }
     })
 }
 
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
-    unsafe {
-        guard(null_mut(), || match ctx() {
-            Some(ctx) => {
-                ctx.c.cookie.as_ptr() as *mut c_char // we own the buffer
-            }
-            None => null_mut(),
-        })
-    }
+    with_ctx(null_mut(), |ctx| {
+        ctx.c.cookie.as_ptr() as *mut c_char // we own the buffer
+    })
 }
 
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
-    guard((), || {
-        let ctx = unsafe {
-            let Some(ctx) = ctx() else { return };
-            ctx
-        };
+    with_ctx((), |ctx| {
         let put = |name: &str, val: &str| unsafe {
             let n = CString::new(name).unwrap_or_default();
             let v = CString::new(val).unwrap_or_default();
@@ -231,16 +236,12 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
 }
 
 pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) -> *mut c_char {
-    guard(null_mut(), || {
+    with_ctx(null_mut(), |ctx| {
         if name.is_null() {
             return null_mut();
         }
 
         let key = unsafe { slice::from_raw_parts(name as *const u8, name_len) };
-        let ctx = unsafe {
-            let Some(ctx) = ctx() else { return null_mut() };
-            ctx
-        };
         ctx.c
             .env
             .get(key)

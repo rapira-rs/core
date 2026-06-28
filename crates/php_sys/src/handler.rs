@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use tokio::sync::mpsc;
 
 use crate::{
-    boot::Rapira,
+    start::Rapira,
     types::{Context, Frame, Job, Request},
 };
 

@@ -1,7 +1,6 @@
 #[allow(clippy::all)]
 pub mod bindings;
 
-pub mod boot;
 pub mod callbacks;
 pub mod classic_worker;
 pub mod context;
@@ -10,11 +9,12 @@ pub mod handler;
 pub mod module;
 pub mod rapira_worker;
 pub mod scoreboard;
+pub mod start;
 pub mod types;
 
 pub use bindings::*;
-pub use boot::Rapira;
 pub use handler::RapiraHandle;
+pub use start::Rapira;
 pub use types::{Context, Frame, Mode, Request, ResponseHead};
 
 pub const IS_ZTS: bool = cfg!(php_zts); // for tests

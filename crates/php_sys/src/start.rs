@@ -104,7 +104,7 @@ impl Rapira {
     }
 
     pub fn shutdown(self) {
-        info!("[rapira] shutdown in noop, deinitialize in Drop");
+        info!("[rapira] shutdown is noop, deinitialize in Drop");
     }
 
     pub fn scoreboard(&self) -> ScoreboardSnapshot {

@@ -1,16 +1,16 @@
 use log::error;
 
 use crate::{callbacks::send_error_head, scoreboard::sb_record, *};
-use std::{cell::RefCell, os::raw::c_char, path::PathBuf};
+use std::{cell::RefCell, path::PathBuf};
 
 use crate::{
     TRACK_VARS_FILES,
-    boot::JobRx,
     callbacks::guard,
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
     php_output_activate, php_output_end_all, php_request_shutdown, php_request_startup, rapira_eg,
     rapira_pg, rapira_run_handler, sapi_activate,
+    start::JobRx,
     types::Job,
     zend_fcall_info, zend_fcall_info_cache, zend_hash_str_del, zval_ptr_dtor,
 };
@@ -100,7 +100,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         let t_outcome: types::Outcome = rapira_request_teardown();
         if matches!(t_outcome, types::Outcome::Bailout) {
             error!(
-                "[rapira] rapira_request_teardown() failed on first call {},{}",
+                "[rapira] rapira_request_teardown() bailed {},{}",
                 job.ctx.req.method, job.ctx.req.uri
             );
             err = true;
@@ -128,8 +128,13 @@ fn next_job() -> Option<Job> {
         }
 
         log_and_clear_last_error();
-        // TODO: no unwrap, handle error
-        wc.rx.lock().unwrap().blocking_recv()
+        match wc.rx.lock() {
+            Ok(mut job) => job.blocking_recv(),
+            Err(err) => {
+                error!("[rapira] next_job() failed to lock worker channel: {err}");
+                None
+            }
+        }
     })
 }
 
@@ -163,14 +168,14 @@ unsafe fn reset_super_globals() {
 
 fn log_and_clear_last_error() {
     unsafe {
-        if !(*rapira_pg()).last_error_message.is_null() {
-            let msg = std::ffi::CStr::from_ptr((*rapira_pg()).last_error_message as *const c_char);
-            error!(
-                "[rapira] rapira_request_teardown() failed on first call: {}",
-                msg.to_string_lossy()
-            );
-            // null out the last error message
-            rapira_clear_last_error();
+        let zend_str = (*rapira_pg()).last_error_message;
+        if zend_str.is_null() {
+            return;
         }
+        let msg =
+            std::slice::from_raw_parts((*zend_str).val.as_ptr().cast::<u8>(), (*zend_str).len);
+        error!("[rapira] last PHP error: {}", String::from_utf8_lossy(msg));
+        // null out the last error message
+        rapira_clear_last_error();
     }
 }

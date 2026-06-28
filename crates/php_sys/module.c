@@ -44,6 +44,49 @@ zend_module_entry rapira_module_entry = {
     "0.1.0",
     STANDARD_MODULE_PROPERTIES};
 
+// handle php sessions
+#ifdef HAVE_PHP_SESSION
+// Worker mode bypasses module RSHUTDOWN, so the session module never flushes/
+// closes an active session between requests - do the work session_rshutdown
+// would have done, or PS(id)/session_status leak across requests (one request
+// reusing the previous one's session).
+static void rapira_reset_session(void) {
+    if (PS(session_status) == php_session_active) {
+        php_session_flush(1); // write + close the active session
+    }
+    if (!Z_ISUNDEF(PS(http_session_vars))) {
+        zval_ptr_dtor(&PS(http_session_vars));
+        ZVAL_UNDEF(&PS(http_session_vars));
+    }
+    if (PS(mod_data) || PS(mod_user_implemented)) {
+        zend_try { PS(mod)->s_close(&PS(mod_data)); }
+        zend_end_try();
+    }
+    if (PS(id)) {
+        zend_string_release_ex(PS(id), 0);
+        PS(id) = NULL;
+    }
+    if (PS(session_vars)) {
+        zend_string_release_ex(PS(session_vars), 0);
+        PS(session_vars) = NULL;
+    }
+    if (PS(session_started_filename)) {
+        zend_string_release(PS(session_started_filename));
+        PS(session_started_filename) = NULL;
+        PS(session_started_lineno) = 0;
+    }
+    PS(session_status) = php_session_none;
+    // Transient guards that php_rinit_session_globals() scrubs at each request
+    // start. Worker mode skips RINIT, so a userland save handler that bails
+    // mid-call (or uses partial parent:: delegation) can leave them set. Cheap
+    // defensive parity:
+    PS(mod_user_is_open) = 0;
+    PS(in_save_handler) = 0;
+    PS(set_handler) = 0;
+}
+#else
+static void rapira_reset_session(void) {}
+#endif
 // runs per-request PHP work under a zend bailout guard
 // we need to catch here zend_bailout(), but exit/die in php 8.4+ are not
 // bailouts:
@@ -125,6 +168,10 @@ int rapira_request_teardown(void) {
     zend_catch { bailed = BAILOUT; }
     zend_end_try();
 
+    zend_try { rapira_reset_session(); }
+    zend_catch { bailed = BAILOUT; }
+    zend_end_try();
+
     zend_try { php_output_deactivate(); }
     zend_catch { bailed = BAILOUT; }
     zend_end_try();
@@ -150,7 +197,7 @@ int rapira_request_teardown(void) {
         // CG(memoize_mode) = 0;
         // EG(current_execute_data) = NULL;
         // LONGJMP(*EG(bailout), FAILURE);
-        gc_protect(1);
+        gc_protect(0);
     }
 
     return bailed;
@@ -247,12 +294,13 @@ void rapira_activate_auto_globals(void) {
     // variable %s", 		ZSTR_VAL(name));
     // }
     ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
-        // we leave $_ENV off, because it is not a real superglobal, and is
-        // built by the auto_global_callback for $_SERVER, which is always built
-        // (need to double check this)
+        // $_ENV is left armed-but-unbuilt and skipped on purpose: the process
+        // environment is constant across requests and reset_super_globals()
+        // doesn't drop $_ENV from the symbol table, so the array built on first
+        // use persists and stays correct without a per-request rebuild. (Its
+        // own create_env callback - not $_SERVER's - would rebuild it if a
+        // script forced it.)
         if (auto_global->name == _env) {
-            // resule/explicit use will rebuild it, so we don't need to build it
-            // here
             continue;
         }
         if (auto_global->auto_global_callback) {

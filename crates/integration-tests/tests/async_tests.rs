@@ -342,3 +342,33 @@ async fn scoreboard_counts_worker() -> anyhow::Result<()> {
     assert_eq!(snap.workers[0].errors, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn worker_session_isolation() -> anyhow::Result<()> {
+    let _guard = php_lock_async().await;
+    let r = Rapira::start(Mode::Worker(fixture("session-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (s1, b1) = drain_async(h.handle(req("/", "session-worker.php")).await?).await;
+    let (s2, b2) = drain_async(h.handle(req("/", "session-worker.php")).await?).await;
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(s1, 200);
+    assert_eq!(s2, 200);
+    assert!(b1.contains("n=0"), "req1 fresh session (got: {b1:?})");
+    // without the fix: session_status stays active + $_SESSION leaks -> req2 sees n=1
+    assert!(
+        b2.contains("n=0"),
+        "session must reset between worker requests (got: {b2:?})"
+    );
+    let sid = |b: &str| {
+        b.split_whitespace()
+            .find_map(|t| t.strip_prefix("sid=").map(str::to_owned))
+    };
+    assert_ne!(
+        sid(&b1),
+        sid(&b2),
+        "each request must get a fresh session id (b1={b1:?}, b2={b2:?})"
+    );
+    Ok(())
+}

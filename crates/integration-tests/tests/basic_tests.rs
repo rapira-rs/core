@@ -1,6 +1,6 @@
 use std::thread;
 
-use integration_tests::{drain, fixture, php_lock, req};
+use integration_tests::{LOG_CAPTURE, drain, fixture, init_log_capture, php_lock, req};
 use php_sys::{Mode, Rapira};
 
 // this test works on both zts and nts
@@ -416,5 +416,56 @@ fn scoreboard_counts_classic() -> anyhow::Result<()> {
     assert_eq!(snap.workers.len(), 1);
     assert_eq!(snap.workers[0].handled, 3);
     assert_eq!(snap.workers[0].errors, 1);
+    Ok(())
+}
+
+#[test]
+fn worker_session_isolation() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("session-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (s1, b1) = drain(h.handle_blocking(req("/", "session-worker.php"))?);
+    let (s2, b2) = drain(h.handle_blocking(req("/", "session-worker.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(s1, 200);
+    assert_eq!(s2, 200);
+    assert!(b1.contains("n=0"), "req1 fresh session (got: {b1:?})");
+    // without the fix: session_status stays active + $_SESSION leaks -> req2 sees n=1
+    assert!(
+        b2.contains("n=0"),
+        "session must reset between worker requests (got: {b2:?})"
+    );
+    let sid = |b: &str| {
+        b.split_whitespace()
+            .find_map(|t| t.strip_prefix("sid=").map(str::to_owned))
+    };
+    assert_ne!(
+        sid(&b1),
+        sid(&b2),
+        "each request must get a fresh session id (b1={b1:?}, b2={b2:?})"
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    LOG_CAPTURE.lock().unwrap().clear(); // drop anything captured by earlier tests
+
+    let r = Rapira::start(Mode::Worker(fixture("boot-output-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (status, _) = drain(h.handle_blocking(req("/", "boot-output-worker.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200, "worker still serves after no-context output");
+    let logged = LOG_CAPTURE.lock().unwrap();
+    assert!(
+        logged.iter().any(|l| l.contains("WORKER-BOOT-OUTPUT")),
+        "worker bootstrap output must be logged (captured: {logged:?})"
+    );
     Ok(())
 }
