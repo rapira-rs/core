@@ -1,10 +1,12 @@
 <?php
 
-function fib(int $n): int {
+function fib(int $n): int
+{
 	return $n < 2 ? $n : fib($n - 1) + fib($n - 2);
 }
 
-function nest(int $depth): int {
+function nest(int $depth): int
+{
 	if ($depth === 0) {
 		return fib(12);                   // 144
 	}
@@ -40,4 +42,6 @@ $handler = static function (): void {
 };
 
 // Resident loop: each iteration handles one request through $handler.
-while (\rapira_handle_request($handler)) { gc_collect_cycles(); }
+while (\rapira_handle_request($handler)) {
+	gc_collect_cycles();
+}

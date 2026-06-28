@@ -5,7 +5,10 @@
 // must contain. If the guard works, the worker survives and keeps serving.
 ini_set('display_errors', '0'); // keep the fatal in the log, out of the response body
 
-class Counter { public static int $n = 0; }
+class Counter
+{
+    public static int $n = 0;
+}
 
 $handler = static function (): void {
     Counter::$n++;                               // runs BEFORE the bail (proves continuity)
@@ -23,4 +26,6 @@ $handler = static function (): void {
     echo "ok counter=" . Counter::$n;
 };
 
-while (\rapira_handle_request($handler)) { gc_collect_cycles(); }
+while (\rapira_handle_request($handler)) {
+    gc_collect_cycles();
+}

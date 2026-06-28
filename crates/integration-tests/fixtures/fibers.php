@@ -1,5 +1,6 @@
 <?php
-function fib(int $n): int {
+function fib(int $n): int
+{
     return $n < 2 ? $n : fib($n - 1) + fib($n - 2);
 }
 
@@ -23,7 +24,8 @@ for ($i = 0; $i < 300; $i++) {
 
 // 2) 25 DEEPLY NESTED fibers — 25 fiber stacks stacked at once, so base/limit
 //    is saved 25 times on the way in and restored 25 times on the way out.
-function nest(int $depth): int {
+function nest(int $depth): int
+{
     if ($depth === 0) {
         return fib(12);               // 144
     }

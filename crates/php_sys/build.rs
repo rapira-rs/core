@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.trim_start_matches("-I"))
         .collect();
 
-    let mut c = cc::Build::new();
+    let mut c: cc::Build = cc::Build::new();
     c.file("wrapper.c").file("module.c");
     if abi.zts {
         c.define("ZTS", None);
@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
     }
     c.compile("rapira_shim");
 
-    let mut bindings = bindgen::Builder::default()
+    let mut bindings: bindgen::Builder = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_args(php_includes.split_whitespace());
     if abi.zts {

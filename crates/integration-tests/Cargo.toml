@@ -8,10 +8,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
-# php_sys + tokio are used by the shared helpers in src/lib.rs, so they are normal deps.
 [dependencies]
 php_sys = { path = "../php_sys" }
 tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
-anyhow = "1.0.102"
+anyhow = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
