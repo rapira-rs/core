@@ -375,7 +375,10 @@ fn failboot_classic() -> anyhow::Result<()> {
     drop(h);
     r.shutdown();
     assert_eq!(status, 200);
-    assert!(body.contains("syntax error, unexpected end of file, expecting variable or"), "expected error trace (got: {body:?})");
+    assert!(
+        body.contains("syntax error, unexpected end of file, expecting variable or"),
+        "expected error trace (got: {body:?})"
+    );
     Ok(())
 }
 
