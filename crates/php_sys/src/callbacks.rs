@@ -3,9 +3,10 @@ use crate::types::{Context, Frame, ResponseHead};
 use crate::*;
 use bytes::Bytes;
 use core::slice;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr::null_mut;
 
 pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(default)
@@ -24,9 +25,9 @@ impl SapiHeaders {
     }
 
     fn lines(&self) -> impl Iterator<Item = SapiHeader> {
-        let mut el = unsafe { &mut *self.0 }.headers.head;
+        let mut el: *mut _zend_llist_element = unsafe { &mut *self.0 }.headers.head;
         std::iter::from_fn(move || {
-            let e = unsafe { el.as_ref()? };
+            let e: &_zend_llist_element = unsafe { el.as_ref()? };
             el = e.next;
             Some(SapiHeader(e.data.as_ptr() as *const sapi_header_struct))
         })
@@ -42,11 +43,11 @@ impl SapiHeader {
             return None;
         }
 
-        let line = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
+        let line: &[u8] = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
 
-        let i = line.iter().position(|&b| b == b':')?;
-        let k = String::from_utf8_lossy(&line[..i]).trim().to_string();
-        let v = String::from_utf8_lossy(&line[i + 1..]).trim().to_string();
+        let i: usize = line.iter().position(|&b| b == b':')?;
+        let k: String = String::from_utf8_lossy(&line[..i]).trim().to_string();
+        let v: String = String::from_utf8_lossy(&line[i + 1..]).trim().to_string();
         (!k.is_empty()).then_some((k, v))
     }
 }
@@ -140,11 +141,11 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
 
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
     unsafe {
-        guard(std::ptr::null_mut(), || match ctx() {
+        guard(null_mut(), || match ctx() {
             Some(ctx) => {
                 ctx.c.cookie.as_ptr() as *mut c_char // we own the buffer
             }
-            None => std::ptr::null_mut(),
+            None => null_mut(),
         })
     }
 }
@@ -206,7 +207,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put("AUTH_TYPE", auth_type);
         let auth_user = unsafe { (*rapira_sg()).request_info.auth_user };
         if !auth_user.is_null() {
-            let user = unsafe { std::ffi::CStr::from_ptr(auth_user as *const c_char) };
+            let user: &CStr = unsafe { CStr::from_ptr(auth_user as *const c_char) };
             put("REMOTE_USER", &user.to_string_lossy());
         }
 
@@ -229,16 +230,47 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
     })
 }
 
-pub(crate) unsafe extern "C" fn getenv_cb(_n: *const c_char, _l: usize) -> *mut c_char {
-    std::ptr::null_mut()
+pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) -> *mut c_char {
+    guard(null_mut(), || {
+        if name.is_null() {
+            return null_mut();
+        }
+
+        let key = unsafe { slice::from_raw_parts(name as *const u8, name_len) };
+        let ctx = unsafe {
+            let Some(ctx) = ctx() else { return null_mut() };
+            ctx
+        };
+        ctx.c
+            .env
+            .get(key)
+            .map_or(null_mut(), |v| v.as_ptr() as *mut c_char)
+    })
 }
 
-pub(crate) unsafe extern "C" fn log_message(message: *const c_char, _message_len: c_int) {
-    // TODO: double check with php-src/other impl for the correct way to log messages from PHP
-    let s: String = unsafe { std::ffi::CStr::from_ptr(message) }
-        .to_string_lossy()
-        .into_owned();
-    eprintln!("[php] {s}");
+fn syslog_to_level(syslog_lev: c_int) -> log::Level {
+    match syslog_lev {
+        0 => log::Level::Error, // LOG_EMERG
+        1 => log::Level::Error, // LOG_ALERT
+        2 => log::Level::Error, // LOG_CRIT
+        3 => log::Level::Error, // LOG_ERR
+        4 => log::Level::Warn,  // LOG_WARNING
+        5 => log::Level::Info,  // LOG_NOTICE
+        6 => log::Level::Info,  // LOG_INFO
+        7 => log::Level::Debug, // LOG_DEBUG
+        _ => log::Level::Info,
+    }
+}
+
+pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type: c_int) {
+    guard((), || {
+        if message.is_null() {
+            return;
+        }
+
+        let s = unsafe { CStr::from_ptr(message).to_string_lossy() };
+        log::log!(target: "php", syslog_to_level(syslog_type), "{s}");
+    })
 }
 
 fn send_head(c: &mut Context) {

@@ -9,6 +9,7 @@ pub mod executor;
 pub mod handler;
 pub mod module;
 pub mod rapira_worker;
+pub mod scoreboard;
 pub mod types;
 
 pub use bindings::*;

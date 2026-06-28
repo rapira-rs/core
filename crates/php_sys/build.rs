@@ -10,7 +10,7 @@ use anyhow::Context;
 const ALLOWED_BINDINGS: &[&str] = include!("allowed_bindings.rs");
 
 fn main() -> anyhow::Result<()> {
-    println!("cargo:rustc-check-cfg=cfg(php82, php83, php84, php85, php_zts, php_debug)");
+    println!("cargo:rustc-check-cfg=cfg(php84, php85, php_zts, php_debug)");
 
     let php_includes = php_config("--includes")?;
     let php_prefix = php_config("--prefix")?;
@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
 
     let abi = detect_php_abi()?;
 
-    for (vmajor, vminor) in [(8, 2), (8, 3), (8, 4), (8, 5)] {
+    for (vmajor, vminor) in [(8, 4), (8, 5)] {
         if abi.version >= (vmajor, vminor) {
             println!("cargo:rustc-cfg=php{vmajor}{vminor}");
         }

@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::Read;
 use std::path::PathBuf;
@@ -61,6 +62,7 @@ pub struct ReqC {
     pub ctype: Option<CString>,
     pub cookie: CString,
     pub authorization: CString,
+    pub env: HashMap<Box<[u8]>, CString>,
 }
 
 impl ReqC {
@@ -79,6 +81,12 @@ impl ReqC {
             .map(|(_, v)| v.clone())
             .unwrap_or_default();
 
+        let env: HashMap<Box<[u8]>, CString> = r
+            .server_vars
+            .iter()
+            .filter_map(|(k, v)| Some((k.as_bytes().into(), CString::new(v.as_bytes()).ok()?)))
+            .collect();
+
         Self {
             method: CString::new(r.method.as_bytes()).unwrap_or_default(),
             query: CString::new((r.query).as_bytes()).unwrap_or_default(),
@@ -91,6 +99,7 @@ impl ReqC {
                 .content_type
                 .as_deref()
                 .map(|s| CString::new(s.as_bytes()).unwrap_or_default()),
+            env,
         }
     }
 }

@@ -1,6 +1,6 @@
 use log::error;
 
-use crate::{callbacks::send_error_head, *};
+use crate::{callbacks::send_error_head, scoreboard::sb_record, *};
 use std::{cell::RefCell, os::raw::c_char, path::PathBuf};
 
 use crate::{
@@ -33,10 +33,28 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) {
     });
 
     unsafe {
-        if php_request_startup() == SUCCESS {
-            run_script(&script); // blocks in while(rapira_handle_request)) in PHP
+        match php_request_startup() {
+            FAILURE => {
+                error!("[rapira] rapira_worker() failed to start request");
+                sb_record(true);
+            }
+            SUCCESS => {
+                // all should fail if not ok
+                // TODO: startup algorithm should be more robust
+                let ok: bool = run_script(&script); // blocks in while(rapira_handle_request)) in PHP
+                if !ok {
+                    error!(
+                        "[rapira] rapira_worker() failed to run script: {:?}",
+                        script
+                    );
+                }
+            }
+            _ => {
+                error!("[rapira] rapira_worker() unexpected php_request_startup() result");
+                sb_record(true);
+            }
         }
-    }
+    };
 
     if WORKER.with_borrow(|w: &Option<WorkerChan>| {
         w.as_ref().is_some_and(|wc: &WorkerChan| wc.first_call)
@@ -67,7 +85,8 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     };
 
     bind_server_context(&mut job.ctx);
-    unsafe {
+    let errored = unsafe {
+        let mut err = false;
         populate_request_context(&mut job.ctx);
         php_output_activate();
         sapi_activate();
@@ -76,6 +95,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         let h_outcome: types::Outcome = rapira_run_handler(fci, fcc);
         if matches!(h_outcome, types::Outcome::Bailout | types::Outcome::Throw) {
             send_error_head(&job.ctx, 500);
+            err = true;
         }
         let t_outcome: types::Outcome = rapira_request_teardown();
         if matches!(t_outcome, types::Outcome::Bailout) {
@@ -83,11 +103,14 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
                 "[rapira] rapira_request_teardown() failed on first call {},{}",
                 job.ctx.req.method, job.ctx.req.uri
             );
+            err = true;
         }
-    }
+        err
+    };
 
     log_and_clear_last_error();
     unbind_server_context();
+    sb_record(errored);
     job.ctx.finish();
     true
 }

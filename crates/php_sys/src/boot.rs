@@ -14,6 +14,7 @@ use std::os::raw::c_int;
 use std::ptr::null_mut;
 
 use crate::rapira_worker::rapira_worker;
+use crate::scoreboard::{Scoreboard, ScoreboardSnapshot, sb_set};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 pub(crate) type JobRx = Arc<Mutex<Receiver<Job>>>;
@@ -44,10 +45,11 @@ impl Drop for PhpThread {
 pub struct Rapira {
     pub(crate) intake: Option<Sender<Job>>, // producer side
     workers: Vec<JoinHandle<()>>,           // os threads: execute PHP scripts
+    pub scoreboard: Arc<Scoreboard>,        // shared scoreboard for workers
 }
 
 impl Rapira {
-    pub fn boot(mode: Mode, req_threads: usize) -> anyhow::Result<Self> {
+    pub fn start(mode: Mode, req_threads: usize) -> anyhow::Result<Self> {
         info!("[rapira] booting with mode: {mode:?}, threads: {req_threads}");
         // NTS: 1 thread only
         #[cfg(not(php_zts))]
@@ -60,6 +62,7 @@ impl Rapira {
 
         #[cfg(php_zts)]
         let num_threads: usize = req_threads.max(1);
+        let scoreboard: Arc<Scoreboard> = Scoreboard::new(num_threads);
 
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
@@ -86,21 +89,26 @@ impl Rapira {
         let rx: JobRx = Arc::new(Mutex::new(intake_rx));
 
         let workers: Vec<JoinHandle<()>> = (0..num_threads)
-            .map(|_| {
-                let (rx, mode) = (rx.clone(), mode.clone());
+            .map(|id| {
+                let (rx, mode, scoreboard) = (rx.clone(), mode.clone(), scoreboard.clone());
                 trace!("[rapira] spawning worker thread");
-                thread::spawn(move || worker_main(mode, rx))
+                thread::spawn(move || worker_main(id, scoreboard, mode, rx))
             })
             .collect();
 
         Ok(Self {
             intake: Some(intake),
             workers,
+            scoreboard,
         })
     }
 
     pub fn shutdown(self) {
         info!("[rapira] shutdown in noop, deinitialize in Drop");
+    }
+
+    pub fn scoreboard(&self) -> ScoreboardSnapshot {
+        self.scoreboard.snapshot()
     }
 }
 
@@ -120,8 +128,9 @@ impl Drop for Rapira {
     }
 }
 
-fn worker_main(mode: Mode, rx: JobRx) {
-    let _php = PhpThread::new();
+fn worker_main(id: usize, board: Arc<Scoreboard>, mode: Mode, rx: JobRx) {
+    let _php: PhpThread = PhpThread::new();
+    sb_set(id, board);
     #[cfg(not(php_zts))]
     unsafe {
         // https://github.com/php/php-src/pull/9104
