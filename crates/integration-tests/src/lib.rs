@@ -1,4 +1,3 @@
-use log;
 use php_sys::{Frame, Request};
 use std::env::set_var;
 use std::path::{Path, PathBuf};
