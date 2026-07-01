@@ -17,7 +17,6 @@
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
 #endif
-#include <zend_observer.h>
 
 sapi_globals_struct *rapira_sg(void);
 zend_executor_globals *rapira_eg(void);

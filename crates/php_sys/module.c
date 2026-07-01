@@ -164,10 +164,6 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 int rapira_request_teardown(void) {
     int bailed = OK;
 
-    if (ZEND_OBSERVER_ENABLED) {
-        zend_observer_fcall_end_all();
-    }
-
     zend_try { php_output_end_all(); }
     zend_catch { bailed = BAILOUT; }
     zend_end_try();
@@ -184,8 +180,10 @@ int rapira_request_teardown(void) {
     zend_catch { bailed = BAILOUT; }
     zend_end_try();
 
+#ifdef ZEND_MAX_EXECUTION_TIMERS
     zend_try { zend_unset_timeout(); }
     zend_end_try();
+#endif
 
     if (bailed == BAILOUT) {
         // _zend_bailout left gc_protect(1), so all calls to gc_collect_cycles
