@@ -8,8 +8,8 @@ use crate::{
     callbacks::guard,
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
-    php_output_activate, php_output_end_all, php_request_shutdown, php_request_startup, rapira_eg,
-    rapira_pg, rapira_run_handler, sapi_activate,
+    php_output_activate, php_request_shutdown, php_request_startup, rapira_eg, rapira_pg,
+    rapira_run_handler, sapi_activate,
     start::JobRx,
     types::Job,
     zend_fcall_info, zend_fcall_info_cache, zend_hash_str_del, zval_ptr_dtor,
@@ -118,6 +118,8 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 fn next_job() -> Option<Job> {
     WORKER.with_borrow_mut(|w: &mut Option<WorkerChan>| {
         let wc = w.as_mut()?;
+        // first iteration: clean up whatever php_request_startup()'s bootstrap
+        // left before serving real requests — there's no prior request yet
         if std::mem::take(&mut wc.first_call) {
             unsafe {
                 let outcome: types::Outcome = rapira_request_teardown();
@@ -146,7 +148,10 @@ fn next_job() -> Option<Job> {
 pub unsafe extern "C" fn rapira_rs_finish_request() {
     guard((), || {
         unsafe {
-            php_output_end_all();
+            let outcome = rapira_finish_output();
+            if matches!(outcome, types::Outcome::Bailout) {
+                log::error!("[rapira] rapira_finish_output() bailed");
+            }
         }
         unsafe {
             if let Some(c) = ctx() {

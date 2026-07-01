@@ -17,8 +17,6 @@ pub use handler::RapiraHandle;
 pub use start::Rapira;
 pub use types::{Context, Frame, Mode, Request, ResponseHead};
 
-pub const IS_ZTS: bool = cfg!(php_zts); // for tests
-
 // Zend status codes, which are different on master and 8.5 for example.
 pub const SUCCESS: core::ffi::c_int = 0;
 pub const FAILURE: core::ffi::c_int = -1;
@@ -28,6 +26,7 @@ unsafe extern "C" {
     pub fn rapira_eg() -> *mut zend_executor_globals;
     pub fn rapira_pg() -> *mut php_core_globals;
     pub fn rapira_cg() -> *mut zend_compiler_globals;
+    pub fn rapira_finish_output() -> types::Outcome;
     pub fn rapira_init_call_stack();
     pub unsafe fn rapira_clear_last_error();
     pub unsafe fn rapira_activate_auto_globals();

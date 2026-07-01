@@ -1,5 +1,7 @@
 use std::{fs::File, io::ErrorKind, ptr::null_mut};
 
+use log::error;
+
 use crate::{
     callbacks::send_error_head,
     context::{bind_server_context, populate_request_context, unbind_server_context},
@@ -21,10 +23,18 @@ fn status_for_open_error(kind: ErrorKind) -> u16 {
 
 pub(crate) fn classic_worker(rx: JobRx) {
     loop {
-        // TODO: boom, unwrap
-        let job: Option<Job> = rx.lock().unwrap().blocking_recv();
-        let Some(mut job) = job else { break };
+        let job: Option<Job> = match rx.lock() {
+            Ok(mut guard) => guard.blocking_recv(),
+            Err(err) => {
+                error!(
+                    "[rapira] classic_worker() failed to lock job receiver: {:?}",
+                    err
+                );
+                break;
+            }
+        };
 
+        let Some(mut job) = job else { break };
         sb_record(classic_executor(&mut job));
         job.ctx.finish();
     }

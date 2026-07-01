@@ -16,8 +16,8 @@ bytes = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }
-bindgen = "0.72.1"
-cc = "1.2.64"
+bindgen = "0"
+cc = "1.2"
 
 [features]
 default = []

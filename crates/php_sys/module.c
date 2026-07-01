@@ -164,6 +164,10 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 int rapira_request_teardown(void) {
     int bailed = OK;
 
+    if (ZEND_OBSERVER_ENABLED) {
+        zend_observer_fcall_end_all();
+    }
+
     zend_try { php_output_end_all(); }
     zend_catch { bailed = BAILOUT; }
     zend_end_try();
@@ -178,6 +182,9 @@ int rapira_request_teardown(void) {
 
     zend_try { sapi_deactivate(); }
     zend_catch { bailed = BAILOUT; }
+    zend_end_try();
+
+    zend_try { zend_unset_timeout(); }
     zend_end_try();
 
     if (bailed == BAILOUT) {
@@ -328,4 +335,14 @@ void rapira_activate_auto_globals(void) {
         }
     }
     ZEND_HASH_FOREACH_END();
+}
+
+// found out, that php_output_end_all can also bailout
+// so wrap it in a zend_try block, and return BAILOUT if it does
+int rapira_finish_output(void) {
+    zend_try { php_output_end_all(); }
+    zend_catch { return BAILOUT; }
+    zend_end_try();
+
+    return OK;
 }

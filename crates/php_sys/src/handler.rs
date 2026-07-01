@@ -8,6 +8,13 @@ use crate::{
 
 const FRAME_CAP: usize = 16; // before ub_write
 
+/// A cheaply-cloneable handle for submitting jobs to a running [`Rapira`] pool.
+///
+/// # Shutdown contract
+/// Every clone holds a copy of the intake `Sender`. Dropping `Rapira` joins all
+/// worker threads after dropping its own `Sender`; the job channel only closes
+/// once every `RapiraHandle` clone has also been dropped. Keeping a clone alive
+/// past the `Rapira` it came from makes `Drop for Rapira` hang forever.
 pub struct RapiraHandle {
     intake: mpsc::Sender<Job>,
 }
