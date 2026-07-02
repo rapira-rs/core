@@ -1,6 +1,9 @@
 use crate::*;
 use callbacks;
-use std::{os::raw::c_char, ptr::null};
+use std::{
+    os::raw::c_char,
+    ptr::{null, null_mut},
+};
 
 pub(crate) fn build_sapi_module() -> sapi_module_struct {
     sapi_module_struct {
@@ -23,10 +26,10 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         log_message: Some(callbacks::log_message),
         get_request_time: None,
         terminate_process: None,
-        php_ini_path_override: std::ptr::null_mut(),
+        php_ini_path_override: null_mut(),
         default_post_reader: Some(php_default_post_reader),
         treat_data: Some(php_default_treat_data),
-        executable_location: std::ptr::null_mut(),
+        executable_location: null_mut(),
         php_ini_ignore: 0,
         php_ini_ignore_cwd: 0,
         get_fd: None,
@@ -36,7 +39,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         input_filter: Some(php_default_input_filter),
         ini_defaults: None,
         phpinfo_as_text: 0,
-        ini_entries: c"max_execution_time=0\nmax_input_time=-1\n".as_ptr(),
+        ini_entries: null_mut(),
         additional_functions: null(),
         input_filter_init: None,
         sapi_error: Some(zend_error),

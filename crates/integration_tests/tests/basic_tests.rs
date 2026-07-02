@@ -146,10 +146,10 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     assert_eq!(s1, 200);
     assert!(b1.contains("ok counter=1"), "req1 baseline (got: {b1:?})");
 
-    // teardown bailout commits a 200 head before the 500; buffered body lost
+    // teardown bailout commits a 500 head; buffered body lost
     assert_eq!(
-        s2, 200,
-        "teardown-flush bailout commits a 200 head (got {s2}, body {b2:?})"
+        s2, 500,
+        "teardown-flush bailout commits a 500 head (got {s2}, body {b2:?})"
     );
     assert!(
         b2.is_empty(),
@@ -466,6 +466,41 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
     assert!(
         logged.iter().any(|l| l.contains("WORKER-BOOT-OUTPUT")),
         "worker bootstrap output must be logged (captured: {logged:?})"
+    );
+    Ok(())
+}
+
+#[test]
+fn sapi_ini_entries_applied() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic, 1)?;
+    let h = r.handle()?;
+    let (status, body) = drain(h.handle_blocking(req("/", "ini.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("met=0"),
+        "ini_entries must apply: max_execution_time=0 (got: {body:?})"
+    );
+    Ok(())
+}
+
+#[test]
+fn status_code_does_not_leak_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("status-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (s1, _) = drain(h.handle_blocking(req("/?code=404", "status-worker.php"))?);
+    let (s2, b2) = drain(h.handle_blocking(req("/", "status-worker.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(s1, 404, "explicit http_response_code(404)");
+    assert_eq!(
+        s2, 200,
+        "default status must be 200, not the leaked 404 (body: {b2:?})"
     );
     Ok(())
 }

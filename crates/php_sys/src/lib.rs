@@ -28,9 +28,10 @@ unsafe extern "C" {
     pub fn rapira_cg() -> *mut zend_compiler_globals;
     pub fn rapira_finish_output() -> types::Outcome;
     pub fn rapira_init_call_stack();
-    pub unsafe fn rapira_clear_last_error();
-    pub unsafe fn rapira_activate_auto_globals();
+    pub fn rapira_clear_last_error();
+    pub fn rapira_activate_auto_globals();
     pub fn rapira_request_teardown() -> types::Outcome; //enum
+    pub fn rapira_process_init();
 
     pub fn rapira_run_handler(
         fci: *mut zend_fcall_info,

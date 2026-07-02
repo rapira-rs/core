@@ -68,6 +68,7 @@ impl Rapira {
         let started: bool = unsafe {
             #[cfg(php_zts)]
             php_tsrm_startup_ex(num_threads as c_int);
+            rapira_process_init();
             sapi_startup(&mut module);
             module
                 .startup

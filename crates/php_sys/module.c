@@ -344,3 +344,11 @@ int rapira_finish_output(void) {
 
     return OK;
 }
+
+// once per process, before sapi_startup and after tsrm startup (on ZTS builds)
+void rapira_process_init(void) {
+#if defined(SIGPIPE) && defined(SIG_IGN)
+    signal(SIGPIPE, SIG_IGN);
+#endif
+    zend_signal_startup();
+}

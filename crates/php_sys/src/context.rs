@@ -35,6 +35,9 @@ pub(crate) fn unbind_server_context() {
 }
 
 pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
+    let sg = unsafe { &mut *rapira_sg() };
+    // the engine never resets the previous request status (the reset in sapi_activate() is commented out in php-src)
+    sg.sapi_headers.http_response_code = 200;
     let ri: &mut sapi_request_info = unsafe { &mut (*rapira_sg()).request_info };
     ri.request_method = ctx.c.method.as_ptr();
     ri.query_string = ctx.c.query.as_ptr() as *mut c_char;
@@ -45,8 +48,8 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     ri.proto_num = match ctx.req.protocol.as_str() {
         "HTTP/1.0" => 1000,
         "HTTP/1.1" => 1001,
-        "HTTP/2.0" => 2000,
-        "HTTP/3.0" => 3000,
+        p if p.starts_with("HTTP/2.0") => 2000,
+        p if p.starts_with("HTTP/3.0") => 3000,
         _ => 1001,
     };
 

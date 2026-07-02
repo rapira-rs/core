@@ -120,10 +120,9 @@ async fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     assert_eq!(s1, 200);
     assert!(b1.contains("ok counter=1"), "req1 baseline (got: {b1:?})");
 
-    // teardown bailout commits a 200 head before the 500; buffered body lost
     assert_eq!(
-        s2, 200,
-        "teardown-flush bailout commits a 200 head (got {s2}, body {b2:?})"
+        s2, 500,
+        "teardown-flush bailout commits a 500 head (got {s2}, body {b2:?})"
     );
     assert!(
         b2.is_empty(),
