@@ -12,14 +12,16 @@ pub mod scoreboard;
 pub mod start;
 pub mod types;
 
+use core::ffi::c_int;
+
 pub use bindings::*;
 pub use handler::RapiraHandle;
 pub use start::Rapira;
 pub use types::{Context, Frame, Mode, Request, ResponseHead};
 
 // Zend status codes, which are different on master and 8.5 for example.
-pub const SUCCESS: core::ffi::c_int = 0;
-pub const FAILURE: core::ffi::c_int = -1;
+pub const SUCCESS: c_int = 0;
+pub const FAILURE: c_int = -1;
 
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;

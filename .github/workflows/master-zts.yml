@@ -45,7 +45,6 @@ jobs:
             --enable-zts \
             --enable-debug \
             --enable-embed=shared \
-            --disable-zend-signals \
             --disable-all --disable-cgi --enable-session --without-pear
           make -j"$(nproc)"
           make install
