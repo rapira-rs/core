@@ -1,0 +1,49 @@
+name: Coverage
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Codecov OIDC upload (unavailable on fork PRs; see use_oidc below)
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+        env:
+          phpts: ts # thread-safe (ZTS)
+
+      - name: Build deps for bindgen/cc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
+
+      - name: Expose the ZTS embed lib
+        run: |
+          LIBPHP=$(find "$(php-config --prefix)" /usr/lib -name 'libphp*.so' 2>/dev/null | head -1)
+          test -n "$LIBPHP" || { echo "no ZTS libphp.so from setup-php"; exit 1; }
+          echo "LD_LIBRARY_PATH=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-L native=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: llvm-tools-preview }
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate coverage (lcov)
+        run: >-
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          --ignore-filename-regex '(crates/integration_tests/|bindings\.rs$|/src/main\.rs$)'
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          fail_ci_if_error: true
