@@ -3,7 +3,7 @@ ZTS_LIB        := $(HOME)/.local/php-zts/lib
 NTS_PHP_CONFIG := /usr/bin/php-config
 NTS_LIB        := /usr/lib64
 
-.PHONY: test test_zts test_nts
+.PHONY: test test_zts test_nts coverage
 
 test: test_zts test_nts
 
@@ -20,3 +20,11 @@ test_nts:
 	LD_LIBRARY_PATH=$(NTS_LIB) \
 	RUSTFLAGS="-L native=$(NTS_LIB)" \
 	cargo test --workspace
+
+# Requires: cargo install cargo-llvm-cov && rustup component add llvm-tools-preview
+coverage:
+	CARGO_TARGET_DIR=target/coverage \
+	PHP_CONFIG=$(ZTS_PHP_CONFIG) \
+	LD_LIBRARY_PATH=$(ZTS_LIB) \
+	cargo llvm-cov --workspace --lcov --output-path lcov.info \
+		--ignore-filename-regex '(crates/integration_tests/|bindings\.rs$$|/src/main\.rs$$)'
