@@ -27,3 +27,9 @@ target
 
 /target
 .envrc
+
+# Coverage artifacts (cargo-llvm-cov)
+lcov.info
+codecov.json
+*.profraw
+*.profdata
