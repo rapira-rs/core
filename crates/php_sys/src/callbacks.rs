@@ -89,6 +89,22 @@ pub(crate) unsafe extern "C" fn ub_write(buf: *const c_char, len: usize) -> usiz
                 .blocking_send(Frame::Body(Bytes::copy_from_slice(buf)))
                 .is_err()
             {
+                ctx.finish();
+                // receiver dropped = client disconnect; core never checks ub_write's
+                // return, the SAPI must raise the abort itself (bails unless ignore_user_abort)
+                unsafe {
+                    // PHPAPI void php_handle_aborted_connection(void)
+                    // {
+                    //       PG(connection_status) = PHP_CONNECTION_ABORTED;
+                    //       php_output_set_status(PHP_OUTPUT_DISABLED);
+
+                    //       if (!PG(ignore_user_abort)) {
+                    //               zend_bailout();
+                    //       }
+                    // }
+                    php_handle_aborted_connection();
+                    // function bails. q: what about longjum over rust frames? do we have tmp own of heap memory here?
+                };
                 return 0;
             }
         }
@@ -117,6 +133,11 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
                 //         sapi_module.ub_write(...); <-- boom, we don't call ub_write when ctx is null
                 return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
             };
+
+            if ctx.headers_sent {
+                return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
+            }
+
             ctx
         };
 
@@ -139,17 +160,26 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
 pub(crate) unsafe extern "C" fn flush(_sc: *mut c_void) {
     // nothing to do, chunks already sent
 }
-
 pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usize {
+    // php-src main/SAPI.c:232-252:
+    // read_bytes = sapi_module.read_post(buffer, buflen);
+    // ...
+    // if (read_bytes < buflen) {
+    // /* done */
+    //     SG(post_read) = 1;
+    // }
     with_ctx(0, |ctx| {
         let dst = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, count) };
-        loop {
-            match ctx.req.body.read(dst) {
-                Ok(n) => return n,
+        let mut filled = 0;
+        while filled < count {
+            match ctx.req.body.read(&mut dst[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => return 0,
             }
         }
+        filled
     })
 }
 
@@ -200,6 +230,8 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put("SERVER_NAME", &ctx.req.server_name);
         put("SERVER_PORT", &ctx.req.server_port);
         put("REMOTE_ADDR", &ctx.req.remote_addr);
+        put("GATEWAY_INTERFACE", "CGI/1.1");
+        put("HTTPS", if ctx.req.https { "on" } else { "" });
 
         let auth_type = ctx
             .req
@@ -289,7 +321,7 @@ fn send_head(c: &mut Context) {
     }
 }
 
-pub(crate) fn send_error_head(c: &Context, status: u16) {
+pub(crate) fn send_error_head(c: &mut Context, status: u16) {
     if c.headers_sent {
         return;
     }
@@ -299,5 +331,6 @@ pub(crate) fn send_error_head(c: &Context, status: u16) {
             status,
             headers: vec![],
         }));
+        c.headers_sent = true;
     }
 }

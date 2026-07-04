@@ -24,4 +24,6 @@ php_core_globals *rapira_pg(void);
 zend_compiler_globals *rapira_cg(void);
 void rapira_init_call_stack(void);
 void rapira_process_init(void);
+void rapira_request_init(void);
+void rapira_release_temporary_streams(void);
 #endif

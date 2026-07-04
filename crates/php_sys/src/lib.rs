@@ -34,6 +34,8 @@ unsafe extern "C" {
     pub fn rapira_activate_auto_globals();
     pub fn rapira_request_teardown() -> types::Outcome; //enum
     pub fn rapira_process_init();
+    pub fn rapira_request_init();
+    pub fn rapira_release_temporary_streams();
 
     pub fn rapira_run_handler(
         fci: *mut zend_fcall_info,

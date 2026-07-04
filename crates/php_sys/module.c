@@ -1,4 +1,6 @@
 #include "wrapper.h"
+#include <main/php_memory_streams.h>
+#include <main/php_streams.h>
 
 extern bool rapira_rs_handle_request(zend_fcall_info *fci,
                                      zend_fcall_info_cache *fcc);
@@ -52,7 +54,8 @@ zend_module_entry rapira_module_entry = {
 // reusing the previous one's session).
 static void rapira_reset_session(void) {
     if (PS(session_status) == php_session_active) {
-        php_session_flush(1); // write + close the active session
+        zend_try { php_session_flush(1); }
+        zend_end_try(); // write + close the active session
     }
     if (!Z_ISUNDEF(PS(http_session_vars))) {
         zval_ptr_dtor(&PS(http_session_vars));
@@ -135,9 +138,13 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
             outcome = EXIT;
             zend_clear_exception();
         } else {
-            outcome = THROW;
-            zend_try { zend_exception_error(EG(exception), E_ERROR); }
-            zend_end_try();
+            // give set_exception_handler a chance
+            zend_try_exception_handler();
+            if (EG(exception)) {
+                outcome = THROW;
+                // Throwable path is E_DONT_BAIL and releases the object itself
+                zend_exception_error(EG(exception), E_ERROR);
+            }
         }
     }
 
@@ -351,4 +358,56 @@ void rapira_process_init(void) {
     signal(SIGPIPE, SIG_IGN);
 #endif
     zend_signal_startup();
+}
+
+/* Temp streams (POST request_body) are only NULLed by sapi_deactivate_module();
+  nothing reclaims the resource in a resident request, so sweep dead ones
+  before serving the next job. Safe here: the previous request is finished. */
+void rapira_release_temporary_streams(void) {
+    zend_resource *val;
+    int stream_type = php_file_le_stream();
+    ZEND_HASH_FOREACH_PTR(&EG(regular_list), val) {
+        if (val->type == stream_type) {
+            php_stream *stream = (php_stream *)val->ptr;
+            if (stream != NULL && stream->ops == &php_stream_temp_ops &&
+                stream->__exposed == 0 && GC_REFCOUNT(val) == 1) {
+                zend_list_delete(val);
+            }
+        }
+    }
+    ZEND_HASH_FOREACH_END();
+}
+
+/* Per-request state php_request_startup() resets that the worker path skips. */
+void rapira_request_init(void) {
+    PG(connection_status) = PHP_CONNECTION_NORMAL;
+    PG(header_is_being_sent) = 0;
+
+#ifdef ZEND_MAX_EXECUTION_TIMERS
+    /* per-request execution timer; teardown unsets it */
+    if (PG(max_input_time) == -1) {
+        zend_set_timeout(EG(timeout_seconds), 1);
+    } else {
+        zend_set_timeout(PG(max_input_time), 1);
+    }
+#endif
+
+    if (PG(expose_php)) {
+        sapi_add_header(SAPI_PHP_VERSION_HEADER,
+                        sizeof(SAPI_PHP_VERSION_HEADER) - 1, 1);
+    }
+
+    /* main/main.c php_request_startup(): honor the output INIs per request */
+    if (PG(output_handler) && PG(output_handler)[0]) {
+        zval oh;
+        ZVAL_STRING(&oh, PG(output_handler));
+        php_output_start_user(&oh, 0, PHP_OUTPUT_HANDLER_STDFLAGS);
+        zval_ptr_dtor(&oh);
+    } else if (PG(output_buffering)) {
+        php_output_start_user(
+            NULL, PG(output_buffering) > 1 ? PG(output_buffering) : 0,
+            PHP_OUTPUT_HANDLER_STDFLAGS);
+    } else if (PG(implicit_flush)) {
+        php_output_set_implicit_flush(1);
+    }
 }

@@ -504,3 +504,21 @@ fn status_code_does_not_leak_worker() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn status_code_does_not_leak_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic, 1)?;
+    let h = r.handle()?;
+    let (s1, _) = drain(h.handle_blocking(req("/", "status-404.php"))?);
+    let (s2, _) = drain(h.handle_blocking(req("/", "hello.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(s1, 404);
+    assert_eq!(
+        s2, 200,
+        "classic mode reuses SG on the thread; 404 must not leak"
+    );
+    Ok(())
+}
