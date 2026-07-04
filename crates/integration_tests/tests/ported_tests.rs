@@ -1,5 +1,7 @@
-use integration_tests::{drain, php_lock, req};
-use php_sys::{Mode, Rapira, Request};
+use std::path::Path;
+
+use integration_tests::{drain, fixture, php_lock, req};
+use php_sys::{Frame, Mode, Rapira, Request};
 
 fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u8>) -> Request {
     let mut r: Request = req(&format!("/{fixture_name}?{query}"), fixture_name);
@@ -8,6 +10,41 @@ fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u
     r.content_length = body.len() as i64;
     r.body = Box::new(std::io::Cursor::new(body));
     r
+}
+
+/// Like `drain`, but keeps the head frame(s): (head count, status, headers, body).
+struct Resp {
+    heads: u32,
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+fn recv_all(mut rx: tokio::sync::mpsc::Receiver<Frame>) -> Resp {
+    let (mut heads, mut status, mut headers, mut body) = (0u32, 0u16, Vec::new(), Vec::new());
+    while let Some(frame) = rx.blocking_recv() {
+        match frame {
+            Frame::Head(h) => {
+                heads += 1;
+                status = h.status;
+                headers = h.headers;
+            }
+            Frame::Body(b) => body.extend_from_slice(&b),
+        }
+    }
+    Resp {
+        heads,
+        status,
+        headers,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    }
+}
+
+fn header_value<'a>(r: &'a Resp, name: &str) -> Option<&'a str> {
+    r.headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
 }
 
 // POST form body parses into $_POST while the query string populates $_GET.
@@ -38,5 +75,594 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
             "missing {expected:?} (got: {body:?})"
         );
     }
+    Ok(())
+}
+
+// $_GET/$_POST must be rebuilt per worker request — no stale values.
+#[test]
+fn post_superglobals_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("post-superglobals-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (s1, b1) = drain(h.handle_blocking(post(
+        "post-superglobals-worker.php",
+        "foo=bar&iG=42",
+        Some("application/x-www-form-urlencoded"),
+        b"baz=bat&i=7".to_vec(),
+    ))?);
+    let (s2, b2) = drain(h.handle_blocking(post(
+        "post-superglobals-worker.php",
+        "foo=bar&iG=43",
+        Some("application/x-www-form-urlencoded"),
+        b"baz=bat&i=8".to_vec(),
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(s1, 200);
+    assert!(
+        b1.contains("'iG' => '42'") && b1.contains("'i' => '7'"),
+        "req1 (got: {b1:?})"
+    );
+    assert_eq!(s2, 200);
+    assert!(
+        b2.contains("'iG' => '43'") && b2.contains("'i' => '8'"),
+        "req2 (got: {b2:?})"
+    );
+    assert!(
+        !b2.contains("'42'") && !b2.contains("'7'"),
+        "previous request's GET/POST must not leak (got: {b2:?})"
+    );
+    Ok(())
+}
+
+// $_REQUEST merges GET + POST under the default variables_order/request_order.
+#[test]
+fn request_merge_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic, 1)?;
+    let h = r.handle()?;
+    let (status, body) = drain(h.handle_blocking(post(
+        "request-merge.php",
+        "get_key=get_value_1",
+        Some("application/x-www-form-urlencoded"),
+        b"post_key=post_value_1".to_vec(),
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("'get_key' => 'get_value_1'")
+            && body.contains("'post_key' => 'post_value_1'"),
+        "$_REQUEST must merge GET and POST (got: {body:?})"
+    );
+    Ok(())
+}
+
+#[test]
+fn request_merge_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("request-merge-worker.php")), 1)?;
+    let h = r.handle()?;
+    for i in 1..=3 {
+        let body_bytes = format!("post_key=post_value_{i}").into_bytes();
+        let (status, body) = drain(h.handle_blocking(post(
+            "request-merge-worker.php",
+            &format!("get_key=get_value_{i}"),
+            Some("application/x-www-form-urlencoded"),
+            body_bytes,
+        ))?);
+        assert_eq!(status, 200);
+        assert!(
+            body.contains(&format!("'get_key' => 'get_value_{i}'"))
+                && body.contains(&format!("'post_key' => 'post_value_{i}'")),
+            "req{i}: $_REQUEST must carry only this request's data (got: {body:?})"
+        );
+    }
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// A jit autoglobal first touched only in a LATER request must still build fresh:
+// req1 builds $_REQUEST, req2 never touches it, req3 must not see stale data.
+#[test]
+fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("jit-request-worker.php")), 1)?;
+    let h = r.handle()?;
+    for i in 1..=4 {
+        let query = if i % 2 == 1 {
+            format!("use_request=1&val={i}")
+        } else {
+            format!("val={i}")
+        };
+        let (status, body) = drain(h.handle_blocking(req(
+            &format!("/jit-request-worker.php?{query}"),
+            "jit-request-worker.php",
+        ))?);
+        assert_eq!(status, 200);
+        assert!(
+            body.contains(&format!("'val' => '{i}'")),
+            "req{i}: $_GET must be fresh (got: {body:?})"
+        );
+        if i % 2 == 1 {
+            assert!(
+                body.contains("REQUEST_COUNT:2") && body.contains("VAL_CHECK:MATCH"),
+                "req{i}: $_REQUEST must rebuild from this request's data (got: {body:?})"
+            );
+            assert!(
+                !body.contains("MISMATCH"),
+                "req{i}: stale $_REQUEST (got: {body:?})"
+            );
+        } else {
+            assert!(body.contains("SKIPPED"), "req{i} (got: {body:?})");
+        }
+    }
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// The Cookie header feeds $_COOKIE fresh on every worker request.
+#[test]
+fn cookies_refresh_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("cookies-worker.php")), 1)?;
+    let h = r.handle()?;
+    for i in 0..3 {
+        let mut request = req("/cookies-worker.php", "cookies-worker.php");
+        request
+            .headers
+            .push(("Cookie".into(), format!("foo=bar; i={i}")));
+        let (status, body) = drain(h.handle_blocking(request)?);
+        assert_eq!(status, 200);
+        assert!(
+            body.contains("'foo' => 'bar'") && body.contains(&format!("'i' => '{i}'")),
+            "req{i}: $_COOKIE must reflect this request's header (got: {body:?})"
+        );
+    }
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// PHP's cookie parser mangles malformed names (spaces/dots -> underscores),
+// drops separator-only segments, keeps trailing spaces in values, and keeps
+// the FIRST occurrence of a duplicate name.
+#[test]
+fn malformed_cookies_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic, 1)?;
+    let h = r.handle()?;
+    let mut request = req("/cookies.php", "cookies.php");
+    request.headers.push((
+        "Cookie".into(),
+        "foo =bar; ===;;==;  .dot.=val  ; PHPSESSID=1234; dup=first; dup=second".into(),
+    ));
+    let (status, body) = drain(h.handle_blocking(request)?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200);
+    for expected in [
+        "'foo_' => 'bar'",
+        "'_dot_' => 'val  '",
+        "'PHPSESSID' => '1234'",
+        "'dup' => 'first'",
+        "count=4",
+    ] {
+        assert!(
+            body.contains(expected),
+            "missing {expected:?} (got: {body:?})"
+        );
+    }
+    assert!(
+        !body.contains("second"),
+        "first duplicate must win (got: {body:?})"
+    );
+    Ok(())
+}
+
+fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(mode, 1)?;
+    let h = r.handle()?;
+
+    let r1 = recv_all(h.handle_blocking(req(&format!("/{fixture_name}"), fixture_name))?);
+    assert_eq!(r1.status, 200);
+    assert_eq!(r1.body, "Count: 0\n", "fresh session starts at zero");
+    let sid = r1
+        .headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+        .find_map(|(_, v)| v.strip_prefix("PHPSESSID="))
+        .map(|v| v.split(';').next().unwrap_or(v).trim().to_string())
+        .expect("session cookie must be issued");
+
+    let mut request = req(&format!("/{fixture_name}"), fixture_name);
+    request
+        .headers
+        .push(("Cookie".into(), format!("PHPSESSID={sid}")));
+    let r2 = recv_all(h.handle_blocking(request)?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(r2.status, 200);
+    assert_eq!(
+        r2.body, "Count: 1\n",
+        "returned cookie must resume the same session"
+    );
+    Ok(())
+}
+
+#[test]
+fn session_cookie_roundtrip_classic() -> anyhow::Result<()> {
+    session_roundtrip(Mode::Classic, "session-count.php")
+}
+
+#[test]
+fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
+    session_roundtrip(
+        Mode::Worker(fixture("session-count-worker.php")),
+        "session-count-worker.php",
+    )
+}
+
+// A userland save handler registered DURING request 1 must still serve request 2.
+#[test]
+fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("session-handler-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (s1, b1) = drain(h.handle_blocking(req(
+        "/session-handler-worker.php?action=register",
+        "session-handler-worker.php",
+    ))?);
+    let (s2, b2) = drain(h.handle_blocking(req(
+        "/session-handler-worker.php",
+        "session-handler-worker.php",
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(s1, 200);
+    assert!(
+        b1.contains("REGISTERED save_handler=user"),
+        "handler registration must flip session.save_handler (got: {b1:?})"
+    );
+    assert_eq!(s2, 200);
+    assert!(
+        b2.contains("START=true"),
+        "second request must start a session (got: {b2:?})"
+    );
+    assert!(
+        !b2.contains("ERROR:") && !b2.contains("EXCEPTION:"),
+        "the registered handler must still be usable (got: {b2:?})"
+    );
+    Ok(())
+}
+
+// A save handler registered BEFORE the worker loop stays installed for all requests.
+#[test]
+fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(
+        Mode::Worker(fixture("preloop-session-handler-worker.php")),
+        1,
+    )?;
+    let h = r.handle()?;
+    let (s1, b1) = drain(h.handle_blocking(req(
+        "/preloop-session-handler-worker.php?action=check",
+        "preloop-session-handler-worker.php",
+    ))?);
+    let (s2, b2) = drain(h.handle_blocking(req(
+        "/preloop-session-handler-worker.php?action=use_session",
+        "preloop-session-handler-worker.php",
+    ))?);
+    let (s3, b3) = drain(h.handle_blocking(req(
+        "/preloop-session-handler-worker.php?action=check",
+        "preloop-session-handler-worker.php",
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!((s1, s2, s3), (200, 200, 200));
+    assert!(
+        b1.contains("HANDLER_PRESERVED") && b1.contains("save_handler=user"),
+        "req1 (got: {b1:?})"
+    );
+    assert!(
+        b2.contains("SESSION_OK") && !b2.contains("ERROR:") && !b2.contains("EXCEPTION:"),
+        "session must work through the pre-loop handler (got: {b2:?})"
+    );
+    assert!(
+        b3.contains("HANDLER_PRESERVED"),
+        "handler must survive a request that used the session (got: {b3:?})"
+    );
+    Ok(())
+}
+
+// header() edge cases: no-space colon is trimmed, a colon-less line never
+// becomes a response header, the status set via http_response_code sticks,
+// and the header set rebuilds per worker request.
+#[test]
+fn response_header_edges_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("headers-worker.php")), 1)?;
+    let h = r.handle()?;
+    for i in [42, 43] {
+        let resp = recv_all(h.handle_blocking(req(
+            &format!("/headers-worker.php?i={i}"),
+            "headers-worker.php",
+        ))?);
+        assert_eq!(
+            resp.status, 201,
+            "http_response_code(201) must reach the head"
+        );
+        assert_eq!(header_value(&resp, "Foo"), Some("bar"));
+        assert_eq!(header_value(&resp, "Foo2"), Some("bar2"));
+        assert_eq!(
+            header_value(&resp, "Foo3"),
+            Some("bar3"),
+            "no-space colon must trim"
+        );
+        assert_eq!(header_value(&resp, "I"), Some(format!("{i}").as_str()));
+        assert!(
+            header_value(&resp, "Invalid").is_none(),
+            "colon-less header line must not become a response header"
+        );
+        assert_eq!(resp.body, "Hello");
+    }
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+fn assert_headers_list_response(resp: &Resp, i: u16) {
+    assert_eq!(resp.status, 200 + i);
+    // the raw llist (headers_list dump in the body) keeps the colon-less line...
+    for expected in ["X-Powered-By: PHP/", "Foo: bar", "Foo2: bar2", "Invalid"] {
+        assert!(
+            resp.body.contains(expected),
+            "missing {expected:?} (got: {:?})",
+            resp.body
+        );
+    }
+    assert!(
+        resp.body.contains(&format!("I: {i}")),
+        "got: {:?}",
+        resp.body
+    );
+    // ...while the head frame drops it and carries the parsed pairs
+    assert_eq!(header_value(resp, "Foo"), Some("bar"));
+    assert!(
+        header_value(resp, "X-Powered-By").is_some_and(|v| v.starts_with("PHP/")),
+        "X-Powered-By must be a response header (headers: {:?})",
+        resp.headers
+    );
+    assert!(header_value(resp, "Invalid").is_none());
+}
+
+#[test]
+fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic, 1)?;
+    let h = r.handle()?;
+    let resp =
+        recv_all(h.handle_blocking(req("/response-headers.php?i=1", "response-headers.php"))?);
+    drop(h);
+    r.shutdown();
+    assert_headers_list_response(&resp, 1);
+    Ok(())
+}
+
+// fail-first: worker requests must also carry the expose_php X-Powered-By
+// header that a full per-request startup would add.
+#[test]
+fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("response-headers-worker.php")), 1)?;
+    let h = r.handle()?;
+    for i in [1u16, 2] {
+        let resp = recv_all(h.handle_blocking(req(
+            &format!("/response-headers-worker.php?i={i}"),
+            "response-headers-worker.php",
+        ))?);
+        assert_headers_list_response(&resp, i);
+    }
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// Unbuffered output arrives as one body frame per write, in order, after the head.
+#[test]
+fn flush_chunk_boundaries_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("flush-worker.php")), 1)?;
+    let h = r.handle()?;
+    for i in [42, 43] {
+        let mut rx =
+            h.handle_blocking(req(&format!("/flush-worker.php?i={i}"), "flush-worker.php"))?;
+        let mut frames = Vec::new();
+        while let Some(frame) = rx.blocking_recv() {
+            frames.push(frame);
+        }
+        assert_eq!(frames.len(), 3, "expected head + two body chunks");
+        match &frames[0] {
+            Frame::Head(head) => assert_eq!(head.status, 200),
+            Frame::Body(_) => panic!("first frame must be the head"),
+        }
+        match &frames[1] {
+            Frame::Body(b) => assert_eq!(&b[..], b"He"),
+            Frame::Head(_) => panic!("second frame must be the first chunk"),
+        }
+        match &frames[2] {
+            Frame::Body(b) => assert_eq!(&b[..], format!("llo {i}").as_bytes()),
+            Frame::Head(_) => panic!("third frame must be the second chunk"),
+        }
+    }
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// A raw status line — header('HTTP/1.1 204 No Content', true, 204) — drives the
+// head status; the SAPI itself never suppresses the body for a 204.
+#[test]
+fn raw_status_line_204_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic, 1)?;
+    let h = r.handle()?;
+    let resp = recv_all(h.handle_blocking(req("/only-headers.php", "only-headers.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.heads, 1);
+    assert_eq!(resp.status, 204);
+    assert_eq!(
+        header_value(&resp, "Content-Type"),
+        Some("application/json")
+    );
+    assert!(
+        !resp.headers.iter().any(|(k, _)| k.starts_with("HTTP/")),
+        "the raw status line must not appear as a header (headers: {:?})",
+        resp.headers
+    );
+    assert_eq!(resp.body, r#"{"status": "test"}"#);
+    Ok(())
+}
+
+// A 6MB body with no content type travels intact through php://input, and the
+// next request's input is unaffected.
+#[test]
+fn large_post_body_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("large-request-worker.php")), 1)?;
+    let h = r.handle()?;
+    for _ in 0..2 {
+        let (status, body) = drain(h.handle_blocking(post(
+            "large-request-worker.php",
+            "",
+            None,
+            vec![b'f'; 6_048_576],
+        ))?);
+        assert_eq!(status, 200);
+        assert_eq!(body, "Request body size: 6048576");
+    }
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+fn multipart_body() -> Vec<u8> {
+    b"--RAPIRA\r\nContent-Disposition: form-data; name=\"file\"; filename=\"foo.txt\"\r\nContent-Type: text/plain\r\n\r\nbar\r\n--RAPIRA--\r\n"
+        .to_vec()
+}
+
+fn assert_upload_and_cleanup(status: u16, body: &str) {
+    assert_eq!(status, 200);
+    let mut parts = body.splitn(4, '|');
+    let (name, error, content, tmp) = (
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+    );
+    assert_eq!(name, "foo.txt", "got: {body:?}");
+    assert_eq!(error, "0", "UPLOAD_ERR_OK expected (got: {body:?})");
+    assert_eq!(
+        content, "bar",
+        "tmp file must hold the uploaded bytes (got: {body:?})"
+    );
+    assert!(
+        !tmp.is_empty() && !Path::new(tmp).exists(),
+        "upload tmp file must be deleted after the request (path: {tmp:?})"
+    );
+}
+
+#[test]
+fn multipart_upload_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic, 1)?;
+    let h = r.handle()?;
+    let (status, body) = drain(h.handle_blocking(post(
+        "upload.php",
+        "",
+        Some("multipart/form-data; boundary=RAPIRA"),
+        multipart_body(),
+    ))?);
+    drop(h);
+    r.shutdown();
+    assert_upload_and_cleanup(status, &body);
+    Ok(())
+}
+
+#[test]
+fn multipart_upload_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("upload-worker.php")), 1)?;
+    let h = r.handle()?;
+    for _ in 0..2 {
+        let (status, body) = drain(h.handle_blocking(post(
+            "upload-worker.php",
+            "",
+            Some("multipart/form-data; boundary=RAPIRA"),
+            multipart_body(),
+        ))?);
+        assert_upload_and_cleanup(status, &body);
+    }
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// Output already sent, then an uncaught throw: exactly one head, status 200
+// (committed by the echo), the fatal text follows in the body, worker survives.
+#[test]
+fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("output-then-throw-worker.php")), 1)?;
+    let h = r.handle()?;
+    for i in [1, 2] {
+        let resp = recv_all(h.handle_blocking(req(
+            &format!("/output-then-throw-worker.php?i={i}"),
+            "output-then-throw-worker.php",
+        ))?);
+        assert_eq!(resp.heads, 1, "exactly one head frame (got {})", resp.heads);
+        assert_eq!(resp.status, 200, "headers were committed by the echo");
+        let hello = resp.body.find("hello");
+        let uncaught = resp.body.find(&format!("Uncaught Exception: request {i}"));
+        assert!(
+            hello.is_some() && uncaught.is_some() && hello < uncaught,
+            "echo output must precede the fatal text (got: {:?})",
+            resp.body
+        );
+    }
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// Streams opened before the worker loop keep their identity and read position
+// across requests — between-request cleanup must not touch live resources.
+#[test]
+fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("file-stream-worker.php")), 1)?;
+    let h = r.handle()?;
+    for expected in ["word1", "word2", "word3"] {
+        let (status, body) =
+            drain(h.handle_blocking(req("/file-stream-worker.php", "file-stream-worker.php"))?);
+        assert_eq!(status, 200);
+        assert_eq!(
+            body, expected,
+            "pre-loop stream must keep advancing cleanly"
+        );
+    }
+    drop(h);
+    r.shutdown();
     Ok(())
 }
