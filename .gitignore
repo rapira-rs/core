@@ -30,6 +30,5 @@ target
 
 # Coverage artifacts (cargo-llvm-cov)
 lcov.info
-codecov.json
 *.profraw
 *.profdata
