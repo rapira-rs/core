@@ -32,7 +32,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.PHP_PREFIX }}
-          key: php-zts-debug-${{ runner.os }}-${{ steps.phpsrc.outputs.sha }}-embed-nosignals-v2
+          key: php-zts-debug-${{ runner.os }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v3
 
       - name: Build ZTS+debug PHP (embed SAPI) from php-src master
         if: steps.php.outputs.cache-hit != 'true'

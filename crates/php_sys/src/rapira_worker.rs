@@ -88,13 +88,15 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let errored = unsafe {
         let mut err = false;
         populate_request_context(&mut job.ctx);
+        rapira_release_temporary_streams();
         php_output_activate();
         sapi_activate();
+        rapira_request_init();
         reset_super_globals();
         rapira_activate_auto_globals();
         let h_outcome: types::Outcome = rapira_run_handler(fci, fcc);
         if matches!(h_outcome, types::Outcome::Bailout | types::Outcome::Throw) {
-            send_error_head(&job.ctx, 500);
+            send_error_head(&mut job.ctx, 500);
             err = true;
         }
         let t_outcome: types::Outcome = rapira_request_teardown();
