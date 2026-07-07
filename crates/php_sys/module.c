@@ -395,15 +395,7 @@ int rapira_request_activate(void) {
         sapi_activate();
         rapira_modules_rinit();
         rapira_request_init();
-
-        // reset super global (probably to a separate func)
-        zval *files = &PG(http_globals)[TRACK_VARS_FILES];
-        zval_ptr_dtor(files);
-        ZVAL_UNDEF(files);
-        zend_hash_str_del(&EG(symbol_table), "_SESSION",
-                          sizeof("_SESSION") - 1);
-        // ---
-
+        rapira_reset_super_global();
         rapira_activate_auto_globals();
     }
     zend_catch { outcome = BAILOUT; }
