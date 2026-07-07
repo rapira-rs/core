@@ -40,7 +40,7 @@ fn recv_all(mut rx: tokio::sync::mpsc::Receiver<Frame>) -> Resp {
     }
 }
 
-fn header_value<'a>(r: &Resp, name: &str) -> Option<String> {
+fn header_value(r: &Resp, name: &str) -> Option<String> {
     r.headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))

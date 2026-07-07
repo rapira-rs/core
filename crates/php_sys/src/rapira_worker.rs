@@ -23,14 +23,14 @@ thread_local! {
 const UNHEALTHY_AFTER: u32 = 5;
 
 enum Cycle {
-    Stop,    // intake channel closed (Rapira dropped) — the only way a worker exits
-    Recycle, // a job bailed — re-bootstrap immediately
-    Failed,  // startup or bootstrap fatal — 503 one queued job, then retry the boot
-    Restart, // php_request_shutdown bailed — rebuild the PHP thread state
+    Stop,    // intake channel closed (Rapira dropped) - the only way a worker exits
+    Recycle, // a job bailed - re-bootstrap immediately
+    Failed,  // startup or bootstrap fatal - 503 one queued job, then retry the boot
+    Restart, // php_request_shutdown bailed - rebuild the PHP thread state
 }
 
 pub enum WorkerExit {
-    Closed,  // intake channel closed — worker_main exits the thread
+    Closed,  // intake channel closed - worker_main exits the thread
     Restart, // worker_main drops PhpThread and builds a fresh one
 }
 
