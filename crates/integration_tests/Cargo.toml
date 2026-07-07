@@ -10,7 +10,7 @@ workspace = true
 
 [dependencies]
 php_sys = { path = "../php_sys" }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 log = "0.4"
 
 [dev-dependencies]

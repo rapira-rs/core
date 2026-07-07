@@ -51,7 +51,7 @@ pub struct Request {
 
 pub struct ResponseHead {
     pub status: u16,
-    pub headers: Vec<(String, String)>,
+    pub headers: Vec<(String, Vec<u8>)>,
 }
 
 pub struct ReqC {
@@ -70,9 +70,10 @@ impl ReqC {
         let cookie = r
             .headers
             .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
+            .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+            .map(|(_, v)| v.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
 
         let authorization: String = r
             .headers

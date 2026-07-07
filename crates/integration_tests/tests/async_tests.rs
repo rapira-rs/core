@@ -129,14 +129,15 @@ async fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
         "buffered body is lost to the bailout (got: {b2:?})"
     );
 
-    // worker survived the teardown bailout; counter 1 -> 2 (bail) -> 3
+    // the teardown bailout recycles the worker: full php_request_shutdown +
+    // re-run bootstrap — statics reset, so the counter starts over
     assert_eq!(
         s3, 200,
         "worker must recover after a teardown bailout (got {s3})"
     );
     assert!(
-        b3.contains("ok counter=3"),
-        "worker must survive the teardown bailout and serve the next request (got: {b3:?})"
+        b3.contains("ok counter=1"),
+        "recycle re-runs the bootstrap; statics reset (got: {b3:?})"
     );
 
     drop(h);

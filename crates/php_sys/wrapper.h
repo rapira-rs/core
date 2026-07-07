@@ -17,6 +17,10 @@
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
 #endif
+#include <Zend/zend_observer.h>
+#include <ext/standard/head.h>
+#include <main/php_memory_streams.h>
+#include <main/php_streams.h>
 
 sapi_globals_struct *rapira_sg(void);
 zend_executor_globals *rapira_eg(void);
@@ -26,4 +30,7 @@ void rapira_init_call_stack(void);
 void rapira_process_init(void);
 void rapira_request_init(void);
 void rapira_release_temporary_streams(void);
+int rapira_request_activate(void);
+int rapira_request_shutdown(void);
+bool rapira_fatal_recorded(void);
 #endif

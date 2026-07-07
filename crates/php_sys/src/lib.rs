@@ -12,7 +12,7 @@ pub mod scoreboard;
 pub mod start;
 pub mod types;
 
-use core::ffi::c_int;
+use std::ffi::{c_int, c_short};
 
 pub use bindings::*;
 pub use handler::RapiraHandle;
@@ -23,6 +23,9 @@ pub use types::{Context, Frame, Mode, Request, ResponseHead};
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
 
+// main/php.h:414 — PG(connection_status) value for an aborted client
+pub const PHP_CONNECTION_ABORTED: c_short = 1;
+
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;
     pub fn rapira_eg() -> *mut zend_executor_globals;
@@ -31,11 +34,12 @@ unsafe extern "C" {
     pub fn rapira_finish_output() -> types::Outcome;
     pub fn rapira_init_call_stack();
     pub fn rapira_clear_last_error();
-    pub fn rapira_activate_auto_globals();
     pub fn rapira_request_teardown() -> types::Outcome; //enum
     pub fn rapira_process_init();
-    pub fn rapira_request_init();
     pub fn rapira_release_temporary_streams();
+    pub fn rapira_request_activate() -> types::Outcome;
+    pub fn rapira_request_shutdown() -> types::Outcome;
+    pub fn rapira_fatal_recorded() -> bool;
 
     pub fn rapira_run_handler(
         fci: *mut zend_fcall_info,

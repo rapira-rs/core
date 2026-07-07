@@ -1,13 +1,11 @@
-use std::{fs::File, io::ErrorKind, ptr::null_mut};
-
-use log::error;
+use std::{fs::File, io::ErrorKind};
 
 use crate::{
     callbacks::send_error_head,
     context::{bind_server_context, populate_request_context, unbind_server_context},
     executor::run_script,
-    scoreboard::sb_record,
-    start::JobRx,
+    scoreboard::{Event, sb_update},
+    start::{JobRx, pull_job},
     types::Job,
     *,
 };
@@ -22,33 +20,21 @@ fn status_for_open_error(kind: ErrorKind) -> u16 {
 }
 
 pub(crate) fn classic_worker(rx: JobRx) {
-    loop {
-        let job: Option<Job> = match rx.lock() {
-            Ok(mut guard) => guard.blocking_recv(),
-            Err(err) => {
-                error!(
-                    "[rapira] classic_worker() failed to lock job receiver: {:?}",
-                    err
-                );
-                break;
-            }
-        };
-
-        let Some(mut job) = job else { break };
-        sb_record(classic_executor(&mut job));
+    while let Some(mut job) = pull_job(&rx) {
+        sb_update(classic_executor(&mut job));
         job.ctx.finish();
     }
 }
 
-fn classic_executor(job: &mut Job) -> bool {
+fn classic_executor(job: &mut Job) -> Event {
     bind_server_context(&mut job.ctx);
     let is_errored: bool = unsafe {
         populate_request_context(&mut job.ctx);
         if php_request_startup() == FAILURE {
             send_error_head(&mut job.ctx, 500);
-            php_request_shutdown(null_mut());
+            rapira_request_shutdown();
             unbind_server_context();
-            return true;
+            return Event::Handled(true);
         }
 
         let exec_err: bool = match File::open(&job.ctx.req.script_filename) {
@@ -57,21 +43,25 @@ fn classic_executor(job: &mut Job) -> bool {
                 true
             }
             Ok(_) => {
-                let ok: bool = run_script(&job.ctx.req.script_filename);
-                if !ok && !job.ctx.headers_sent {
-                    send_error_head(&mut job.ctx, 500);
-                }
                 // in the sb_record we count errors as errored = true
                 // here run_script may return false, as an indicator of a PHP error
                 // so we need to reverse the logic to match the sb_record expectation
-                !ok
+                !run_script(&job.ctx.req.script_filename)
             }
         };
+        // flushes output and sends the REAL head (script status + Set-Cookie) via
+        // php_output_deactivate -> sapi_send_headers
+        rapira_request_shutdown();
 
-        php_request_shutdown(null_mut());
+        // fallback ONLY if nothing emitted a head (script bailed before any output
+        // and the flush sent none) - never pre-empts the real head now
+        if exec_err && !job.ctx.headers_sent {
+            send_error_head(&mut job.ctx, 500);
+        }
+
         exec_err
     };
 
     unbind_server_context();
-    is_errored
+    Event::Handled(is_errored)
 }

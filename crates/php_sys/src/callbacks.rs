@@ -37,17 +37,15 @@ impl SapiHeaders {
 struct SapiHeader(*const sapi_header_struct);
 
 impl SapiHeader {
-    fn name_value(&self) -> Option<(String, String)> {
+    fn name_value(&self) -> Option<(String, Vec<u8>)> {
         let sh = unsafe { &*self.0 };
         if sh.header.is_null() || sh.header_len == 0 {
             return None;
         }
-
         let line: &[u8] = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
-
         let i: usize = line.iter().position(|&b| b == b':')?;
         let k: String = String::from_utf8_lossy(&line[..i]).trim().to_string();
-        let v: String = String::from_utf8_lossy(&line[i + 1..]).trim().to_string();
+        let v: Vec<u8> = line[i + 1..].trim_ascii().to_vec();
         (!k.is_empty()).then_some((k, v))
     }
 }
@@ -56,14 +54,12 @@ pub(crate) unsafe extern "C" fn sapi_startup_cb(sapi_module: *mut sapi_module_st
     // https://doc.rust-lang.org/reference/expressions/operator-expr.html#raw-borrow-operators
     unsafe { php_module_startup(sapi_module, &raw mut rapira_module_entry) }
 }
-
 pub(crate) unsafe extern "C" fn sapi_shutdown_cb(_sapi_module: *mut sapi_module_struct) -> c_int {
     unsafe {
         php_module_shutdown();
     }
     SUCCESS
 }
-
 pub(crate) unsafe extern "C" fn sapi_deactivate_cb() -> c_int {
     SUCCESS
 }
@@ -142,7 +138,7 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
         };
 
         let h = SapiHeaders(h);
-        let headers: Vec<(String, String)> = h
+        let headers: Vec<(String, Vec<u8>)> = h
             .lines()
             .filter_map(|l: SapiHeader| l.name_value())
             .collect();
@@ -182,13 +178,11 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
         filled
     })
 }
-
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
     with_ctx(null_mut(), |ctx| {
         ctx.c.cookie.as_ptr() as *mut c_char // we own the buffer
     })
 }
-
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
     with_ctx((), |ctx| {
         let put = |name: &str, val: &str| unsafe {
@@ -255,18 +249,28 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             put("CONTENT_LENGTH", &ctx.req.content_length.to_string());
         }
 
+        let mut merged: Vec<(String, String)> = Vec::with_capacity(ctx.req.headers.len());
         for (k, v) in &ctx.req.headers {
-            put(
-                &format!("HTTP_{}", k.to_ascii_uppercase().replace("-", "_")),
-                v,
-            );
+            let name = format!("HTTP_{}", k.to_ascii_uppercase().replace("-", "_"));
+            match merged.iter_mut().find(|(n, _)| *n == name) {
+                Some((n, val)) => {
+                    val.push_str(if n == "HTTP_COOKIE" { "; " } else { ", " });
+                    val.push_str(v);
+                }
+                None => {
+                    merged.push((name, v.clone()));
+                }
+            }
         }
+        for (k, v) in &merged {
+            put(k, v);
+        }
+
         for (k, v) in &ctx.req.server_vars {
             put(k, v);
         }
     })
 }
-
 pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) -> *mut c_char {
     with_ctx(null_mut(), |ctx| {
         if name.is_null() {
@@ -280,7 +284,6 @@ pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) 
             .map_or(null_mut(), |v| v.as_ptr() as *mut c_char)
     })
 }
-
 fn syslog_to_level(syslog_lev: c_int) -> log::Level {
     match syslog_lev {
         0 => log::Level::Error, // LOG_EMERG
@@ -294,7 +297,6 @@ fn syslog_to_level(syslog_lev: c_int) -> log::Level {
         _ => log::Level::Info,
     }
 }
-
 pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type: c_int) {
     guard((), || {
         if message.is_null() {
@@ -305,7 +307,6 @@ pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type:
         log::log!(target: "php", syslog_to_level(syslog_type), "{s}");
     })
 }
-
 fn send_head(c: &mut Context) {
     if c.headers_sent {
         return;
@@ -320,7 +321,6 @@ fn send_head(c: &mut Context) {
         c.headers_sent = true;
     }
 }
-
 pub(crate) fn send_error_head(c: &mut Context, status: u16) {
     if c.headers_sent {
         return;

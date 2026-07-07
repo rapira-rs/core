@@ -231,3 +231,172 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(
+        Mode::Worker(fixture("fatal-exception-handler-worker.php")),
+        1,
+    )?;
+    let h = r.handle()?;
+    let (s1, _) = drain(h.handle_blocking(req("/", "fatal-exception-handler-worker.php"))?);
+    assert!(s1 == 200, "req1 must return a head, not hang (got {s1})");
+    let (s2, _) = drain(h.handle_blocking(req("/", "fatal-exception-handler-worker.php"))?);
+    assert!(
+        s2 == 200 || s2 == 500,
+        "worker must survive and serve req2 (got {s2})"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// #[test]
+// fn teardown_from_foreign_thread() -> anyhow::Result<()> {
+//     let _guard = php_lock();
+//     let r = Rapira::start(Mode::Classic, 1)?;
+//     let h = r.handle()?;
+//     assert_eq!(drain(h.handle_blocking(req("/", "hello.php"))?).0, 200);
+//     drop(h);
+//     std::thread::spawn(move || drop(r)).join().unwrap();
+//     Ok(())
+// } <-- this test sshould not compile due to the PhantomData in Rapira (*const ())
+
+// zend_test's observer writes markers to the response output, committing the head
+// early and polluting the body - so this runs in its OWN binary with its OWN ini,
+// never the shared suite. Requires PHP built with --enable-zend-test.
+#[test]
+fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    unsafe {
+        std::env::set_var(
+            "PHPRC",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/observer.ini"),
+        );
+    }
+    let r = Rapira::start(Mode::Worker(fixture("observer-bailout.php")), 1)?;
+    let h = r.handle()?;
+
+    let (_, probe) = drain(h.handle_blocking(req("/?mode=ok", "observer-bailout.php"))?);
+    if probe.contains("skip") {
+        drop(h);
+        r.shutdown();
+        return Ok(()); // PHP built without --enable-zend-test
+    }
+
+    // outer() -> inner() -> trigger_error(E_USER_ERROR) bails; the closing tags
+    // for both frames open at the bailout must still reach the response body.
+    let (_, b1) = drain(h.handle_blocking(req("/?mode=fatal", "observer-bailout.php"))?);
+    assert!(
+        b1.contains("<inner>")
+            && b1.contains("</inner>")
+            && b1.contains("<outer>")
+            && b1.contains("</outer>"),
+        "observer begin+end must both fire for outer and inner despite the bailout (got {b1:?})"
+    );
+
+    // worker survives; the next request's frames are balanced too
+    let (_, b2) = drain(h.handle_blocking(req("/?mode=ok", "observer-bailout.php"))?);
+    assert!(
+        b2.contains("</outer>") && b2.contains("ok"),
+        "worker survives, next request balanced (got {b2:?})"
+    );
+
+    drop(h);
+    r.shutdown();
+    unsafe {
+        std::env::set_var(
+            "PHPRC",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/php.ini"),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("stuck-flag-worker.php")), 1)?;
+    let h = r.handle()?;
+    // req1: fatal inside the include-wrapper -> bailout strands in_user_include (returning proves no hang)
+    let _ = drain(h.handle_blocking(req("/?step=boom", "stuck-flag-worker.php"))?);
+    let (_, b2) = drain(h.handle_blocking(req("/", "stuck-flag-worker.php"))?);
+    assert!(
+        b2.contains("PROBE_OK"),
+        "data:// (is_url) must not be rejected as an include -> in_user_include must reset (got {b2:?})"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+#[test]
+fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("fatal-backtrace-worker.php")), 1)?;
+    let h = r.handle()?;
+    let mem = |b: String| -> i64 {
+        b.trim()
+            .strip_prefix("mem=")
+            .and_then(|s| s.parse().ok())
+            .expect("mem= output")
+    };
+    let b0 = mem(drain(h.handle_blocking(req("/?step=probe", "fatal-backtrace-worker.php"))?).1);
+    // consumed fatal: execution continues, frame unwinds, backtrace is the sole ref to the 20MB
+    let (_, boom) = drain(h.handle_blocking(req("/?step=boom", "fatal-backtrace-worker.php"))?);
+    assert!(
+        boom.contains("boomed"),
+        "error consumed + execution continued (got {boom:?})"
+    );
+    let leaked =
+        mem(drain(h.handle_blocking(req("/?step=probe", "fatal-backtrace-worker.php"))?).1) - b0;
+    assert!(
+        leaked < 5 * 1024 * 1024,
+        "fatal backtrace must be freed between jobs; {leaked} bytes still pinned (~20MB pre-fix)"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+#[test]
+fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("shutdown-fatal-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (_, b1) = drain(h.handle_blocking(req("/?boom=1", "shutdown-fatal-worker.php"))?);
+    let (s2, b2) = drain(h.handle_blocking(req("/", "shutdown-fatal-worker.php"))?);
+    drop(h);
+    r.shutdown();
+    assert!(b1.contains("ok counter=1"), "req1 baseline (got: {b1:?})");
+    assert_eq!(s2, 200, "worker must survive (got {s2})");
+    assert!(
+        b2.contains("ok counter=1"),
+        "fatal in shutdown fn must recycle, resetting statics (got: {b2:?})"
+    );
+    Ok(())
+}
+
+#[test]
+fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("abort-ignore-worker.php")), 1)?;
+    let h = r.handle()?;
+    let mut rx = h.handle_blocking(req("/", "abort-ignore-worker.php"))?;
+    let _head = rx.blocking_recv(); // response is live
+    drop(rx); // client disconnects
+    let (s2, b2) = drain(h.handle_blocking(req("/?probe=1", "abort-ignore-worker.php"))?);
+    drop(h);
+    r.shutdown();
+    assert_eq!(s2, 200, "worker must survive the ignored abort");
+    assert!(
+        b2.contains("reached=1"),
+        "work after disconnect must still run (got: {b2:?})"
+    );
+    assert!(
+        b2.contains("aborted=0"),
+        "connection status must reset (got: {b2:?})"
+    );
+    Ok(())
+}

@@ -1,4 +1,5 @@
 use log::{error, info, trace};
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
@@ -13,7 +14,7 @@ use std::os::raw::c_int;
 #[cfg(php_zts)]
 use std::ptr::null_mut;
 
-use crate::rapira_worker::rapira_worker;
+use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Scoreboard, ScoreboardSnapshot, sb_set};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
@@ -46,6 +47,7 @@ pub struct Rapira {
     pub(crate) intake: Option<Sender<Job>>, // producer side
     workers: Vec<JoinHandle<()>>,           // os threads: execute PHP scripts
     pub scoreboard: Arc<Scoreboard>,        // shared scoreboard for workers
+    _not_send: PhantomData<*const ()>, // !Send + !Sync, to prevent dropping from a foreign thread (which would be UB)
 }
 
 impl Rapira {
@@ -78,6 +80,7 @@ impl Rapira {
         if !started {
             error!("[rapira] php_module_startup failed, shutting down");
             unsafe {
+                php_module_shutdown();
                 sapi_shutdown();
                 #[cfg(php_zts)]
                 tsrm_shutdown();
@@ -101,6 +104,7 @@ impl Rapira {
             intake: Some(intake),
             workers,
             scoreboard,
+            _not_send: PhantomData,
         })
     }
 
@@ -130,17 +134,42 @@ impl Drop for Rapira {
 }
 
 fn worker_main(id: usize, board: Arc<Scoreboard>, mode: Mode, rx: JobRx) {
-    let _php: PhpThread = PhpThread::new();
     sb_set(id, board);
-    #[cfg(not(php_zts))]
-    unsafe {
-        // https://github.com/php/php-src/pull/9104
-        // in NTS, we init module and request on the different threads
-        // so we have to init call stack again
-        rapira_init_call_stack();
-    };
-    match mode {
-        Mode::Classic => classic_worker(rx),
-        Mode::Worker(script) => rapira_worker(script, rx),
+    loop {
+        let php = PhpThread::new();
+        #[cfg(not(php_zts))]
+        unsafe {
+            // https://github.com/php/php-src/pull/9104
+            // in NTS, we init module and request on the different threads
+            // so we have to init call stack again
+            rapira_init_call_stack();
+        };
+        let exit: WorkerExit = match &mode {
+            Mode::Classic => {
+                classic_worker(rx.clone());
+                WorkerExit::Closed
+            }
+            Mode::Worker(script) => rapira_worker(script.clone(), rx.clone()),
+        };
+        drop(php); // ZTS: ts_free_thread — globals dtor'd, TLS cache cleared
+        if matches!(exit, WorkerExit::Closed) {
+            break;
+        }
+        // Restart: the next PhpThread::new() re-runs ts_resource on this same
+        // OS thread — fresh per-thread globals, ctors incl. zend_call_stack_init
+    }
+}
+
+/// Block for the next job (shutdown-aware): `None` means the intake channel
+/// closed — every `Sender`/`RapiraHandle` was dropped, i.e. Rapira is shutting
+/// down. The single place the shared receiver is consumed; the classic loop,
+/// worker-mode `next_job`, and the boot-failure drain all go through here.
+pub(crate) fn pull_job(rx: &JobRx) -> Option<Job> {
+    match rx.lock() {
+        Ok(mut guard) => guard.blocking_recv(),
+        Err(err) => {
+            error!("[rapira] pull_job() failed to lock worker channel: {err}");
+            None
+        }
     }
 }
