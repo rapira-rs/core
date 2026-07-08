@@ -32,5 +32,4 @@ void rapira_request_init(void);
 void rapira_release_temporary_streams(void);
 int rapira_request_activate(void);
 int rapira_request_shutdown(void);
-bool rapira_fatal_recorded(void);
 #endif

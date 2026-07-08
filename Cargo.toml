@@ -12,6 +12,7 @@ members = ["crates/*"]
 anyhow = "1"
 log = { version = "0.4", features = ["std"] }
 php_sys = { path = "crates/php_sys" }
+extension_host = { path = "crates/extension_host" }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 
@@ -23,6 +24,7 @@ all = "warn"
 
 [dependencies]
 anyhow = { workspace = true }
+extension_host = { workspace = true }
 log = { workspace = true, features = ["std"] }
 php_sys = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }

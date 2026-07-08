@@ -241,18 +241,22 @@ void rapira_activate_auto_globals(void) {
 // closes an active session between requests - do the work session_rshutdown
 // would have done, or PS(id)/session_status leak across requests (one request
 // reusing the previous one's session).
+//
+// Nothing here is guarded on purpose. A bailing save handler is a fatal: it
+// must reach rapira_request_teardown's zend_catch and recycle the worker, so
+// php_request_shutdown runs the module's own RSHUTDOWN and closes the observer
+// frames the longjmp abandoned. Swallowing it here and then calling more PHP
+// (s_close) over those frames is what corrupts EG(current_observed_frame).
 static void rapira_reset_session(void) {
     if (PS(session_status) == php_session_active) {
-        zend_try { php_session_flush(1); }
-        zend_end_try(); // write + close the active session
+        php_session_flush(1); // write + close the active session
     }
     if (!Z_ISUNDEF(PS(http_session_vars))) {
         zval_ptr_dtor(&PS(http_session_vars));
         ZVAL_UNDEF(&PS(http_session_vars));
     }
     if (PS(mod_data) || PS(mod_user_implemented)) {
-        zend_try { PS(mod)->s_close(&PS(mod_data)); }
-        zend_end_try();
+        PS(mod)->s_close(&PS(mod_data));
     }
     if (PS(id)) {
         zend_string_release_ex(PS(id), 0);
@@ -413,25 +417,46 @@ int rapira_request_activate(void) {
 // main/main.c:1985,2002,2031 (source)
 int rapira_request_teardown(void) {
     int bailed = OK;
+    // a bailout here abandons the observer frames of everything it longjmps
+    // over. php_request_shutdown's zend_observer_fcall_end_all() only reaches
+    // them while the VM stack still holds them, and the PHP worker loop pops
+    // that stack the moment rapira_handle_request returns - close them here,
+    // where they're intact
+    zend_execute_data *observed_base = EG(current_observed_frame);
 
     zend_try { php_output_end_all(); }
-    zend_catch { bailed = BAILOUT; }
+    zend_catch {
+        bailed = BAILOUT;
+        rapira_observer_end_to(observed_base);
+    }
     zend_end_try();
 
     zend_try { rapira_modules_rshutdown(); }
-    zend_catch { bailed = BAILOUT; }
+    zend_catch {
+        bailed = BAILOUT;
+        rapira_observer_end_to(observed_base);
+    }
     zend_end_try();
 
     zend_try { rapira_reset_session(); }
-    zend_catch { bailed = BAILOUT; }
+    zend_catch {
+        bailed = BAILOUT;
+        rapira_observer_end_to(observed_base);
+    }
     zend_end_try();
 
     zend_try { php_output_deactivate(); }
-    zend_catch { bailed = BAILOUT; }
+    zend_catch {
+        bailed = BAILOUT;
+        rapira_observer_end_to(observed_base);
+    }
     zend_end_try();
 
     zend_try { sapi_deactivate(); }
-    zend_catch { bailed = BAILOUT; }
+    zend_catch {
+        bailed = BAILOUT;
+        rapira_observer_end_to(observed_base);
+    }
     zend_end_try();
 
 #if defined(ZEND_MAX_EXECUTION_TIMERS) || !defined(ZTS)
@@ -439,9 +464,8 @@ int rapira_request_teardown(void) {
     zend_end_try();
 #endif
 
-    // _zend_bailout leaves gc_protect(1). A save-handler bailout is swallowed
-    // by the catch-less tries in rapira_reset_session, so `bailed` can stay OK
-    // reset unconditionally or the next request runs with cycle GC disabled
+    // _zend_bailout leaves gc_protect(1); reset unconditionally or the next
+    // request runs with cycle GC disabled
     gc_protect(0);
 
     SG(request_info).request_method = NULL;
@@ -520,6 +544,12 @@ void rapira_release_temporary_streams(void) {
 // bailout the retry skips it and finishes the remaining teardown steps.
 int rapira_request_shutdown(void) {
     volatile int bailed = OK;
+#ifdef HAVE_PHP_SESSION
+    // a bailout inside a user save handler skips the cleanup that clears
+    // PS(in_save_handler); the module RSHUTDOWN's recursion guard then refuses
+    // to run the handler's close() and whatever it holds leaks (mod_user.c:29)
+    PS(in_save_handler) = 0;
+#endif
     zend_try { php_request_shutdown((void *)0); }
     zend_catch {
         bailed = BAILOUT;
@@ -528,11 +558,4 @@ int rapira_request_shutdown(void) {
     }
     zend_end_try();
     return bailed;
-}
-
-// A warning/notice also populates last_error_message (php_error_cb stores on
-// `display`, not severity - main.c:1393-1403), so the type mask is required.
-bool rapira_fatal_recorded(void) {
-    return PG(last_error_message) != NULL &&
-           (PG(last_error_type) & E_FATAL_ERRORS) != 0;
 }

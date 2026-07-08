@@ -15,6 +15,7 @@ const FRAME_CAP: usize = 16; // before ub_write
 /// worker threads after dropping its own `Sender`; the job channel only closes
 /// once every `RapiraHandle` clone has also been dropped. Keeping a clone alive
 /// past the `Rapira` it came from makes `Drop for Rapira` hang forever.
+#[derive(Clone)]
 pub struct RapiraHandle {
     intake: mpsc::Sender<Job>,
 }

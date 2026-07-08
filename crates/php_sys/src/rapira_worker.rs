@@ -153,12 +153,10 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     };
     let teardown: Outcome = unsafe { rapira_request_teardown() };
 
-    let bailed: bool = [outcome, flushed, teardown].contains(&Outcome::Bailout);
-    // abort is the only bailout that records no error (main.c:2722-2731)
-    let client_abort: bool = unsafe {
-        (*rapira_pg()).connection_status == PHP_CONNECTION_ABORTED && !rapira_fatal_recorded()
-    };
-    let recycle: bool = bailed && !client_abort;
+    // every contained bailout recycles: only php_request_shutdown may observe the
+    // Zend state a longjmp leaves behind (a live VM stack, a mark-destructed
+    // object store, an emalloc arena the executor never unwound)
+    let recycle: bool = [outcome, flushed, teardown].contains(&Outcome::Bailout);
     // an uncaught throw is an error response but doesn't need a recycle
     let errored: bool = recycle || outcome == Outcome::Throw;
 

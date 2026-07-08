@@ -22,6 +22,22 @@ pub fn php_lock() -> sync::MutexGuard<'static, ()> {
     PHP_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Point PHP at `ini`. PHPRC is process-global and read once per php_module_startup, so a binary
+/// that overrides it must not share its process with tests expecting the suite's php.ini. Taking
+/// the guard by reference proves no other test thread is inside php_module_startup.
+pub fn set_phprc(_php: &sync::MutexGuard<'static, ()>, ini: &Path) {
+    // SAFETY: PHP_LOCK is held for as long as `_php` lives, so nothing reads the environment
+    // concurrently.
+    unsafe { set_var("PHPRC", ini) };
+}
+
+/// `php_lock()` plus a PHPRC override for this whole test binary.
+pub fn php_lock_with_ini(ini: &Path) -> sync::MutexGuard<'static, ()> {
+    let guard = php_lock();
+    set_phprc(&guard, ini);
+    guard
+}
+
 /// Build a minimal `GET` request for `uri`, with `$_SERVER` metadata pointing at `fixture_name`.
 pub fn req(uri: &str, fixture_name: &str) -> Request {
     let query = uri.split_once('?').map(|x: (&str, &str)| x.1);
