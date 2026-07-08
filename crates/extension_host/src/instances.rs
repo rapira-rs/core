@@ -24,16 +24,14 @@ pub(crate) async fn drive(
     // `run` and `exec` are async component funcs, so the guest is driven on the
     // component's concurrent runtime: `run_concurrent` hands the export call an
     // `Accessor`, and the guest's own `join!`ed `exec`s run as concurrent subtasks.
-    let outcome: wasmtime::Result<Result<(), String>> = match pre
-        .instantiate_async(&mut store)
-        .await
-    {
-        Ok(bindings) => store
-            .run_concurrent(async |accessor| bindings.call_run(accessor).await)
-            .await
-            .and_then(|inner| inner),
-        Err(e) => Err(e),
-    };
+    let outcome: wasmtime::Result<Result<(), String>> =
+        match pre.instantiate_async(&mut store).await {
+            Ok(bindings) => store
+                .run_concurrent(async |accessor| bindings.call_run(accessor).await)
+                .await
+                .and_then(|inner| inner),
+            Err(e) => Err(e),
+        };
     store.data_mut().drain_stderr();
 
     match outcome {

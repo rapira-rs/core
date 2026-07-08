@@ -26,8 +26,8 @@ impl Manifest {
     }
 
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Self::parse(&text).with_context(|| format!("in {}", path.display()))
     }
 }

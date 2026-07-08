@@ -66,7 +66,11 @@ impl ExtensionHost {
         for package in discover(dir)? {
             let manifest = Manifest::load(&package.join("extension.toml"))?;
             if exts.iter().any(|e| *e.id == manifest.id) {
-                bail!("duplicate extension id {:?} in {}", manifest.id, dir.display());
+                bail!(
+                    "duplicate extension id {:?} in {}",
+                    manifest.id,
+                    dir.display()
+                );
             }
 
             let bytes = std::fs::read(package.join("extension.wasm"))
@@ -140,7 +144,10 @@ impl Running {
         self.rt.block_on(async {
             let mut out = Vec::with_capacity(handles.len());
             for h in handles {
-                out.push(h.await.unwrap_or_else(|_| Err("driver task panicked".into())));
+                out.push(
+                    h.await
+                        .unwrap_or_else(|_| Err("driver task panicked".into())),
+                );
             }
             out
         })

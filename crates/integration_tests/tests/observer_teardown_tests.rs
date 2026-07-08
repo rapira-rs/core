@@ -24,7 +24,10 @@ fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()
     // each job bails in teardown and recycles; the cycle end walks the observer chain
     for _ in 0..3 {
         let (_, body) = drain(h.handle_blocking(req("/", "session-bailout-worker.php"))?);
-        assert!(body.contains("sid="), "worker must keep serving (got {body:?})");
+        assert!(
+            body.contains("sid="),
+            "worker must keep serving (got {body:?})"
+        );
     }
 
     drop(h);
