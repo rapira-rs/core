@@ -13,7 +13,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         shutdown: Some(callbacks::sapi_shutdown_cb),
         activate: None,
         deactivate: Some(callbacks::sapi_deactivate_cb),
-        ub_write: Some(callbacks::ub_write),
+        ub_write: Some(rapira_ub_write),
         flush: Some(callbacks::flush),
         get_stat: None,
         getenv: Some(callbacks::getenv_cb),

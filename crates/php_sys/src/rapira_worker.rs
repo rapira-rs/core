@@ -64,6 +64,7 @@ fn run_cycle(script: &Path) -> Cycle {
         // the retry reclaimed the request, but the bailed observer walk skipped
         // end handlers — per-thread extension state is suspect, rebuild it
         error!("[rapira] php_request_shutdown() bailed; restarting the PHP thread");
+        sb_update(scoreboard::Event::Restart);
         return Cycle::Restart;
     }
 
@@ -126,7 +127,13 @@ pub extern "C" fn rapira_rs_handle_request(
     fci: *mut zend_fcall_info,
     fcc: *mut zend_fcall_info_cache,
 ) -> bool {
-    guard(false, || handle_request_impl(fci, fcc))
+    let ok = guard(false, || handle_request_impl(fci, fcc));
+    // A caught panic in handle_request_impl skips its unbind_server_context, leaving
+    // SG(server_context) dangling to the freed job; run_cycle's php_request_shutdown
+    // would then flush output through it. Clear it here (idempotent on the normal
+    // path, which already unbound).
+    unbind_server_context();
+    ok
 }
 
 fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> bool {
@@ -187,11 +194,13 @@ fn next_job() -> Option<Job> {
         // first iteration: clean up whatever php_request_startup()'s bootstrap
         // left before serving real requests — there's no prior request yet
         if std::mem::take(&mut wc.first_call) {
-            unsafe {
-                let outcome: types::Outcome = rapira_request_teardown();
-                if matches!(outcome, types::Outcome::Bailout) {
-                    error!("[rapira] rapira_request_teardown() failed on first call");
-                }
+            let outcome: types::Outcome = unsafe { rapira_request_teardown() };
+            if matches!(outcome, types::Outcome::Bailout) {
+                // only php_request_shutdown reclaims the state a longjmp left behind
+                // (php-src main.c) - recycle instead of serving on top of it
+                error!("[rapira] rapira_request_teardown() bailed on first call; recycling");
+                wc.recycle = true;
+                return None;
             }
             sb_update(scoreboard::Event::Healthy);
         }

@@ -13,6 +13,7 @@ thread_local! {
 pub enum Event {
     Handled(bool),
     Recycled,
+    Restart,
     Unhealthy,
     Healthy,
 }
@@ -36,6 +37,7 @@ pub struct WorkerStat {
     handled: AtomicU64,
     errors: AtomicU64,
     recycles: AtomicU64,
+    restarts: AtomicU64,
     unhealthy: AtomicBool,
 }
 
@@ -50,6 +52,7 @@ pub struct WorkerStatSnapshot {
     pub handled: u64,
     pub errors: u64,
     pub recycles: u64,
+    pub restarts: u64,
     pub unhealthy: bool,
 }
 
@@ -58,6 +61,7 @@ pub struct ScoreboardSnapshot {
     pub handled: u64,
     pub errors: u64,
     pub recycles: u64,
+    pub restarts: u64,
     pub unhealthy: usize, // workers currently flagged unhealthy
     pub workers: Vec<WorkerStatSnapshot>,
 }
@@ -83,6 +87,9 @@ impl Scoreboard {
             Event::Recycled => {
                 w.recycles.fetch_add(1, Ordering::Relaxed);
             }
+            Event::Restart => {
+                w.restarts.fetch_add(1, Ordering::Relaxed);
+            }
             Event::Unhealthy => w.unhealthy.store(true, Ordering::Relaxed),
             Event::Healthy => w.unhealthy.store(false, Ordering::Relaxed),
         }
@@ -98,6 +105,7 @@ impl Scoreboard {
                 handled: w.handled.load(Ordering::Relaxed),
                 errors: w.errors.load(Ordering::Relaxed),
                 recycles: w.recycles.load(Ordering::Relaxed),
+                restarts: w.restarts.load(Ordering::Relaxed),
                 unhealthy: w.unhealthy.load(Ordering::Relaxed),
             })
             .collect();
@@ -108,6 +116,10 @@ impl Scoreboard {
             recycles: workers
                 .iter()
                 .map(|w: &WorkerStatSnapshot| w.recycles)
+                .sum(),
+            restarts: workers
+                .iter()
+                .map(|w: &WorkerStatSnapshot| w.restarts)
                 .sum(),
             unhealthy: workers.iter().filter(|w| w.unhealthy).count(),
             workers,

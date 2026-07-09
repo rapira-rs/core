@@ -5,5 +5,5 @@
 
 wasmtime::component::bindgen!({
     world: "extension",
-    path: "../../../extensions/wit",
+    path: "../extension_api/wit",
 });

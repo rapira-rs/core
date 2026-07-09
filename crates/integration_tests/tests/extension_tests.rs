@@ -1,7 +1,7 @@
 //! End-to-end: a WASM extension drives a request through PHP via the host's
 //! `exec` import.
 //!
-//! Skips when `examples/hello` has not been built for wasm32-wasip2 — the same
+//! Skips when the `hello` example has not been built for wasm32-wasip2 — the same
 //! degrade-instead-of-fail shape the observer suites use.
 
 use extension_host::ExtensionHost;
@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 
 const HELLO_MANIFEST: &str = "id = \"hello\"\nname = \"Hello\"\nversion = \"0.1.0\"\n";
 
-/// `cargo build -p hello --target wasm32-wasip2 --release` in the extensions repo.
+/// `cargo build -p hello --target wasm32-wasip2 --release` (workspace target dir).
 fn hello_component() -> Option<PathBuf> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../extensions/target/wasm32-wasip2/release/hello.wasm");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release/hello.wasm");
     path.exists().then_some(path)
 }
 
@@ -46,9 +46,11 @@ fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")), 2)?;
     let ext = ExtensionHost::load(&dir)?;
 
-    // hello's async `run` `join!`s `GET /?from=a` and `GET /?from=b`, then checks
-    // each response is 200 with its own distinct body ("ok:a" / "ok:b") — so an Ok
-    // outcome proves both concurrent exec subtasks ran and returned their own result.
+    // hello's async `run` `join!`s `GET /?from=a` and `GET /?from=b`, then checks each
+    // response is 200 with its own distinct body ("ok:a" / "ok:b"). An Ok outcome
+    // proves both exec subtasks ran and returned their own result — not that they
+    // overlapped in time (a serialized host would pass too); `many_extensions_run_
+    // concurrently` exercises real overlap (12 drivers over 4 workers).
     let running = ext.run(rapira.handle()?);
     let outcomes = running.join();
 
@@ -112,6 +114,28 @@ fn a_package_missing_its_wasm_fails_to_load() -> anyhow::Result<()> {
     assert!(
         err.contains("without extension.wasm"),
         "expected a torn-package error, got {err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn classic_mode_cannot_serve_exec() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let Some(dir) = install("classic", HELLO_MANIFEST)? else {
+        return Ok(()); // hello.wasm not built
+    };
+    // Classic mode opens the exec URI path ("/") as a script file, so the resident
+    // handler never runs and every exec 500s — which is why the shipped binary boots
+    // Worker mode. This pins that Classic + extensions is a non-starter.
+    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let ext = ExtensionHost::load(&dir)?;
+    let outcomes = ext.run(rapira.handle()?).join();
+    drop(rapira);
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        outcomes[0].is_err(),
+        "Classic mode must not serve exec (hello expects 200, got 500): {:?}",
+        outcomes[0]
     );
     Ok(())
 }

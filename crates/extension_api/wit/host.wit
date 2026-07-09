@@ -1,0 +1,7 @@
+interface host {
+  use types.{request, response};
+
+  // Run an HTTP request through rapira's PHP pool and return the response.
+  // Async: the guest can `.await` it and `join!` several concurrently.
+  exec: async func(req: request) -> result<response, string>;
+}

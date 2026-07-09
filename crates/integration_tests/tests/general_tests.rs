@@ -270,10 +270,13 @@ fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
     let h = r.handle()?;
     // req1: fatal inside the include-wrapper -> bailout strands in_user_include (returning proves no hang)
     let _ = drain(h.handle_blocking(req("/?step=boom", "stuck-flag-worker.php"))?);
+    // Smoke coverage, not a strict guard for module.c's PG(in_user_include)=0: the
+    // req1 bailout forces a recycle whose php_request_startup already re-zeroes the
+    // flag, so req2 would pass even if that reset were reverted.
     let (_, b2) = drain(h.handle_blocking(req("/", "stuck-flag-worker.php"))?);
     assert!(
         b2.contains("PROBE_OK"),
-        "data:// (is_url) must not be rejected as an include -> in_user_include must reset (got {b2:?})"
+        "worker recovers; data:// is not rejected as an include (got {b2:?})"
     );
     drop(h);
     r.shutdown();

@@ -64,7 +64,21 @@ pub(crate) unsafe extern "C" fn sapi_deactivate_cb() -> c_int {
     SUCCESS
 }
 
-pub(crate) unsafe extern "C" fn ub_write(buf: *const c_char, len: usize) -> usize {
+/// SAPI output callback, invoked through the C shim `rapira_ub_write` (module.c).
+/// On a client disconnect it sets `*aborted = true`; the shim then raises
+/// `php_handle_aborted_connection()` AFTER this frame returns, so the abort's
+/// longjmp never crosses this `catch_unwind` frame.
+///
+/// # Safety
+/// `buf` must point at `len` readable bytes and `aborted` at a writable `bool`,
+/// both valid for the call (PHP guarantees this when firing `ub_write`). Must run
+/// on a worker thread whose `Context` is bound in `SG(server_context)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_ub_write(
+    buf: *const c_char,
+    len: usize,
+    aborted: *mut bool,
+) -> usize {
     guard(0, || {
         let ctx = unsafe {
             let Some(c) = ctx() else {
@@ -86,21 +100,9 @@ pub(crate) unsafe extern "C" fn ub_write(buf: *const c_char, len: usize) -> usiz
                 .is_err()
             {
                 ctx.finish();
-                // receiver dropped = client disconnect; core never checks ub_write's
-                // return, the SAPI must raise the abort itself (bails unless ignore_user_abort)
-                unsafe {
-                    // PHPAPI void php_handle_aborted_connection(void)
-                    // {
-                    //       PG(connection_status) = PHP_CONNECTION_ABORTED;
-                    //       php_output_set_status(PHP_OUTPUT_DISABLED);
-
-                    //       if (!PG(ignore_user_abort)) {
-                    //               zend_bailout();
-                    //       }
-                    // }
-                    php_handle_aborted_connection();
-                    // function bails. q: what about longjum over rust frames? do we have tmp own of heap memory here?
-                };
+                // receiver dropped = client disconnect; core ignores ub_write's return.
+                // Report it so the C shim raises the abort after this frame unwinds.
+                unsafe { *aborted = true };
                 return 0;
             }
         }

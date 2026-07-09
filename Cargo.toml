@@ -6,13 +6,15 @@ rust-version.workspace = true
 
 
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "examples/*"]
 
 [workspace.dependencies]
 anyhow = "1"
 log = { version = "0.4", features = ["std"] }
 php_sys = { path = "crates/php_sys" }
 extension_host = { path = "crates/extension_host" }
+extension_api = { path = "crates/extension_api" }
+wit-bindgen = "0.58"
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 

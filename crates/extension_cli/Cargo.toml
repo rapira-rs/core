@@ -1,0 +1,17 @@
+[package]
+name = "rapira-extension"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "rapira-extension"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+toml = "0.9"
+
+[lints]
+workspace = true

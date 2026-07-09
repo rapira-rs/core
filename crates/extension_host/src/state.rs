@@ -35,6 +35,11 @@ impl HostState {
             limits: StoreLimitsBuilder::new()
                 .memory_size(64 * 1024 * 1024)
                 .table_elements(65536)
+                // memory_size is per-memory; cap the counts too, or a component could
+                // reserve up to wasmtime's default 10000 memories/tables/instances.
+                .memories(8)
+                .tables(8)
+                .instances(64)
                 .build(),
             stderr,
             stderr_logged: 0,

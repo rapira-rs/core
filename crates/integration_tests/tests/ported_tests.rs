@@ -625,6 +625,37 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("upload-worker.php")), 1)?;
+    let h = r.handle()?;
+    // $_FILES is the one superglobal whose create callback does not self-heal, so
+    // rapira_reset_super_global dtors TRACK_VARS_FILES each request; without it a
+    // no-upload request would re-expose the previous request's upload.
+    let (s1, b1) = drain(h.handle_blocking(post(
+        "upload-worker.php",
+        "",
+        Some("multipart/form-data; boundary=RAPIRA"),
+        multipart_body(),
+    ))?);
+    assert_eq!(s1, 200);
+    assert!(
+        b1.starts_with("foo.txt|"),
+        "req1 must see the upload (got {b1:?})"
+    );
+
+    let (s2, b2) = drain(h.handle_blocking(req("/upload-worker.php", "upload-worker.php"))?);
+    assert_eq!(s2, 200);
+    assert_eq!(
+        b2, "NO FILE",
+        "TRACK_VARS_FILES must reset; req2 must not see req1's upload (got {b2:?})"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
 // Output already sent, then an uncaught throw: exactly one head, status 200
 // (committed by the echo), the fatal text follows in the body, worker survives.
 #[test]

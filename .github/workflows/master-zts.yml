@@ -21,14 +21,6 @@ jobs:
           path: core
           persist-credentials: false
 
-      # extension_host path-depends on php_value and reads the WIT package from
-      # this sibling checkout, so core does not build without it.
-      - uses: actions/checkout@v4
-        with:
-          repository: rapira-rs/extensions
-          path: extensions
-          persist-credentials: false
-
       - name: Install build deps (php-src from git + bindgen/cc)
         run: |
           sudo apt-get update
@@ -76,27 +68,14 @@ jobs:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            core
-            extensions
-
-      - name: Check the extensions repo (codec + guest SDK)
-        working-directory: extensions
-        run: |
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace
-
-      # The extension e2e tests read the component from the workspace target and skip
-      # when it is absent, so build it there directly.
-      - name: Build the hello extension component (wasm32-wasip2)
-        working-directory: extensions
-        run: cargo build -p hello --target wasm32-wasip2 --release
-
-      # Smoke-test the packaging CLI (writes examples/hello/{target,dist}).
-      - name: Package the hello extension via the CLI
-        working-directory: extensions
-        run: cargo run -q -p rapira-extension -- build examples/hello
+          workspaces: core
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
+
+      # Build the example component so the extension e2e test runs instead of skipping.
+      - run: cargo build -p hello --target wasm32-wasip2 --release
       - run: cargo test --workspace
+
+      # Smoke-test the packaging CLI (writes examples/hello/{target,dist}).
+      - run: cargo run -q -p rapira-extension -- build examples/hello

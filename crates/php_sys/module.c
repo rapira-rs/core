@@ -5,6 +5,19 @@ extern bool rapira_rs_handle_request(
     zend_fcall_info_cache *fcc); // Rust: main handler: rapira_worker.rs
 extern void rapira_rs_finish_response(void); // Rust: just ctx.finish()
 
+// ub_write's client-abort raise (php_handle_aborted_connection) longjmps, so run
+// it here in C: the Rust half reports the disconnect via *aborted, and this raises
+// the abort AFTER the Rust catch_unwind frame has returned.
+extern size_t rapira_rs_ub_write(const char *str, size_t len, bool *aborted);
+size_t rapira_ub_write(const char *str, size_t len) {
+    bool aborted = false;
+    size_t written = rapira_rs_ub_write(str, len, &aborted);
+    if (aborted) {
+        php_handle_aborted_connection();
+    }
+    return written;
+}
+
 // in rust with repr[c]
 enum {
     OK = 0,
@@ -12,6 +25,16 @@ enum {
     EXIT = 2,
     THROW = 3,
 };
+
+// Guard a teardown step: on bailout, flag it and close the observer frames the
+// longjmp abandoned.
+#define RAPIRA_GUARD(stmt, flag, base)                                         \
+    zend_try { stmt; }                                                         \
+    zend_catch {                                                               \
+        (flag) = BAILOUT;                                                      \
+        rapira_observer_end_to(base);                                          \
+    }                                                                          \
+    zend_end_try()
 
 // found out, that php_output_end_all can also bailout
 // so wrap it in a zend_try block, and return BAILOUT if it does
@@ -132,12 +155,10 @@ void rapira_request_init(void) {
     CG(unclean_shutdown) = 0;
 
 #if defined(ZEND_MAX_EXECUTION_TIMERS) || !defined(ZTS)
-    /* per-request execution timer; teardown unsets it */
-    if (PG(max_input_time) == -1) {
-        zend_set_timeout(EG(timeout_seconds), 1);
-    } else {
-        zend_set_timeout(PG(max_input_time), 1);
-    }
+    /* The request body is read (in Rust) as the handler runs, so the handler is the
+       execution phase: bound it by max_execution_time (EG(timeout_seconds)), not
+       max_input_time. Teardown unsets it. */
+    zend_set_timeout(EG(timeout_seconds), 1);
 #else
     zend_unset_timeout();
 #endif
@@ -162,75 +183,29 @@ void rapira_request_init(void) {
     }
 }
 
-// all superglobals are registered as a zend_auto_global in the CG(auto_globals)
-// typedef bool (*zend_auto_global_callback)(zend_string *name);
-// typedef struct _zend_auto_global {
-// 	zend_string *name;
-// 	zend_auto_global_callback auto_global_callback;
-// 	bool jit;
-// 	bool armed; <-- means, that superglobal is still needs to be build
-// (true) or not (false)
-// } zend_auto_global;
-
-// ^ this is the struct that holds the superglobals
-//
+// Superglobals are registered as zend_auto_globals in CG(auto_globals) (struct:
+// Zend/zend_compile.h). sapi_activate would re-arm + rebuild them per request;
+// worker mode skips it, so do it here.
 void rapira_activate_auto_globals(void) {
     zend_auto_global *auto_global;
-    // 	_(ZEND_STR_AUTOGLOBAL_ENV,  "_ENV")
     zend_string *_env = ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV);
 
-    // re-arm all = true for all superglobals, to be rebuilt
+    // Re-arm every superglobal so a later access rebuilds it.
     ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
-        auto_global->armed =
-            // jit here is bool
-            // auto_global_callback is a function pointer, which returns bool
-            auto_global->jit || auto_global->auto_global_callback;
+        auto_global->armed = auto_global->jit || auto_global->auto_global_callback;
     }
     ZEND_HASH_FOREACH_END();
 
-    // build only the non-jit once, leave jit armed, but not built
-    // because jit once will be set when script compiles in zend_is_auto_global
-    // zend_compile.c:2887,7798,8063,8098
-    // if (zend_is_auto_global(name)) {
-    // 	return FAILURE;
-    // }
-    // ----------
-    // if (zend_is_auto_global(name)) {
-    // 	zend_error_noreturn(E_COMPILE_ERROR, "Cannot re-assign auto-global
-    // variable %s", 		ZSTR_VAL(name));
-    // }
+    // Eagerly rebuild every callback-backed superglobal now (a create callback that
+    // returns false clears armed). $_ENV is skipped: the environment is constant and
+    // reset_super_globals() keeps $_ENV in the symbol table, so its first-use array
+    // stays correct without a per-request rebuild.
     ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
-        // $_ENV is left armed-but-unbuilt and skipped on purpose: the process
-        // environment is constant across requests and reset_super_globals()
-        // doesn't drop $_ENV from the symbol table, so the array built on first
-        // use persists and stays correct without a per-request rebuild. (Its
-        // own create_env callback - not $_SERVER's - would rebuild it if a
-        // script forced it.)
         if (auto_global->name == _env) {
             continue;
         }
         if (auto_global->auto_global_callback) {
-            auto_global->armed =
-                // static bool php_auto_globals_create_get(zend_string *name)
-                // for example, how this works
-                // _GET is a pointer to php_auto_globals_create_get
-                // (php_variables.c: 799)
-                // static bool php_auto_globals_create_get(zend_string *name)
-                // {
-                //     if (PG(variables_order) &&
-                //     (strchr(PG(variables_order),'G') || ...)) {
-                //         sapi_module.treat_data(PARSE_GET, NULL, NULL);
-                //     } else {
-                //         zval_ptr_dtor_nogc(&PG(http_globals)[TRACK_VARS_GET]);
-                //         array_init(&PG(http_globals)[TRACK_VARS_GET]);
-                //     }
-                //     zend_hash_update(&EG(symbol_table),
-                //     &PG(http_globals)[TRACK_VARS_GET]);
-                //     Z_ADDREF(PG(http_globals)[TRACK_VARS_GET]); // <- ref
-                //     counter
-                //    return false; <-- means - don't rearm
-                // }
-                auto_global->auto_global_callback(auto_global->name);
+            auto_global->armed = auto_global->auto_global_callback(auto_global->name);
         }
     }
     ZEND_HASH_FOREACH_END();
@@ -290,23 +265,9 @@ static void rapira_reset_super_global(void) {
     ZVAL_UNDEF(files);
     zend_hash_str_del(&EG(symbol_table), "_SESSION", sizeof("_SESSION") - 1);
 }
-// runs per-request PHP work under a zend bailout guard
-// we need to catch here zend_bailout(), but exit/die in php 8.4+ are not
-// bailouts:
-/*
-// php-src Zend/zend_exceptions.c:1061
-ZEND_API ZEND_COLD void zend_throw_unwind_exit(void) {
-    ZEND_ASSERT(!EG(exception));
-    EG(exception) = zend_create_unwind_exit();
-    EG(opline_before_exception) = EG(current_execute_data)->opline;
-    EG(current_execute_data)->opline = EG(exception_op);
-}
-
-exit calls zend_buildin_functions.c:142, and
-1. zend_call_function returns normally with EG(exception) set
-2. zend_throw_unwind_exit asserts that EG(exception)
-*/
-
+// Runs per-request PHP work under a zend_bailout guard. exit()/die() in PHP 8.4+
+// are not bailouts - they land in EG(exception) as an unwind-exit
+// (Zend/zend_exceptions.c), which the exception block below classifies.
 int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     int outcome = OK;
     zval retval;
@@ -424,40 +385,11 @@ int rapira_request_teardown(void) {
     // where they're intact
     zend_execute_data *observed_base = EG(current_observed_frame);
 
-    zend_try { php_output_end_all(); }
-    zend_catch {
-        bailed = BAILOUT;
-        rapira_observer_end_to(observed_base);
-    }
-    zend_end_try();
-
-    zend_try { rapira_modules_rshutdown(); }
-    zend_catch {
-        bailed = BAILOUT;
-        rapira_observer_end_to(observed_base);
-    }
-    zend_end_try();
-
-    zend_try { rapira_reset_session(); }
-    zend_catch {
-        bailed = BAILOUT;
-        rapira_observer_end_to(observed_base);
-    }
-    zend_end_try();
-
-    zend_try { php_output_deactivate(); }
-    zend_catch {
-        bailed = BAILOUT;
-        rapira_observer_end_to(observed_base);
-    }
-    zend_end_try();
-
-    zend_try { sapi_deactivate(); }
-    zend_catch {
-        bailed = BAILOUT;
-        rapira_observer_end_to(observed_base);
-    }
-    zend_end_try();
+    RAPIRA_GUARD(php_output_end_all(), bailed, observed_base);
+    RAPIRA_GUARD(rapira_modules_rshutdown(), bailed, observed_base);
+    RAPIRA_GUARD(rapira_reset_session(), bailed, observed_base);
+    RAPIRA_GUARD(php_output_deactivate(), bailed, observed_base);
+    RAPIRA_GUARD(sapi_deactivate(), bailed, observed_base);
 
 #if defined(ZEND_MAX_EXECUTION_TIMERS) || !defined(ZTS)
     zend_try { zend_unset_timeout(); }
@@ -480,13 +412,9 @@ int rapira_request_teardown(void) {
     return bailed;
 }
 
-// clears the last error
-// main.c: 2099
-// static void core_globals_dtor(php_core_globals *core_globals)
-// {
-// 	/* These should have been freed earlier. */
-// 	ZEND_ASSERT(!core_globals->last_error_message); <---- will fire if not
-// consumed
+// Free the captured last error so it doesn't pin request objects across jobs and
+// doesn't trip core_globals_dtor's ZEND_ASSERT(!last_error_message) at shutdown
+// (main/main.c:2099).
 void rapira_clear_last_error(void) {
     if (PG(last_error_message)) {
         PG(last_error_type) = 0;

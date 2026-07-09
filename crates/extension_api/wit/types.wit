@@ -1,0 +1,18 @@
+package rapira:extension@0.1.0;
+
+interface types {
+  record request {
+    method: string,
+    uri: string,
+    headers: list<tuple<string, string>>,
+    body: list<u8>,
+  }
+
+  record response {
+    status: u16,
+    // Values are bytes, not string: PHP may emit latin1/binary header values that
+    // are not valid UTF-8, and the host preserves them verbatim.
+    headers: list<tuple<string, list<u8>>>,
+    body: list<u8>,
+  }
+}

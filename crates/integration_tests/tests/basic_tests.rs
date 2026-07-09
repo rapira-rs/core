@@ -550,13 +550,64 @@ fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
         b1.contains("seeded"),
         "req1 seeds + bails in teardown (got {b1:?})"
     );
+    // Smoke coverage, not a strict guard for module.c's unconditional gc_protect(0):
+    // every bailout recycles, and the recycle's php_request_startup resets
+    // gc_protected before this request can observe it (so req2 would pass regardless).
     let (_, b2) = drain(h.handle_blocking(req("/?probe=1", "gc-protect-worker.php"))?);
     assert!(
         b2.contains("unprotected"),
-        "gc must not stay protected after a teardown bailout (got {b2:?})"
+        "worker recovers from a teardown bailout with GC unprotected (got {b2:?})"
     );
     drop(h);
     r.shutdown();
+    Ok(())
+}
+
+#[test]
+fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("last-error-worker.php")), 1)?;
+    let h = r.handle()?;
+    // req1 raises a non-fatal warning (does NOT bail, so no recycle masks the reset)
+    let (_, b1) = drain(h.handle_blocking(req("/?step=warn", "last-error-worker.php"))?);
+    assert!(b1.contains("warned"), "req1 warns (got {b1:?})");
+    // req2 must see a cleared last error (rapira_clear_last_error between jobs)
+    let (_, b2) = drain(h.handle_blocking(req("/", "last-error-worker.php"))?);
+    assert_eq!(
+        b2, "clean",
+        "error_get_last() must reset between jobs (got {b2:?})"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+#[test]
+fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() -> anyhow::Result<()>
+{
+    let _guard = php_lock();
+    let tmp = std::env::temp_dir();
+    let pid = std::process::id();
+    let sentinel = tmp.join(format!("rapira_h2_sentinel_{pid}"));
+    let boot = tmp.join(format!("rapira_h2_boot_{pid}"));
+    let _ = std::fs::remove_file(&sentinel);
+    let _ = std::fs::remove_file(&boot);
+
+    let r = Rapira::start(Mode::Worker(fixture("h2-boot-bail-worker.php")), 1)?;
+    let h = r.handle()?;
+    // The bootstrap's session save handler fatals on the first-call teardown flush.
+    // Before the fix that bailout was swallowed and the job served in cycle 1 (count
+    // "1"); after the fix it recycles, so the worker re-bootstraps and serves in
+    // cycle 2 (count "2").
+    let (_, body) = drain(h.handle_blocking(req("/", "h2-boot-bail-worker.php"))?);
+    assert_eq!(
+        body, "2",
+        "first-call teardown bailout must recycle + re-bootstrap, not serve in cycle 1 (got {body:?})"
+    );
+    drop(h);
+    r.shutdown();
+    let _ = std::fs::remove_file(&sentinel);
+    let _ = std::fs::remove_file(&boot);
     Ok(())
 }
 

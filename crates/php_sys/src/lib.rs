@@ -36,6 +36,9 @@ unsafe extern "C" {
     pub fn rapira_release_temporary_streams();
     pub fn rapira_request_activate() -> types::Outcome;
     pub fn rapira_request_shutdown() -> types::Outcome;
+    // C shim (module.c) over rapira_rs_ub_write; raises the client-abort bailout from
+    // C so the longjmp doesn't cross the Rust catch_unwind frame.
+    pub fn rapira_ub_write(str_: *const std::os::raw::c_char, len: usize) -> usize;
 
     pub fn rapira_run_handler(
         fci: *mut zend_fcall_info,

@@ -43,11 +43,9 @@ async fn run(rapira: &RapiraHandle, req: ExtRequest) -> Result<ExtResponse, Stri
         match frame {
             Frame::Head(head) => {
                 response.status = head.status;
-                response.headers = head
-                    .headers
-                    .into_iter()
-                    .map(|(k, v)| (k, String::from_utf8_lossy(&v).into_owned()))
-                    .collect();
+                // Pass header-value bytes through unchanged (WIT value type is list<u8>);
+                // a lossy String decode here would corrupt latin1/binary header values.
+                response.headers = head.headers;
             }
             Frame::Body(bytes) => response.body.extend_from_slice(&bytes),
         }

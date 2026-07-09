@@ -20,6 +20,10 @@ pub(crate) async fn drive(
     let mut store = Store::new(&engine, HostState::new(id.clone(), rapira));
     // Bound the guest's own memory; installed before instantiation.
     store.limiter(|s| &mut s.limits);
+    // Preempt a non-yielding guest: hand the ext executor back on each epoch tick
+    // (bumped by the ticker in `run`) rather than pin the worker thread.
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_async_yield_and_update(1);
 
     // `run` and `exec` are async component funcs, so the guest is driven on the
     // component's concurrent runtime: `run_concurrent` hands the export call an

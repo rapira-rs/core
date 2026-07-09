@@ -32,4 +32,5 @@ void rapira_request_init(void);
 void rapira_release_temporary_streams(void);
 int rapira_request_activate(void);
 int rapira_request_shutdown(void);
+size_t rapira_ub_write(const char *str, size_t len);
 #endif

@@ -16,15 +16,30 @@ fn main() -> anyhow::Result<()> {
     // Validate every extension before booting PHP; a bad package fails here.
     let dir = ext_dir()?;
     let ext = ExtensionHost::load(&dir)?;
+    if ext.is_empty() {
+        eprintln!(
+            "[rapira] no extensions in {}; nothing to run",
+            dir.display()
+        );
+        return Ok(());
+    }
 
-    // Boot PHP; extensions (if any) drive requests through the pool via `exec`.
-    let rapira = Rapira::start(Mode::Classic, 1)?;
+    // The exec path is Worker mode: a resident script answers each exec via
+    // rapira_handle_request. Classic mode would open the exec URI path as a script
+    // file, so extensions would never reach their handler.
+    let script = std::env::var_os("RAPIRA_WORKER_SCRIPT")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!("RAPIRA_WORKER_SCRIPT must point at the resident worker script")
+        })?;
+    let rapira = Rapira::start(Mode::Worker(std::path::absolute(&script)?), 1)?;
 
-    // Run the extensions; they drive PHP through the pool via `exec`. The guard
-    // joins the driver threads (dropping their handles) before `rapira` drops.
-    let running = ext.run(rapira.handle()?);
-
-    drop(running);
+    // join() drops the driver handles (and their RapiraHandle clones) before we drop
+    // `rapira`, and surfaces a failed extension as a non-zero exit.
+    let outcomes = ext.run(rapira.handle()?).join();
     drop(rapira);
+    for outcome in outcomes {
+        outcome.map_err(|msg| anyhow::anyhow!("extension failed: {msg}"))?;
+    }
     Ok(())
 }

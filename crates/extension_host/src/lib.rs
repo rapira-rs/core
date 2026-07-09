@@ -17,6 +17,8 @@ use php_sys::RapiraHandle;
 use state::HostState;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -116,6 +118,23 @@ impl ExtensionHost {
             .build()
             .expect("build extension runtime");
 
+        // Bump the engine epoch on a dedicated OS thread so a compute-bound guest
+        // yields (drive arms the deadline). An on-runtime ticker would stall if
+        // every worker thread were already pinned by a non-yielding guest.
+        let epoch_stop = Arc::new(AtomicBool::new(false));
+        let ticker = {
+            let (engine, stop) = (self.engine.clone(), epoch_stop.clone());
+            std::thread::Builder::new()
+                .name("rapira-ext-epoch".into())
+                .spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(100));
+                        engine.increment_epoch();
+                    }
+                })
+                .expect("spawn epoch ticker")
+        };
+
         let handles = self
             .exts
             .iter()
@@ -126,7 +145,17 @@ impl ExtensionHost {
             })
             .collect();
 
-        Running { rt, handles }
+        Running {
+            rt,
+            handles,
+            epoch_stop,
+            ticker: Some(ticker),
+        }
+    }
+
+    /// No extensions were discovered, so there is nothing to drive.
+    pub fn is_empty(&self) -> bool {
+        self.exts.is_empty()
     }
 }
 
@@ -134,14 +163,17 @@ impl ExtensionHost {
 pub struct Running {
     rt: Runtime,
     handles: Vec<JoinHandle<Result<(), String>>>,
+    epoch_stop: Arc<AtomicBool>,
+    ticker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Running {
     /// Wait for every extension and return its outcome (`Ok` = `run` returned
-    /// `Ok`). Consumes the guard.
+    /// `Ok`). Consumes the guard. Waits for natural completion — a resident driver
+    /// that never returns keeps this blocked (that is its job); `drop` cancels.
     pub fn join(mut self) -> Vec<Result<(), String>> {
         let handles = std::mem::take(&mut self.handles);
-        self.rt.block_on(async {
+        let out = self.rt.block_on(async {
             let mut out = Vec::with_capacity(handles.len());
             for h in handles {
                 out.push(
@@ -150,13 +182,28 @@ impl Running {
                 );
             }
             out
-        })
+        });
+        self.stop_ticker();
+        out
+    }
+
+    fn stop_ticker(&mut self) {
+        self.epoch_stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.ticker.take() {
+            let _ = t.join();
+        }
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
+        // Abort first so a compute-bound/resident guest is cancelled instead of
+        // hanging shutdown; the epoch tick (still live) makes the abort land at the
+        // guest's next yield. Then stop the ticker.
         let handles = std::mem::take(&mut self.handles);
+        for h in &handles {
+            h.abort();
+        }
         if !handles.is_empty() {
             self.rt.block_on(async {
                 for h in handles {
@@ -164,12 +211,16 @@ impl Drop for Running {
                 }
             });
         }
+        self.stop_ticker();
     }
 }
 
 fn build_engine() -> anyhow::Result<Engine> {
     let mut config = Config::new();
     config.wasm_component_model(true);
+    // A compute-bound guest never awaits; epoch interruption lets it yield the ext
+    // executor instead of pinning the OS thread inside Future::poll (see run/drive).
+    config.epoch_interruption(true);
     Engine::new(&config)
         .map_err(wt)
         .context("building the wasm engine")
