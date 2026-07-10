@@ -6,7 +6,7 @@ use crate::{
     executor::run_script,
     scoreboard::{Event, sb_update},
     start::{JobRx, pull_job},
-    types::Job,
+    types::{Job, StreamState},
     *,
 };
 
@@ -21,20 +21,21 @@ fn status_for_open_error(kind: ErrorKind) -> u16 {
 
 pub(crate) fn classic_worker(rx: JobRx) {
     while let Some(mut job) = pull_job(&rx) {
-        sb_update(classic_executor(&mut job));
-        job.ctx.finish();
+        let (event, truncated) = classic_executor(&mut job);
+        sb_update(event);
+        job.ctx.finish(truncated);
     }
 }
 
-fn classic_executor(job: &mut Job) -> Event {
+fn classic_executor(job: &mut Job) -> (Event, bool) {
     bind_server_context(&mut job.ctx);
-    let is_errored: bool = unsafe {
+    let (is_errored, truncated) = unsafe {
         populate_request_context(&mut job.ctx);
         if php_request_startup() == FAILURE {
             send_error_head(&mut job.ctx, 500);
             rapira_request_shutdown();
             unbind_server_context();
-            return Event::Handled(true);
+            return (Event::Handled(true), false);
         }
 
         let exec_err: bool = match File::open(&job.ctx.req.script_filename) {
@@ -43,25 +44,29 @@ fn classic_executor(job: &mut Job) -> Event {
                 true
             }
             Ok(_) => {
-                // in the sb_record we count errors as errored = true
-                // here run_script may return false, as an indicator of a PHP error
-                // so we need to reverse the logic to match the sb_record expectation
+                // sb_update counts an error as errored = true, but run_script returns
+                // false to signal a PHP error — reverse it to match that expectation
                 !run_script(&job.ctx.req.script_filename)
             }
         };
+        // The script has run: from here the flush is teardown, not streaming, so
+        // freeze `stream` — a buffered body flushed now stays a complete response.
+        job.ctx.tearing_down = true;
         // flushes output and sends the REAL head (script status + Set-Cookie) via
         // php_output_deactivate -> sapi_send_headers
         rapira_request_shutdown();
 
+        // truncated only if the body was already streaming when the script failed
+        let truncated = job.ctx.is_truncated(exec_err);
         // fallback ONLY if nothing emitted a head (script bailed before any output
         // and the flush sent none) - never pre-empts the real head now
-        if exec_err && !job.ctx.headers_sent {
+        if exec_err && job.ctx.stream == StreamState::NotSent {
             send_error_head(&mut job.ctx, 500);
         }
 
-        exec_err
+        (exec_err, truncated)
     };
 
     unbind_server_context();
-    Event::Handled(is_errored)
+    (Event::Handled(is_errored), truncated)
 }

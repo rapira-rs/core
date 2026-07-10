@@ -1,8 +1,9 @@
 use crate::context::{ctx, with_ctx};
-use crate::types::{Context, Frame, ResponseHead};
+use crate::types::{Context, Frame, ResponseHead, StreamState};
 use crate::*;
 use bytes::Bytes;
 use core::slice;
+use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -89,7 +90,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
             c
         };
 
-        if !ctx.headers_sent {
+        if ctx.stream == StreamState::NotSent {
             send_head(ctx);
         }
 
@@ -99,11 +100,16 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
                 .blocking_send(Frame::Body(Bytes::copy_from_slice(buf)))
                 .is_err()
             {
-                ctx.finish();
+                ctx.finish(false);
                 // receiver dropped = client disconnect; core ignores ub_write's return.
                 // Report it so the C shim raises the abort after this frame unwinds.
                 unsafe { *aborted = true };
                 return 0;
+            }
+            // A body frame reached the consumer *during the handler* (the teardown
+            // flush sets `tearing_down` first): a later error now truncates the body.
+            if !ctx.tearing_down {
+                ctx.stream = StreamState::BodyStreamed;
             }
         }
 
@@ -132,7 +138,7 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
                 return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
             };
 
-            if ctx.headers_sent {
+            if ctx.stream != StreamState::NotSent {
                 return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
             }
 
@@ -150,7 +156,7 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
                 headers,
             }));
         };
-        ctx.headers_sent = true;
+        ctx.stream = StreamState::HeadSent;
         SAPI_HEADER_SENT_SUCCESSFULLY as c_int
     })
 }
@@ -187,89 +193,108 @@ pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
 }
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
     with_ctx((), |ctx| {
-        let put = |name: &str, val: &str| unsafe {
-            let n = CString::new(name).unwrap_or_default();
-            let v = CString::new(val).unwrap_or_default();
+        // Names are `c"…"` literals (zero alloc); `php_register_variable_safe` takes the value as
+        // ptr+len, so values pass through with no `CString` allocation either — as `&str` for the
+        // ASCII vars, as raw `&[u8]` for (binary-safe) header values. Only dynamic names (HTTP_*
+        // headers, extra server vars) still need a per-name `CString`.
+        let put_bytes = |name: &CStr, val: &[u8]| unsafe {
             php_register_variable_safe(
-                n.as_ptr(),
-                v.as_ptr() as *const c_char,
-                v.as_bytes().len(),
+                name.as_ptr(),
+                val.as_ptr() as *const c_char,
+                val.len(),
                 track_vars_array,
             );
         };
+        let put = |name: &CStr, val: &str| put_bytes(name, val.as_bytes());
+        let put_dyn_bytes = |name: &str, val: &[u8]| {
+            let n = CString::new(name).unwrap_or_default();
+            put_bytes(&n, val);
+        };
+        let put_dyn = |name: &str, val: &str| put_dyn_bytes(name, val.as_bytes());
         // mapping trust policy: https://www.php.net/manual/en/reserved.variables.server.php
-        put("PHP_SELF", &ctx.req.script_name);
+        put(c"PHP_SELF", &ctx.req.script_name);
         let doc_uri = ctx
             .req
             .uri
             .split_once('?')
             .map_or(ctx.req.uri.as_str(), |(p, _)| p);
-        put("DOCUMENT_URI", doc_uri);
-        put("DOCUMENT_ROOT", &ctx.req.document_root);
+        put(c"DOCUMENT_URI", doc_uri);
+        put(c"DOCUMENT_ROOT", &ctx.req.document_root);
         put(
-            "REQUEST_SCHEME",
+            c"REQUEST_SCHEME",
             if ctx.req.https { "https" } else { "http" },
         );
-        put("REMOTE_HOST", &ctx.req.remote_addr);
-        put("REMOTE_PORT", &ctx.req.remote_port);
-        put("REMOTE_IDENT", ""); // RFC 1413: "The REMOTE_IDENT variable is not set by default"
-        put("REQUEST_METHOD", &ctx.req.method);
-        put("REQUEST_URI", &ctx.req.uri);
-        put("QUERY_STRING", &ctx.req.query);
+        put(c"REMOTE_HOST", &ctx.req.remote_addr);
+        put(c"REMOTE_PORT", &ctx.req.remote_port);
+        put(c"REMOTE_IDENT", ""); // RFC 1413: "The REMOTE_IDENT variable is not set by default"
+        put(c"REQUEST_METHOD", &ctx.req.method);
+        put(c"REQUEST_URI", &ctx.req.uri);
+        put(c"QUERY_STRING", &ctx.req.query);
         put(
-            "SCRIPT_FILENAME",
+            c"SCRIPT_FILENAME",
             &ctx.req.script_filename.to_string_lossy(),
         );
-        put("SCRIPT_NAME", &ctx.req.script_name);
-        put("SERVER_PROTOCOL", &ctx.req.protocol);
-        put("SERVER_SOFTWARE", "Rapira");
-        put("SERVER_NAME", &ctx.req.server_name);
-        put("SERVER_PORT", &ctx.req.server_port);
-        put("REMOTE_ADDR", &ctx.req.remote_addr);
-        put("GATEWAY_INTERFACE", "CGI/1.1");
-        put("HTTPS", if ctx.req.https { "on" } else { "" });
+        put(c"SCRIPT_NAME", &ctx.req.script_name);
+        put(c"SERVER_PROTOCOL", &ctx.req.protocol);
+        put(c"SERVER_SOFTWARE", "Rapira");
+        put(c"SERVER_NAME", &ctx.req.server_name);
+        put(c"SERVER_PORT", &ctx.req.server_port);
+        put(c"REMOTE_ADDR", &ctx.req.remote_addr);
+        put(c"GATEWAY_INTERFACE", "CGI/1.1");
+        put(c"HTTPS", if ctx.req.https { "on" } else { "" });
 
         let auth_type = ctx
             .req
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-            .and_then(|(_, v)| v.split_whitespace().next())
-            .unwrap_or("");
+            .and_then(|(_, v)| v.split(|b| b.is_ascii_whitespace()).find(|s| !s.is_empty()))
+            .map(String::from_utf8_lossy)
+            .unwrap_or_default();
 
-        put("AUTH_TYPE", auth_type);
+        put(c"AUTH_TYPE", auth_type.as_ref());
         let auth_user = unsafe { (*rapira_sg()).request_info.auth_user };
         if !auth_user.is_null() {
             let user: &CStr = unsafe { CStr::from_ptr(auth_user as *const c_char) };
-            put("REMOTE_USER", &user.to_string_lossy());
+            put(c"REMOTE_USER", &user.to_string_lossy());
         }
 
         if let Some(ct) = &ctx.req.content_type {
-            put("CONTENT_TYPE", ct);
+            put(c"CONTENT_TYPE", ct);
         }
         if ctx.req.content_length >= 0 {
-            put("CONTENT_LENGTH", &ctx.req.content_length.to_string());
+            put(c"CONTENT_LENGTH", &ctx.req.content_length.to_string());
         }
 
-        let mut merged: Vec<(String, String)> = Vec::with_capacity(ctx.req.headers.len());
+        let mut merged: Vec<(String, Cow<[u8]>)> = Vec::with_capacity(ctx.req.headers.len());
         for (k, v) in &ctx.req.headers {
-            let name = format!("HTTP_{}", k.to_ascii_uppercase().replace("-", "_"));
+            // `HTTP_<UPPERCASE, '-'→'_'>` built in a single allocation.
+            let mut name = String::with_capacity(5 + k.len());
+            name.push_str("HTTP_");
+            name.extend(k.bytes().map(|b| {
+                if b == b'-' {
+                    '_'
+                } else {
+                    b.to_ascii_uppercase() as char
+                }
+            }));
             match merged.iter_mut().find(|(n, _)| *n == name) {
                 Some((n, val)) => {
-                    val.push_str(if n == "HTTP_COOKIE" { "; " } else { ", " });
-                    val.push_str(v);
+                    let sep: &[u8] = if n == "HTTP_COOKIE" { b"; " } else { b", " };
+                    let owned = val.to_mut();
+                    owned.extend_from_slice(sep);
+                    owned.extend_from_slice(v);
                 }
-                None => {
-                    merged.push((name, v.clone()));
-                }
+                // Borrow the header bytes; only an actual duplicate forces an owned copy.
+                None => merged.push((name, Cow::Borrowed(v.as_slice()))),
             }
         }
         for (k, v) in &merged {
-            put(k, v);
+            put_dyn_bytes(k, &v[..]);
         }
 
         for (k, v) in &ctx.req.server_vars {
-            put(k, v);
+            put_dyn(k, v);
         }
     })
 }
@@ -310,7 +335,7 @@ pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type:
     })
 }
 fn send_head(c: &mut Context) {
-    if c.headers_sent {
+    if c.stream != StreamState::NotSent {
         return;
     }
     let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
@@ -320,11 +345,11 @@ fn send_head(c: &mut Context) {
             status,
             headers: vec![],
         }));
-        c.headers_sent = true;
+        c.stream = StreamState::HeadSent;
     }
 }
 pub(crate) fn send_error_head(c: &mut Context, status: u16) {
-    if c.headers_sent {
+    if c.stream != StreamState::NotSent {
         return;
     }
 
@@ -333,6 +358,6 @@ pub(crate) fn send_error_head(c: &mut Context, status: u16) {
             status,
             headers: vec![],
         }));
-        c.headers_sent = true;
+        c.stream = StreamState::HeadSent;
     }
 }

@@ -30,6 +30,7 @@ fn recv_all(mut rx: tokio::sync::mpsc::Receiver<Frame>) -> Resp {
                 headers = h.headers;
             }
             Frame::Body(b) => body.extend_from_slice(&b),
+            Frame::End { .. } => {}
         }
     }
     Resp {
@@ -215,7 +216,7 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
         let mut request = req("/cookies-worker.php", "cookies-worker.php");
         request
             .headers
-            .push(("Cookie".into(), format!("foo=bar; i={i}")));
+            .push(("Cookie".into(), format!("foo=bar; i={i}").into_bytes()));
         let (status, body) = drain(h.handle_blocking(request)?);
         assert_eq!(status, 200);
         assert!(
@@ -287,7 +288,7 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
     let mut request = req(&format!("/{fixture_name}"), fixture_name);
     request
         .headers
-        .push(("Cookie".into(), format!("PHPSESSID={sid}")));
+        .push(("Cookie".into(), format!("PHPSESSID={sid}").into_bytes()));
     let r2 = recv_all(h.handle_blocking(request)?);
     drop(h);
     r.shutdown();
@@ -496,19 +497,23 @@ fn flush_chunk_boundaries_worker() -> anyhow::Result<()> {
         while let Some(frame) = rx.blocking_recv() {
             frames.push(frame);
         }
-        assert_eq!(frames.len(), 3, "expected head + two body chunks");
+        assert_eq!(frames.len(), 4, "expected head + two body chunks + end");
         match &frames[0] {
             Frame::Head(head) => assert_eq!(head.status, 200),
-            Frame::Body(_) => panic!("first frame must be the head"),
+            _ => panic!("first frame must be the head"),
         }
         match &frames[1] {
             Frame::Body(b) => assert_eq!(&b[..], b"He"),
-            Frame::Head(_) => panic!("second frame must be the first chunk"),
+            _ => panic!("second frame must be the first chunk"),
         }
         match &frames[2] {
             Frame::Body(b) => assert_eq!(&b[..], format!("llo {i}").as_bytes()),
-            Frame::Head(_) => panic!("third frame must be the second chunk"),
+            _ => panic!("third frame must be the second chunk"),
         }
+        assert!(
+            matches!(frames[3], Frame::End { truncated: false }),
+            "stream must end with a clean End marker"
+        );
     }
     drop(h);
     r.shutdown();

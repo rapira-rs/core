@@ -11,12 +11,9 @@ workspace = true
 anyhow = { workspace = true }
 log = { workspace = true }
 php_sys = { workspace = true }
-serde = { version = "1", features = ["derive"] }
-toml = "0.9"
-# `async` is not a default feature; the guest is driven async by the host.
-wasmtime = { version = "46", features = ["async"] }
-wasmtime-wasi = "46"
-# Reads the `rapira:api-version` custom section before instantiating.
-wasmparser = "0.251"
+extension_api = { workspace = true }
 # A shared multi-thread runtime drives all extension tasks.
-tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
+# `sigwait`-based shutdown: block SIGINT/SIGTERM and reap them without a signal handler,
+# so rapira coexists with Zend's per-request signal management.
+libc = "0.2"

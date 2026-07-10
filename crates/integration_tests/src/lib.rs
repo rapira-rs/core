@@ -69,6 +69,7 @@ pub fn drain(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
         match frame {
             Frame::Head(h) => status = h.status,
             Frame::Body(b) => body.extend_from_slice(&b),
+            Frame::End { .. } => {}
         }
     }
     (status, String::from_utf8_lossy(&body).into_owned())
@@ -87,6 +88,7 @@ pub async fn drain_async(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
         match frame {
             Frame::Head(h) => status = h.status,
             Frame::Body(b) => body.extend_from_slice(&b),
+            Frame::End { .. } => {}
         }
     }
     (status, String::from_utf8_lossy(&body).into_owned())

@@ -1,7 +1,0 @@
-world extension {
-  import host;
-
-  // The single async entry rapira calls: the guest drives PHP by awaiting the
-  // imported `exec` (and may `join!` several). A failure is reported here.
-  export run: async func() -> result<_, string>;
-}

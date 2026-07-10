@@ -4,19 +4,26 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "rapira: debug startup (classic)",
+      "name": "rapira: worker — fixtures/worker.php",
       "cargo": {
         "args": [
           "build",
-          "--bin=core",
-          "--package=core"
+          "--bin=rapira_core",
+          "--package=rapira_core"
         ],
         "filter": {
-          "name": "core",
+          "name": "rapira_core",
           "kind": "bin"
         }
       },
-      "args": [],
+      "args": [
+        "--mode",
+        "worker",
+        "--threads",
+        "1",
+        "--script",
+        "${workspaceFolder}/crates/integration_tests/fixtures/worker.php"
+      ],
       "cwd": "${workspaceFolder}",
       "terminal": "integrated",
       "sourceLanguages": [
@@ -30,19 +37,24 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "rapira: debug startup (worker mode)",
+      "name": "rapira: classic — fixtures/hello.php",
       "cargo": {
         "args": [
           "build",
-          "--bin=core",
-          "--package=core"
+          "--bin=rapira_core",
+          "--package=rapira_core"
         ],
         "filter": {
-          "name": "core",
+          "name": "rapira_core",
           "kind": "bin"
         }
       },
-      "args": [],
+      "args": [
+        "--mode",
+        "classic",
+        "--script",
+        "${workspaceFolder}/crates/integration_tests/fixtures/hello.php"
+      ],
       "cwd": "${workspaceFolder}",
       "terminal": "integrated",
       "sourceLanguages": [
@@ -50,8 +62,7 @@
       ],
       "env": {
         "LD_LIBRARY_PATH": "${env:HOME}/.local/php-zts/lib",
-        "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config",
-        "RAPIRA_WORKER": "1"
+        "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config"
       }
     },
     {

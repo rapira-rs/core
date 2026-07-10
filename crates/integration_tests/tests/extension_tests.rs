@@ -1,141 +1,371 @@
-//! End-to-end: a WASM extension drives a request through PHP via the host's
-//! `exec` import.
-//!
-//! Skips when the `hello` example has not been built for wasm32-wasip2 — the same
-//! degrade-instead-of-fail shape the observer suites use.
+//! End-to-end: a native extension drives requests through PHP via `Php`.
 
+use extension_api::{Extension, Php, Request, Response, Result};
 use extension_host::ExtensionHost;
 use integration_tests::{fixture, php_lock};
 use php_sys::{Mode, Rapira};
-use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-const HELLO_MANIFEST: &str = "id = \"hello\"\nname = \"Hello\"\nversion = \"0.1.0\"\n";
+/// Distinct ids so the same type can be registered many times (dup-name check).
+static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
-/// `cargo build -p hello --target wasm32-wasip2 --release` (workspace target dir).
-fn hello_component() -> Option<PathBuf> {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release/hello.wasm");
-    path.exists().then_some(path)
+/// Drives two requests concurrently; distinct bodies prove both ran.
+struct Driver {
+    id: String,
 }
 
-/// Lay out `<ext_dir>/<id>/{extension.wasm, extension.toml}` in a scratch dir.
-fn install(id: &str, manifest: &str) -> anyhow::Result<Option<PathBuf>> {
-    let Some(wasm) = hello_component() else {
-        return Ok(None);
-    };
-    let root = std::env::temp_dir().join(format!("rapira-ext-{}-{id}", std::process::id()));
-    let package = root.join(id);
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&package)?;
-    // Not std::fs::copy: a libphp built with --enable-zend-test exports its own
-    // copy_file_range, which dereferences a ZTS global that does not exist yet.
-    std::fs::write(package.join("extension.wasm"), std::fs::read(&wasm)?)?;
-    std::fs::write(package.join("extension.toml"), manifest)?;
-    Ok(Some(root))
+impl Extension for Driver {
+    fn init() -> Self {
+        Driver {
+            id: format!("ext{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.id
+    }
+
+    async fn run(&mut self, php: Php) -> Result<()> {
+        // `join!` starts both exec subtasks before awaiting either, so both are in flight
+        // through the PHP pool concurrently (both must complete; not a strict parallelism proof).
+        let (a, b) = tokio::join!(
+            php.exec(Request::get("/?from=a")),
+            php.exec(Request::get("/?from=b")),
+        );
+        check(&a?, "ok:a")?;
+        check(&b?, "ok:b")?;
+        Ok(())
+    }
+}
+
+fn check(res: &Response, want: &str) -> Result<()> {
+    anyhow::ensure!(res.status == 200, "expected 200, got {}", res.status);
+    anyhow::ensure!(
+        res.body == want.as_bytes(),
+        "expected body {want:?}, got {:?}",
+        String::from_utf8_lossy(&res.body)
+    );
+    Ok(())
 }
 
 #[test]
 fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let Some(dir) = install("hello", HELLO_MANIFEST)? else {
-        return Ok(()); // hello.wasm not built
-    };
-
-    // Worker mode: the resident script answers each `exec` request with "ok:<from>".
-    // Two workers so the extension's two `join!`ed execs can run in parallel.
+    // Worker mode: the resident script answers each exec with "ok:<from>". Two workers
+    // so the two join!ed execs can run in parallel.
     let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")), 2)?;
-    let ext = ExtensionHost::load(&dir)?;
-
-    // hello's async `run` `join!`s `GET /?from=a` and `GET /?from=b`, then checks each
-    // response is 200 with its own distinct body ("ok:a" / "ok:b"). An Ok outcome
-    // proves both exec subtasks ran and returned their own result — not that they
-    // overlapped in time (a serialized host would pass too); `many_extensions_run_
-    // concurrently` exercises real overlap (12 drivers over 4 workers).
-    let running = ext.run(rapira.handle()?);
-    let outcomes = running.join();
-
-    assert_eq!(outcomes.len(), 1);
-    assert!(
-        outcomes[0].is_ok(),
-        "extension driver failed: {:?}",
-        outcomes[0]
-    );
-
+    let mut host = ExtensionHost::new();
+    host.register::<Driver>()?;
+    let outcomes = host
+        .run(rapira.handle()?, fixture("ext-driver-worker.php"))
+        .join();
     drop(rapira);
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].is_ok(), "driver failed: {:?}", outcomes[0]);
     Ok(())
 }
 
 #[test]
-fn many_extensions_run_concurrently() -> anyhow::Result<()> {
+fn classic_mode_serves_exec() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let Some(wasm) = hello_component() else {
-        return Ok(());
-    };
+    // Classic mode runs the front controller per exec, with the URI in $_GET, so it
+    // echoes "ok:<from>" — exec works with a real front controller (why main takes --script).
+    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let mut host = ExtensionHost::new();
+    host.register::<Driver>()?;
+    let outcomes = host
+        .run(rapira.handle()?, fixture("ext-driver-classic.php"))
+        .join();
+    drop(rapira);
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        outcomes[0].is_ok(),
+        "classic exec failed: {:?}",
+        outcomes[0]
+    );
+    Ok(())
+}
 
-    // 12 copies of the hello driver, each with a distinct id, in one ext dir.
-    const N: usize = 12;
-    let root = std::env::temp_dir().join(format!("rapira-ext-many-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let bytes = std::fs::read(&wasm)?;
-    for i in 0..N {
-        let package = root.join(format!("ext{i}"));
-        std::fs::create_dir_all(&package)?;
-        std::fs::write(package.join("extension.wasm"), &bytes)?;
-        std::fs::write(package.join("extension.toml"), format!("id = \"ext{i}\"\n"))?;
+/// Drives one request whose PHP handler sets a status + session cookie and then throws
+/// with output buffered — a COMPLETE, head-only error response. Regression guard for the
+/// truncation rule (`Context::is_truncated`): `exec` maps a truncated terminal frame to
+/// an error, so a buffered/head-only error response must NOT be flagged truncated, or the
+/// extension would serve a generic 502 instead of the real 404.
+struct ErrorPathDriver;
+
+impl Extension for ErrorPathDriver {
+    fn init() -> Self {
+        ErrorPathDriver
     }
 
-    // A few PHP workers so the fan-out has real concurrency to exploit.
-    let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")), 4)?;
-    let ext = ExtensionHost::load(&root)?;
+    fn name(&self) -> &str {
+        "error-path-driver"
+    }
 
-    let outcomes = ext.run(rapira.handle()?).join();
+    async fn run(&mut self, php: Php) -> Result<()> {
+        // Before the fix this returned Err("php crashed mid-response; body truncated").
+        let resp = php.exec(Request::get("/")).await?;
+        anyhow::ensure!(resp.status == 404, "expected 404, got {}", resp.status);
+        anyhow::ensure!(
+            resp.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("set-cookie")),
+            "the session Set-Cookie must survive the buffered error path"
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let rapira = Rapira::start(Mode::Worker(fixture("error-keeps-headers-worker.php")), 1)?;
+    let mut host = ExtensionHost::new();
+    host.register::<ErrorPathDriver>()?;
+    let outcomes = host
+        .run(rapira.handle()?, fixture("error-keeps-headers-worker.php"))
+        .join();
+    drop(rapira);
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        outcomes[0].is_ok(),
+        "exec rejected a complete buffered error response: {:?}",
+        outcomes[0]
+    );
+    Ok(())
+}
+
+#[test]
+fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let mut host = ExtensionHost::new();
+    host.register::<ErrorPathDriver>()?;
+    let outcomes = host
+        .run(rapira.handle()?, fixture("error-keeps-headers.php"))
+        .join();
+    drop(rapira);
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        outcomes[0].is_ok(),
+        "classic exec rejected a complete buffered error response: {:?}",
+        outcomes[0]
+    );
+    Ok(())
+}
+
+/// A resident extension whose `run` never returns on its own — it only stops when the
+/// host asks it to (the pingora-shaped case).
+struct Resident;
+
+static RESIDENT_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+impl Extension for Resident {
+    fn init() -> Self {
+        Resident
+    }
+
+    fn name(&self) -> &str {
+        "resident"
+    }
+
+    async fn run(&mut self, _php: Php) -> Result<()> {
+        std::future::pending().await
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        RESIDENT_SHUTDOWN.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+#[test]
+fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    RESIDENT_SHUTDOWN.store(false, Ordering::Relaxed);
+    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let mut host = ExtensionHost::new();
+    host.register::<Resident>()?;
+    let running = host.run(rapira.handle()?, fixture("ext-driver-classic.php"));
+
+    // Dropping the guard fires the internal stop: `run` (which never returns) is
+    // cancelled, `shutdown` is driven, and the tasks drain — promptly, not hanging.
+    let start = Instant::now();
+    drop(running);
+    drop(rapira);
+    assert!(
+        RESIDENT_SHUTDOWN.load(Ordering::Relaxed),
+        "shutdown must be driven when a resident run is cancelled"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "graceful stop must not hang"
+    );
+    Ok(())
+}
+
+#[test]
+fn many_extensions_run() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    const N: usize = 12;
+    // A few PHP workers so the fan-out has room to overlap (12 drivers × 2 execs over 4
+    // workers). This proves all N extensions complete, not a strict parallelism bound.
+    let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")), 4)?;
+    let mut host = ExtensionHost::new();
+    for _ in 0..N {
+        host.register::<Driver>()?;
+    }
+    let outcomes = host
+        .run(rapira.handle()?, fixture("ext-driver-worker.php"))
+        .join();
+    drop(rapira);
     assert_eq!(outcomes.len(), N);
     assert!(
         outcomes.iter().all(|r| r.is_ok()),
         "some extensions failed: {outcomes:?}"
     );
-
-    drop(rapira);
     Ok(())
 }
 
-#[test]
-fn a_package_missing_its_wasm_fails_to_load() -> anyhow::Result<()> {
-    let root = std::env::temp_dir().join(format!("rapira-ext-torn-{}", std::process::id()));
-    let package = root.join("torn");
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&package)?;
-    std::fs::write(package.join("extension.toml"), HELLO_MANIFEST)?;
+/// A fixed name (unlike `Driver`, whose id is unique per instance) so two registrations collide.
+struct Fixed;
 
-    let err = ExtensionHost::load(&root)
-        .err()
-        .map(|e| format!("{e:#}"))
-        .unwrap_or_default();
+impl Extension for Fixed {
+    fn init() -> Self {
+        Fixed
+    }
+    fn name(&self) -> &str {
+        "fixed"
+    }
+    async fn run(&mut self, _php: Php) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn duplicate_extension_name_is_rejected() {
+    let mut host = ExtensionHost::new();
+    host.register::<Fixed>().unwrap();
+    let err = host.register::<Fixed>().unwrap_err();
     assert!(
-        err.contains("without extension.wasm"),
-        "expected a torn-package error, got {err:?}"
+        err.to_string().contains("duplicate extension"),
+        "expected a duplicate-name error, got: {err}"
+    );
+}
+
+/// Register one `E`, drive it to completion in classic mode, and return its outcomes.
+fn run_one<E: Extension>() -> anyhow::Result<Vec<Result<(), String>>> {
+    let _guard = php_lock();
+    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let mut host = ExtensionHost::new();
+    host.register::<E>()?;
+    let outcomes = host
+        .run(rapira.handle()?, fixture("ext-driver-classic.php"))
+        .join();
+    drop(rapira);
+    Ok(outcomes)
+}
+
+/// `run` fails; the host must surface the error as this extension's outcome.
+struct Failing;
+
+impl Extension for Failing {
+    fn init() -> Self {
+        Failing
+    }
+    fn name(&self) -> &str {
+        "failing"
+    }
+    async fn run(&mut self, _php: Php) -> Result<()> {
+        anyhow::bail!("boom")
+    }
+}
+
+#[test]
+fn run_returning_err_is_reported() -> anyhow::Result<()> {
+    let outcomes = run_one::<Failing>()?;
+    assert_eq!(outcomes.len(), 1);
+    let err = outcomes[0].as_ref().unwrap_err();
+    assert!(
+        err.contains("run failed"),
+        "expected a run failure, got: {err}"
     );
     Ok(())
 }
 
+/// `run` panics; the host must convert the JoinError into an outcome, not abort.
+struct Panicking;
+
+impl Extension for Panicking {
+    fn init() -> Self {
+        Panicking
+    }
+    fn name(&self) -> &str {
+        "panicking"
+    }
+    async fn run(&mut self, _php: Php) -> Result<()> {
+        panic!("kaboom")
+    }
+}
+
 #[test]
-fn classic_mode_cannot_serve_exec() -> anyhow::Result<()> {
+fn panic_in_run_is_reported() -> anyhow::Result<()> {
+    let outcomes = run_one::<Panicking>()?;
+    assert_eq!(outcomes.len(), 1);
+    let err = outcomes[0].as_ref().unwrap_err();
+    assert!(
+        err.contains("driver task panicked"),
+        "expected a panic outcome, got: {err}"
+    );
+    Ok(())
+}
+
+/// `run` never returns and `shutdown` overruns the grace; the host must time it out.
+struct SlowShutdown;
+
+impl Extension for SlowShutdown {
+    fn init() -> Self {
+        SlowShutdown
+    }
+    fn name(&self) -> &str {
+        "slow-shutdown"
+    }
+    async fn run(&mut self, _php: Php) -> Result<()> {
+        std::future::pending().await
+    }
+    async fn shutdown(&mut self) -> Result<()> {
+        // Overruns any sane grace; the host's timeout must fire first.
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        Ok(())
+    }
+}
+
+#[test]
+fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let Some(dir) = install("classic", HELLO_MANIFEST)? else {
-        return Ok(()); // hello.wasm not built
-    };
-    // Classic mode opens the exec URI path ("/") as a script file, so the resident
-    // handler never runs and every exec 500s — which is why the shipped binary boots
-    // Worker mode. This pins that Classic + extensions is a non-starter.
     let rapira = Rapira::start(Mode::Classic, 1)?;
-    let ext = ExtensionHost::load(&dir)?;
-    let outcomes = ext.run(rapira.handle()?).join();
+    let mut host = ExtensionHost::new();
+    host.register::<SlowShutdown>()?;
+    // A tiny grace so the timeout branch fires fast instead of after the 30s default.
+    let running = host.run_with_grace(
+        rapira.handle()?,
+        fixture("ext-driver-classic.php"),
+        Duration::from_millis(100),
+    );
+    // `stop` cancels the pending `run`, then drives `shutdown` — which overruns the grace.
+    let start = Instant::now();
+    let outcomes = running.stop();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
+    let err = outcomes[0].as_ref().unwrap_err();
     assert!(
-        outcomes[0].is_err(),
-        "Classic mode must not serve exec (hello expects 200, got 500): {:?}",
-        outcomes[0]
+        err.contains("shutdown timed out"),
+        "expected a shutdown timeout, got: {err}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the timeout must be bounded by the grace, not hang"
     );
     Ok(())
 }

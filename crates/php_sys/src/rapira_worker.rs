@@ -1,6 +1,11 @@
 use log::error;
 
-use crate::{callbacks::*, scoreboard::sb_update, start::pull_job, types::Outcome};
+use crate::{
+    callbacks::*,
+    scoreboard::sb_update,
+    start::pull_job,
+    types::{Outcome, StreamState},
+};
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
@@ -105,7 +110,7 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) -> WorkerExit {
                     None => break WorkerExit::Closed,
                     Some(mut job) => {
                         send_error_head(&mut job.ctx, 503);
-                        job.ctx.finish();
+                        job.ctx.finish(false);
                         sb_update(scoreboard::Event::Handled(true));
                     }
                 }
@@ -152,6 +157,11 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         outcome = unsafe { rapira_run_handler(fci, fcc) };
     }
 
+    // The handler has returned: from here every ub_write is a teardown flush, not
+    // streaming, so mark the context tearing down before flushing. This freezes
+    // `stream` — a buffered body pushed out now stays a complete response; only body
+    // streamed *during* the handler counts as truncated (see `Context::is_truncated`).
+    job.ctx.tearing_down = true;
     // the real head (status, cookies, php_error_cb's 500) lives in
     // SG(sapi_headers); teardown destroys it — flush first
     let flushed = match outcome {
@@ -166,8 +176,11 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let recycle: bool = [outcome, flushed, teardown].contains(&Outcome::Bailout);
     // an uncaught throw is an error response but doesn't need a recycle
     let errored: bool = recycle || outcome == Outcome::Throw;
+    let truncated: bool = job.ctx.is_truncated(errored);
 
-    if errored && !job.ctx.headers_sent {
+    // No head reached the consumer (script bailed before any output, flush sent none)
+    // → synthesize a 500. A committed head (real or buffered) is the complete response.
+    if errored && job.ctx.stream == StreamState::NotSent {
         send_error_head(&mut job.ctx, 500);
     }
 
@@ -182,7 +195,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
             }
         });
     }
-    job.ctx.finish();
+    job.ctx.finish(truncated);
     // false breaks the PHP worker loop so run_cycle can rebuild the request
     !recycle
 }
@@ -216,7 +229,7 @@ fn next_job() -> Option<Job> {
 pub extern "C" fn rapira_rs_finish_response() {
     guard((), || unsafe {
         if let Some(c) = ctx() {
-            c.finish();
+            c.finish(false);
         }
     });
 }

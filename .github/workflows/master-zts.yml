@@ -61,21 +61,13 @@ jobs:
           echo "${PHP_PREFIX}/bin" >> "$GITHUB_PATH"
           echo "LD_LIBRARY_PATH=${PHP_PREFIX}/lib" >> "$GITHUB_ENV"
 
-      # wasmtime 46 needs Rust >= 1.94; the workspace pins rust-version = 1.96.1.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
-
-      # Build the example component so the extension e2e test runs instead of skipping.
-      - run: cargo build -p hello --target wasm32-wasip2 --release
       - run: cargo test --workspace
-
-      # Smoke-test the packaging CLI (writes examples/hello/{target,dist}).
-      - run: cargo run -q -p rapira-extension -- build examples/hello

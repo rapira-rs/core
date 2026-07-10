@@ -1,354 +1,274 @@
-//! Loads WASM extensions and runs them as PHP-request drivers.
-//!
-//! An extension is a sidecar component: `ExtensionHost::load` compiles and
-//! validates each one, and `run` spawns a driver thread per extension that calls
-//! `init` then `handle`. The guest drives PHP through the `exec` host imports,
-//! which submit requests to rapira's worker pool via a [`RapiraHandle`].
+//! Registers native rapira extensions and drives each on a shared runtime. `serve`
+//! runs until every extension finishes or a terminate/interrupt signal arrives; on a
+//! signal it stops and drains them all — this is how rapira_core shuts down and exits.
 
-mod host_fns;
-mod instances;
-pub mod manifest;
-mod state;
-mod wit;
-
-use anyhow::{Context, bail};
-use manifest::Manifest;
+use extension_api::{Extension, Php};
 use php_sys::RapiraHandle;
-use state::HostState;
-use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
-use tokio::task::JoinHandle;
-use wasmtime::component::{Component, HasSelf, Linker};
-use wasmtime::{Config, Engine};
-use wit::{Extension, ExtensionPre};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 
-/// The guest's `rapira:api-version` stamp must match this major/minor.
-const SUPPORTED_MAJOR: u16 = 0;
-const SUPPORTED_MINOR: u16 = 1;
+/// How long a graceful `shutdown` may take before the task is dropped.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
-/// Worker threads for the shared extension runtime. Extension tasks are
-/// PHP-I/O-bound (they mostly await `exec`), so a small pool multiplexes many.
-const EXT_WORKER_THREADS: usize = 2;
+type Outcome = std::result::Result<(), String>;
+type BoxFuture = Pin<Box<dyn Future<Output = Outcome> + Send>>;
+type Launcher = Box<dyn FnOnce(Php, watch::Receiver<bool>, Duration) -> BoxFuture + Send>;
 
-/// major.minor.patch, from the guest's `rapira:api-version` custom section.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ApiVersion {
-    major: u16,
-    minor: u16,
-    patch: u16,
+struct Registered {
+    name: String,
+    launch: Launcher,
 }
 
-/// `wasmtime::Error` is a distinct type from `anyhow::Error`, but converts into one.
-fn wt(e: wasmtime::Error) -> anyhow::Error {
-    e.into()
-}
-
-struct LoadedExt {
-    id: Arc<str>,
-    /// Import satisfiability is proven at load, not at first run.
-    pre: ExtensionPre<HostState>,
-}
-
+/// Collects native extensions, then drives them all with one `run` call.
+#[derive(Default)]
 pub struct ExtensionHost {
-    engine: Engine,
-    exts: Vec<LoadedExt>,
+    exts: Vec<Registered>,
 }
 
 impl ExtensionHost {
-    /// Scan `dir` and prepare every extension it contains. Synchronous; no guest
-    /// code runs.
-    pub fn load(dir: &Path) -> anyhow::Result<Arc<Self>> {
-        let engine = build_engine()?;
-        let linker = build_linker(&engine)?;
-
-        let mut exts: Vec<LoadedExt> = Vec::new();
-        for package in discover(dir)? {
-            let manifest = Manifest::load(&package.join("extension.toml"))?;
-            if exts.iter().any(|e| *e.id == manifest.id) {
-                bail!(
-                    "duplicate extension id {:?} in {}",
-                    manifest.id,
-                    dir.display()
-                );
-            }
-
-            let bytes = std::fs::read(package.join("extension.wasm"))
-                .with_context(|| format!("reading {}/extension.wasm", package.display()))?;
-            check_api_version(&manifest.id, &bytes)?;
-
-            let component = Component::from_binary(&engine, &bytes)
-                .map_err(wt)
-                .with_context(|| format!("extension {}: invalid component", manifest.id))?;
-            // Type-checks the guest's imports against the host linker now (no guest
-            // code, no store), so SDK/WIT skew is a load error, not a run failure.
-            let pre = ExtensionPre::new(
-                linker
-                    .instantiate_pre(&component)
-                    .map_err(wt)
-                    .with_context(|| format!("extension {}: unsatisfied imports", manifest.id))?,
-            )
-            .map_err(wt)
-            .with_context(|| format!("extension {}: world mismatch", manifest.id))?;
-
-            exts.push(LoadedExt {
-                id: manifest.id.into(),
-                pre,
-            });
-        }
-
-        log::info!(
-            "[rapira] loaded {} extension(s) from {}",
-            exts.len(),
-            dir.display()
-        );
-        Ok(Arc::new(Self { engine, exts }))
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Run every extension as a task on a shared runtime (each calls `run`). The
-    /// returned guard awaits them on drop, which drops their `RapiraHandle`s — do
-    /// this **before** dropping `Rapira`, or its own `Drop` hangs (shutdown
-    /// contract).
-    pub fn run(self: &Arc<Self>, rapira: RapiraHandle) -> Running {
+    /// Construct `E` (via `init`) and stage it. A duplicate name is a hard error;
+    /// identity is captured for logging before `E` is moved into the launcher.
+    pub fn register<E: Extension>(&mut self) -> anyhow::Result<()> {
+        let ext = E::init();
+        let name = ext.name().to_string();
+        if self.exts.iter().any(|e| e.name == name) {
+            anyhow::bail!("duplicate extension {name:?}");
+        }
+        let launch: Launcher =
+            Box::new(move |php, stop, grace| Box::pin(drive(ext, php, stop, grace)));
+        self.exts.push(Registered { name, launch });
+        Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.exts.is_empty()
+    }
+
+    /// Spawn every extension on a shared runtime; one `Php` (the single `--script`) is
+    /// cloned to each. The returned guard drives them to completion / shutdown.
+    pub fn run(self, rapira: RapiraHandle, script: PathBuf) -> Running {
+        self.run_with_grace(rapira, script, SHUTDOWN_GRACE)
+    }
+
+    /// As [`run`](Self::run), with a custom per-extension graceful-shutdown budget.
+    pub fn run_with_grace(self, rapira: RapiraHandle, script: PathBuf, grace: Duration) -> Running {
+        let php = Php::new(rapira, script);
+        let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(EXT_WORKER_THREADS)
+            .worker_threads(2)
+            .enable_time() // the shutdown timeout in `drive`; extensions own their own IO
             .thread_name("rapira-ext")
             .build()
             .expect("build extension runtime");
 
-        // Bump the engine epoch on a dedicated OS thread so a compute-bound guest
-        // yields (drive arms the deadline). An on-runtime ticker would stall if
-        // every worker thread were already pinned by a non-yielding guest.
-        let epoch_stop = Arc::new(AtomicBool::new(false));
-        let ticker = {
-            let (engine, stop) = (self.engine.clone(), epoch_stop.clone());
-            std::thread::Builder::new()
-                .name("rapira-ext-epoch".into())
-                .spawn(move || {
-                    while !stop.load(Ordering::Relaxed) {
-                        std::thread::sleep(Duration::from_millis(100));
-                        engine.increment_epoch();
+        let mut tasks: JoinSet<Result<(), String>> = JoinSet::new();
+        for Registered { name, launch } in self.exts {
+            let (php, stop) = (php.clone(), stop_rx.clone());
+            tasks.spawn_on(
+                async move {
+                    let outcome = launch(php, stop, grace).await;
+                    match &outcome {
+                        Ok(()) => log::info!("[ext {name}] finished"),
+                        Err(msg) => log::error!("[ext {name}] {msg}"),
                     }
-                })
-                .expect("spawn epoch ticker")
-        };
-
-        let handles = self
-            .exts
-            .iter()
-            .map(|ext| {
-                let (engine, pre, id) = (self.engine.clone(), ext.pre.clone(), ext.id.clone());
-                let rapira = rapira.clone();
-                rt.spawn(async move { instances::drive(engine, id, pre, rapira).await })
-            })
-            .collect();
-
-        Running {
-            rt,
-            handles,
-            epoch_stop,
-            ticker: Some(ticker),
+                    outcome
+                },
+                rt.handle(),
+            );
         }
-    }
 
-    /// No extensions were discovered, so there is nothing to drive.
-    pub fn is_empty(&self) -> bool {
-        self.exts.is_empty()
+        Running { rt, tasks, stop_tx }
     }
 }
 
-/// Awaits the extension tasks on drop; `join` surfaces their outcomes first.
+/// Drive one extension: run until it finishes or the host asks it to stop. On stop the
+/// `run` future is dropped (releasing `&mut ext`), then `shutdown` drains it (bounded by `grace`).
+async fn drive<E: Extension>(
+    mut ext: E,
+    php: Php,
+    mut stop: watch::Receiver<bool>,
+    grace: Duration,
+) -> Outcome {
+    let finished = {
+        let run = ext.run(php);
+        tokio::pin!(run);
+        tokio::select! {
+            outcome = &mut run => Some(outcome),
+            // Resolve when the stop flag flips true (or the sender is dropped).
+            _ = stop.wait_for(|stopping| *stopping) => None,
+        }
+    };
+    match finished {
+        Some(outcome) => outcome.map_err(|e| format!("run failed: {e:#}")),
+        None => match tokio::time::timeout(grace, ext.shutdown()).await {
+            Ok(result) => result.map_err(|e| format!("shutdown failed: {e:#}")),
+            Err(_) => Err("shutdown timed out".into()),
+        },
+    }
+}
+
+/// Block SIGINT/SIGTERM in the calling thread so every thread spawned afterwards (the
+/// PHP workers, the extension runtime) inherits the block. rapira then reaps them with
+/// `sigwait` on a dedicated thread instead of a signal handler — which is what lets it
+/// coexist with Zend's per-request signal management: no `sigaction` disposition is ever
+/// replaced, so PHP keeps its own deferred handlers and emits no "handler was replaced"
+/// warning. Call once, in `main`, before booting PHP.
+pub fn arm_shutdown_signals() {
+    // SAFETY: operates on a stack-owned, freshly-initialized signal set.
+    unsafe {
+        let set = shutdown_sigset();
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
+}
+
+/// The {SIGINT, SIGTERM} set rapira blocks and waits on.
+unsafe fn shutdown_sigset() -> libc::sigset_t {
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+    }
+    set
+}
+
+/// Wait up to `timeout` for a blocked SIGINT/SIGTERM. `true` on receipt, `false` on
+/// timeout — so the waiter can re-check whether the extensions already finished.
+fn wait_shutdown_signal(timeout: Duration) -> bool {
+    // SAFETY: every pointer references a stack value live for the whole call.
+    unsafe {
+        let set: libc::sigset_t = shutdown_sigset();
+        let ts: libc::timespec = libc::timespec {
+            tv_sec: timeout.as_secs() as libc::time_t,
+            tv_nsec: timeout.subsec_nanos() as libc::c_long,
+        };
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        libc::sigtimedwait(&set, &mut info, &ts) >= 0
+    }
+}
+
+/// Drives the extension tasks. `serve` also stops them on a signal; `join` only waits;
+/// `drop` is the safety net.
 pub struct Running {
     rt: Runtime,
-    handles: Vec<JoinHandle<Result<(), String>>>,
-    epoch_stop: Arc<AtomicBool>,
-    ticker: Option<std::thread::JoinHandle<()>>,
+    tasks: JoinSet<Outcome>,
+    stop_tx: watch::Sender<bool>,
 }
 
 impl Running {
-    /// Wait for every extension and return its outcome (`Ok` = `run` returned
-    /// `Ok`). Consumes the guard. Waits for natural completion — a resident driver
-    /// that never returns keeps this blocked (that is its job); `drop` cancels.
-    pub fn join(mut self) -> Vec<Result<(), String>> {
-        let handles = std::mem::take(&mut self.handles);
-        let out = self.rt.block_on(async {
-            let mut out = Vec::with_capacity(handles.len());
-            for h in handles {
-                out.push(
-                    h.await
-                        .unwrap_or_else(|_| Err("driver task panicked".into())),
-                );
-            }
-            out
-        });
-        self.stop_ticker();
-        out
+    /// rapira_core's entry: run until every extension finishes on its own OR a
+    /// terminate/interrupt signal arrives; on signal, ask every extension to shut down
+    /// and drain, then return their outcomes so `main` can exit.
+    pub fn serve(mut self) -> Vec<Outcome> {
+        // A dedicated thread reaps SIGINT/SIGTERM via `sigwait` (blocked process-wide by
+        // `arm_shutdown_signals`) and asks every extension to stop. It polls with a
+        // timeout so it can exit once the extensions finish on their own; a second signal
+        // during the drain forces an immediate exit so an operator can bail out.
+        let done = Arc::new(AtomicBool::new(false));
+        let signals = {
+            let done = done.clone();
+            let stop_tx = self.stop_tx.clone();
+            std::thread::Builder::new()
+                .name("rapira-signal".into())
+                .spawn(move || {
+                    let mut asked = false;
+                    while !done.load(Ordering::Relaxed) {
+                        if wait_shutdown_signal(Duration::from_millis(200)) {
+                            if asked {
+                                log::warn!("[rapira] second shutdown signal; forcing exit");
+                                std::process::exit(130);
+                            }
+                            asked = true;
+                            log::info!("[rapira] shutdown signal received; draining extensions");
+                            let _ = stop_tx.send(true);
+                        }
+                    }
+                })
+                .expect("spawn signal thread")
+        };
+        let outcomes = self.drain_all();
+        done.store(true, Ordering::Relaxed);
+        let _ = signals.join();
+        outcomes
     }
 
-    fn stop_ticker(&mut self) {
-        self.epoch_stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.ticker.take() {
-            let _ = t.join();
-        }
+    /// Wait for every extension to finish on its own (no signal handling). For tests
+    /// and run-to-completion extensions.
+    pub fn join(mut self) -> Vec<Outcome> {
+        self.drain_all()
+    }
+
+    /// Ask every extension to stop, then drain and return their outcomes — the on-demand
+    /// graceful-stop path (no signal), for callers that drive shutdown themselves.
+    pub fn stop(self) -> Vec<Outcome> {
+        let _ = self.stop_tx.send(true);
+        self.join()
+    }
+
+    /// Take the staged tasks and drive them to completion on the runtime.
+    fn drain_all(&mut self) -> Vec<Outcome> {
+        let mut tasks = std::mem::take(&mut self.tasks);
+        self.rt.block_on(drain(&mut tasks))
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        // Abort first so a compute-bound/resident guest is cancelled instead of
-        // hanging shutdown; the epoch tick (still live) makes the abort land at the
-        // guest's next yield. Then stop the ticker.
-        let handles = std::mem::take(&mut self.handles);
-        for h in &handles {
-            h.abort();
-        }
-        if !handles.is_empty() {
-            self.rt.block_on(async {
-                for h in handles {
-                    let _ = h.await;
-                }
-            });
-        }
-        self.stop_ticker();
+        // Safety net for a guard dropped without serve/join/stop: ask extensions to stop,
+        // then drain (each `shutdown` bounded by the host's grace in `drive`). After
+        // serve/join/stop the tasks are already taken, so this is a cheap no-op.
+        let _ = self.stop_tx.send(true);
+        let _ = self.drain_all();
     }
 }
 
-fn build_engine() -> anyhow::Result<Engine> {
-    let mut config = Config::new();
-    config.wasm_component_model(true);
-    // A compute-bound guest never awaits; epoch interruption lets it yield the ext
-    // executor instead of pinning the OS thread inside Future::poll (see run/drive).
-    config.epoch_interruption(true);
-    Engine::new(&config)
-        .map_err(wt)
-        .context("building the wasm engine")
-}
-
-fn build_linker(engine: &Engine) -> anyhow::Result<Linker<HostState>> {
-    let mut linker = Linker::new(engine);
-    // Mandatory even for a no-capability extension: a wasm32-wasip2 std guest
-    // imports wasi:cli and clocks.
-    wasmtime_wasi::p2::add_to_linker_async(&mut linker)
-        .map_err(wt)
-        .context("adding wasi to the linker")?;
-    Extension::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)
-        .map_err(wt)
-        .context("adding rapira host functions to the linker")?;
-    Ok(linker)
-}
-
-/// One level deep, lexicographic, dot-prefixed dirs ignored (staging). A package
-/// missing either file is a hard error, never a skip.
-fn discover(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    if !dir.exists() {
-        log::info!("[rapira] no extension directory at {}", dir.display());
-        return Ok(Vec::new());
+/// Collect every task's outcome; a panicked task becomes an `Err`.
+async fn drain(tasks: &mut JoinSet<Outcome>) -> Vec<Outcome> {
+    let mut out = Vec::with_capacity(tasks.len());
+    while let Some(joined) = tasks.join_next().await {
+        out.push(joined.unwrap_or_else(|_| Err("driver task panicked".into())));
     }
-
-    let mut packages = Vec::new();
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-
-        if !entry.file_type()?.is_dir() || name.starts_with('.') {
-            continue;
-        }
-
-        let (toml, wasm) = (path.join("extension.toml"), path.join("extension.wasm"));
-        match (toml.exists(), wasm.exists()) {
-            (true, true) => packages.push(path),
-            (true, false) => bail!("{}: extension.toml without extension.wasm", path.display()),
-            (false, true) => bail!("{}: extension.wasm without extension.toml", path.display()),
-            (false, false) => continue,
-        }
-    }
-
-    packages.sort();
-    Ok(packages)
-}
-
-fn check_api_version(id: &str, wasm: &[u8]) -> anyhow::Result<()> {
-    let v = read_api_version(wasm)
-        .with_context(|| format!("extension {id}: reading rapira:api-version"))?
-        .with_context(|| {
-            format!("extension {id} has no rapira:api-version section; rebuild it against the SDK")
-        })?;
-
-    if v.major != SUPPORTED_MAJOR || v.minor != SUPPORTED_MINOR {
-        bail!(
-            "extension {id} targets rapira api {}.{}.{}, but this host supports \
-             {SUPPORTED_MAJOR}.{SUPPORTED_MINOR}.x",
-            v.major,
-            v.minor,
-            v.patch
-        );
-    }
-    Ok(())
-}
-
-/// The stamp lives in the core module nested inside the component, so the whole
-/// binary is walked. Parsing it all first turns malformed input into an `Err`
-/// before wasmtime can panic on it.
-fn read_api_version(wasm: &[u8]) -> anyhow::Result<Option<ApiVersion>> {
-    let mut version = None;
-    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
-        if let wasmparser::Payload::CustomSection(section) = payload?
-            && section.name() == "rapira:api-version"
-        {
-            let data = section.data();
-            let bytes: [u8; 6] = data.try_into().map_err(|_| {
-                anyhow::anyhow!("rapira:api-version must be 6 bytes, got {}", data.len())
-            })?;
-            version = Some(ApiVersion {
-                major: u16::from_be_bytes([bytes[0], bytes[1]]),
-                minor: u16::from_be_bytes([bytes[2], bytes[3]]),
-                patch: u16::from_be_bytes([bytes[4], bytes[5]]),
-            });
-        }
-    }
-    Ok(version)
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The host is built, registered, then consumed by `run` on one thread; it need not
+    /// be `Sync`, but staged launchers must be `Send` (they move into spawned tasks).
     #[test]
-    fn version_stamp_round_trips() {
-        let mut wasm = b"\0asm\x0d\0\x01\0".to_vec();
-        let name = b"rapira:api-version";
-        let data = [0u8, 0, 0, 1, 0, 3];
-        let mut body = vec![name.len() as u8];
-        body.extend_from_slice(name);
-        body.extend_from_slice(&data);
-        wasm.push(0);
-        wasm.push(body.len() as u8);
-        wasm.extend_from_slice(&body);
+    fn extension_host_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<ExtensionHost>();
+    }
 
-        assert_eq!(
-            read_api_version(&wasm).expect("parse"),
-            Some(ApiVersion {
-                major: 0,
-                minor: 1,
-                patch: 3
-            })
+    /// The reaper dequeues a blocked, pending signal via `sigwait` instead of letting it
+    /// run the default (terminate) action — the basis of graceful shutdown.
+    #[test]
+    fn sigwait_reaps_a_blocked_signal() {
+        arm_shutdown_signals();
+        assert!(
+            !wait_shutdown_signal(Duration::from_millis(10)),
+            "no signal is pending yet"
         );
-    }
-
-    #[test]
-    fn missing_directory_is_not_an_error() {
-        let packages = discover(Path::new("/nonexistent/rapira/extensions")).expect("discover");
-        assert!(packages.is_empty());
-    }
-
-    /// The host is shared across driver threads.
-    #[test]
-    fn extension_host_is_send_and_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<ExtensionHost>();
+        // SAFETY: SIGTERM is blocked in this thread, so `raise` leaves it pending here
+        // for `sigwait` to dequeue; it never reaches the default handler.
+        unsafe { libc::raise(libc::SIGTERM) };
+        assert!(
+            wait_shutdown_signal(Duration::from_secs(1)),
+            "the pending SIGTERM is reaped"
+        );
     }
 }

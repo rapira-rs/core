@@ -17,7 +17,7 @@ use std::ffi::c_int;
 pub use bindings::*;
 pub use handler::RapiraHandle;
 pub use start::Rapira;
-pub use types::{Context, Frame, Mode, Request, ResponseHead};
+pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};
 
 // Zend status codes, which are different on master and 8.5 for example.
 pub const SUCCESS: c_int = 0;

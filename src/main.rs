@@ -1,42 +1,71 @@
+use clap::{Parser, ValueEnum};
 use extension_host::ExtensionHost;
 use php_sys::{Mode, Rapira};
+use rapira_http::HttpServer;
 use std::path::PathBuf;
 
-/// Where extensions are installed. Resolved to an absolute path before anything
-/// daemonizes, since a daemon's cwd is not the deploy directory.
-fn ext_dir() -> anyhow::Result<PathBuf> {
-    let dir = std::env::var_os("RAPIRA_EXT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("extensions"));
+// Profiling shows ~50% of CPU under load in glibc malloc/free + arena contention across the
+// worker/IO threads; the Rust-side per-request churn (marshaling, CStrings, buffers) dominates.
+// mimalloc benchmarked fastest here (66.6k vs jemalloc 61k vs glibc 58.5k) — best fit for the
+// many-small-allocations-across-many-threads profile; it cuts alloc cost and arena contention.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-    Ok(std::path::absolute(&dir)?)
+/// PHP application server driven by native extensions.
+#[derive(Parser)]
+#[command(name = "rapira")]
+struct Cli {
+    /// How PHP runs each request: `classic` (one fresh request per exec) or `worker`
+    /// (a resident script loops on rapira_handle_request).
+    #[arg(long, value_enum, default_value_t = ModeArg::Worker)]
+    mode: ModeArg,
+
+    /// PHP entry script: the front controller (index.php) in classic mode, or the
+    /// resident worker script in worker mode.
+    #[arg(long)]
+    script: PathBuf,
+
+    /// Number of PHP worker threads (ZTS only; NTS always uses 1).
+    #[arg(long, default_value_t = 1)]
+    threads: usize,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ModeArg {
+    Classic,
+    Worker,
 }
 
 fn main() -> anyhow::Result<()> {
-    // Validate every extension before booting PHP; a bad package fails here.
-    let dir = ext_dir()?;
-    let ext = ExtensionHost::load(&dir)?;
-    if ext.is_empty() {
-        eprintln!(
-            "[rapira] no extensions in {}; nothing to run",
-            dir.display()
-        );
+    let cli = Cli::parse();
+    // Resolve to an absolute path before anything daemonizes; a daemon's cwd is not
+    // the deploy directory.
+    let script = std::path::absolute(&cli.script)?;
+
+    // Extensions are compiled in; register the HTTP front (and any others) here. With
+    // none registered there is nothing to serve, so exit before booting PHP.
+    let mut host = ExtensionHost::new();
+    host.register::<HttpServer>()?;
+    if host.is_empty() {
         return Ok(());
     }
 
-    // The exec path is Worker mode: a resident script answers each exec via
-    // rapira_handle_request. Classic mode would open the exec URI path as a script
-    // file, so extensions would never reach their handler.
-    let script = std::env::var_os("RAPIRA_WORKER_SCRIPT")
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            anyhow::anyhow!("RAPIRA_WORKER_SCRIPT must point at the resident worker script")
-        })?;
-    let rapira = Rapira::start(Mode::Worker(std::path::absolute(&script)?), 1)?;
+    // Block SIGINT/SIGTERM before spawning any threads (PHP workers, the extension
+    // runtime), so rapira reaps them on a dedicated waiter and drains extensions on
+    // shutdown — instead of a signal handler that would fight Zend's per-request one.
+    extension_host::arm_shutdown_signals();
 
-    // join() drops the driver handles (and their RapiraHandle clones) before we drop
-    // `rapira`, and surfaces a failed extension as a non-zero exit.
-    let outcomes = ext.run(rapira.handle()?).join();
+    let mode = match cli.mode {
+        ModeArg::Classic => Mode::Classic,
+        ModeArg::Worker => Mode::Worker(script.clone()),
+    };
+    let rapira = Rapira::start(mode, cli.threads)?;
+
+    // Extensions drive PHP through the pool via `php`, running `script`. serve() runs
+    // until they finish or a SIGTERM/SIGINT arrives, drives each extension's shutdown,
+    // and drops the Php/RapiraHandle clones before we drop `rapira` (shutdown
+    // contract). A failed extension is a non-zero exit.
+    let outcomes = host.run(rapira.handle()?, script).serve();
     drop(rapira);
     for outcome in outcomes {
         outcome.map_err(|msg| anyhow::anyhow!("extension failed: {msg}"))?;
