@@ -6,7 +6,9 @@ use crate::{
     types::{Context, Frame, Job, Request},
 };
 
-const FRAME_CAP: usize = 16; // before ub_write
+// `Context::finish` seals the response into exactly one frame, so the channel
+// never holds more than one message.
+const FRAME_CAP: usize = 1;
 
 /// A cheaply-cloneable handle for submitting jobs to a running [`Rapira`] pool.
 ///
@@ -33,6 +35,8 @@ impl Rapira {
 }
 
 impl RapiraHandle {
+    /// Submit `req`; the sealed response arrives as a single [`Frame`] (a
+    /// channel that closes without one means the worker died).
     pub async fn handle(&self, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
         self.intake

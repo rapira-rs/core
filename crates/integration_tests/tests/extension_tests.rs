@@ -136,6 +136,56 @@ fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Drives one request whose handler echoes and THEN throws — body output began
+/// during the handler, so the sealed frame is truncated and `exec` must surface
+/// it as an error rather than deliver a possibly-incomplete body.
+struct TruncatedDriver;
+
+impl Extension for TruncatedDriver {
+    fn init() -> Self {
+        TruncatedDriver
+    }
+
+    fn name(&self) -> &str {
+        "truncated-driver"
+    }
+
+    async fn run(&mut self, php: Php) -> Result<()> {
+        let err = match php.exec(Request::get("/")).await {
+            Ok(resp) => anyhow::bail!(
+                "exec must reject a truncated response, got {} with body {:?}",
+                resp.status,
+                String::from_utf8_lossy(&resp.body)
+            ),
+            Err(e) => e,
+        };
+        anyhow::ensure!(
+            err.to_string().contains("truncated"),
+            "expected the truncated-response error, got: {err:#}"
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let rapira = Rapira::start(Mode::Worker(fixture("output-then-throw-worker.php")), 1)?;
+    let mut host = ExtensionHost::new();
+    host.register::<TruncatedDriver>()?;
+    let outcomes = host
+        .run(rapira.handle()?, fixture("output-then-throw-worker.php"))
+        .join();
+    drop(rapira);
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        outcomes[0].is_ok(),
+        "exec must map a truncated frame to an error: {:?}",
+        outcomes[0]
+    );
+    Ok(())
+}
+
 #[test]
 fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     let _guard = php_lock();

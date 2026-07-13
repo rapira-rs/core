@@ -20,18 +20,20 @@ pub enum Outcome {
     Throw = 3,
 }
 
-pub enum Frame {
-    Head(ResponseHead),
-    Body(Bytes),
-    /// Terminal marker: the worker finished this response intentionally. `truncated`
-    /// means PHP errored *after it had already begun streaming its body* to the
-    /// consumer, so the body may be incomplete. A response whose head/body are
-    /// flushed atomically at teardown (buffered output) or synthesized as a
-    /// head-only error is complete, not truncated. A channel that closes without
-    /// `End` means the worker died (panic / dropped job / pool shutdown).
-    End {
-        truncated: bool,
-    },
+/// The complete response for one job, sealed and delivered as a single message
+/// by [`Context::finish`] — one consumer wakeup per response. A channel that
+/// closes without a frame means the worker died (panic / dropped job / pool
+/// shutdown).
+pub struct Frame {
+    /// `None`: PHP produced no response head (it bailed before any output and
+    /// the teardown flush emitted none).
+    pub head: Option<ResponseHead>,
+    pub body: Bytes,
+    /// PHP errored after body output had begun during the handler, so the
+    /// body may be incomplete. A response whose output is flushed whole at
+    /// teardown (buffered output) or synthesized as a head-only error is
+    /// complete, not truncated.
+    pub truncated: bool,
 }
 
 pub struct Job {
@@ -69,33 +71,35 @@ pub struct ReqC {
     pub uri: CString,
     pub script: CString,
     pub ctype: Option<CString>,
-    pub cookie: CString,
-    pub authorization: CString,
+    /// `None` when the request carried no `Cookie` header — `read_cookies`
+    /// then hands PHP a NULL, the SAPI convention for "no cookies".
+    pub cookie: Option<CString>,
+    /// `None` when absent; `php_handle_auth_data` is NULL-safe (main.c guards).
+    pub authorization: Option<CString>,
     pub env: HashMap<Box<[u8]>, CString>,
 }
 
 impl ReqC {
     pub fn build(r: &Request) -> Self {
-        let mut cookie: Vec<u8> = Vec::new();
+        let mut cookie: Option<Vec<u8>> = None;
         for (_, v) in r
             .headers
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
         {
-            if !cookie.is_empty() {
-                cookie.extend_from_slice(b"; ");
+            let buf = cookie.get_or_insert_default();
+            if !buf.is_empty() {
+                buf.extend_from_slice(b"; ");
             }
-            cookie.extend_from_slice(v);
+            buf.extend_from_slice(v);
         }
 
-        // Build the CString straight from the header bytes — no owned-String detour.
-        let authorization: CString = r
+        // Build the CStrings straight from the header bytes — no owned-String detour.
+        let authorization: Option<CString> = r
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-            .map_or_else(CString::default, |(_, v)| {
-                CString::new(v.as_slice()).unwrap_or_default()
-            });
+            .map(|(_, v)| CString::new(v.as_slice()).unwrap_or_default());
 
         let env: HashMap<Box<[u8]>, CString> = r
             .server_vars
@@ -109,7 +113,7 @@ impl ReqC {
             uri: CString::new(r.uri.as_bytes()).unwrap_or_default(),
             script: CString::new(r.script_filename.to_string_lossy().to_string())
                 .unwrap_or_default(),
-            cookie: CString::new(cookie).unwrap_or_default(),
+            cookie: cookie.map(|c| CString::new(c).unwrap_or_default()),
             authorization,
             ctype: r
                 .content_type
@@ -120,17 +124,17 @@ impl ReqC {
     }
 }
 
-/// How far the response stream has progressed to the consumer. Monotonic
+/// How far the response has progressed. Monotonic
 /// (`NotSent` → `HeadSent` → `BodyStreamed`), which makes the illegal
 /// "body before head" state unrepresentable and is the single source of truth
 /// for the old `headers_sent`/`body_started` checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamState {
-    /// No frame emitted yet.
+    /// Nothing recorded yet.
     NotSent,
-    /// A `Frame::Head` has been emitted; no body yet.
+    /// A head has been recorded; no body yet.
     HeadSent,
-    /// At least one `Frame::Body` has been streamed to the consumer.
+    /// Body output began *during the handler* (not the teardown flush).
     BodyStreamed,
 }
 
@@ -138,11 +142,16 @@ pub struct Context {
     pub req: Request,
     pub c: ReqC,
     pub sender: Option<Sender<Frame>>,
-    /// Head/body progression to the consumer.
+    /// The head recorded by the first `send_headers`/`send_head` (first write
+    /// wins); delivered by [`Self::finish`].
+    pub head: Option<ResponseHead>,
+    /// Body accumulated by `ub_write` until [`Self::finish`] seals the frame.
+    pub body: Vec<u8>,
+    /// Head/body progression.
     pub stream: StreamState,
     /// True once the handler has returned and we are flushing at teardown, so a
     /// buffered body pushed out by the teardown flush does not advance `stream` to
-    /// `BodyStreamed` — only body streamed *during* the handler counts as truncation.
+    /// `BodyStreamed` — only body written *during* the handler counts as truncation.
     pub tearing_down: bool,
 }
 
@@ -153,13 +162,15 @@ impl Context {
             req,
             c,
             sender: Some(sender),
+            head: None,
+            body: Vec::new(),
             stream: StreamState::NotSent,
             tearing_down: false,
         }
     }
 
-    /// The response body is truncated iff the request `errored` *after* it had begun
-    /// streaming its body to the consumer. A buffered or head-only response — whose
+    /// The response body is truncated iff the request `errored` *after* body output
+    /// had begun during the handler. A buffered or head-only response — whose
     /// head/body are flushed atomically at teardown — is complete, not truncated.
     /// Order-independent: [`Self::tearing_down`] keeps `stream` from advancing to
     /// `BodyStreamed` during the teardown flush, so this can be read at any point.
@@ -167,11 +178,16 @@ impl Context {
         errored && self.stream == StreamState::BodyStreamed
     }
 
-    /// Seal the response stream: emit the terminal [`Frame::End`], then drop the
-    /// sender. Pass the truncation flag from [`Self::is_truncated`] (see [`Frame::End`]).
+    /// Seal the response: deliver the accumulated head/body as the single
+    /// [`Frame`], then drop the sender. Pass the truncation flag from
+    /// [`Self::is_truncated`] (see [`Frame`]).
     pub fn finish(&mut self, truncated: bool) {
         if let Some(tx) = self.sender.take() {
-            let _ = tx.blocking_send(Frame::End { truncated });
+            let _ = tx.blocking_send(Frame {
+                head: self.head.take(),
+                body: std::mem::take(&mut self.body).into(),
+                truncated,
+            });
         }
     }
 }

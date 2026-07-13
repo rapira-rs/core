@@ -20,8 +20,6 @@ use crate::{classic_worker::classic_worker, types::Mode, *};
 
 pub(crate) type JobRx = Arc<Mutex<Receiver<Job>>>;
 
-const INTAKE_CAP: usize = 1024;
-
 struct PhpThread;
 
 impl PhpThread {
@@ -89,7 +87,7 @@ impl Rapira {
             return Err(anyhow::anyhow!("php_module_startup failed"));
         }
 
-        let (intake, intake_rx) = mpsc::channel::<Job>(INTAKE_CAP);
+        let (intake, intake_rx) = mpsc::channel::<Job>(1024);
         let rx: JobRx = Arc::new(Mutex::new(intake_rx));
 
         let workers: Vec<JoinHandle<()>> = (0..num_threads)

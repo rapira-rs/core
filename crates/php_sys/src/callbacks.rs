@@ -1,7 +1,6 @@
 use crate::context::{ctx, with_ctx};
-use crate::types::{Context, Frame, ResponseHead, StreamState};
+use crate::types::{Context, ResponseHead, StreamState};
 use crate::*;
-use bytes::Bytes;
 use core::slice;
 use std::borrow::Cow;
 use std::ffi::{CStr, CString};
@@ -91,23 +90,27 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
         };
 
         if ctx.stream == StreamState::NotSent {
-            send_head(ctx);
+            let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
+            ctx.head = Some(ResponseHead {
+                status,
+                headers: vec![],
+            });
+            ctx.stream = StreamState::HeadSent;
         }
 
         if let Some(tx) = &ctx.sender {
-            let buf = unsafe { slice::from_raw_parts(buf as *const u8, len) };
-            if tx
-                .blocking_send(Frame::Body(Bytes::copy_from_slice(buf)))
-                .is_err()
-            {
+            if tx.is_closed() {
+                // receiver dropped = client disconnect; the sealed frame is
+                // undeliverable, so stop buffering. Core ignores ub_write's return —
+                // report it so the C shim raises the abort after this frame unwinds.
                 ctx.finish(false);
-                // receiver dropped = client disconnect; core ignores ub_write's return.
-                // Report it so the C shim raises the abort after this frame unwinds.
                 unsafe { *aborted = true };
                 return 0;
             }
-            // A body frame reached the consumer *during the handler* (the teardown
-            // flush sets `tearing_down` first): a later error now truncates the body.
+            let buf = unsafe { slice::from_raw_parts(buf as *const u8, len) };
+            ctx.body.extend_from_slice(buf);
+            // Body output began *during the handler* (the teardown flush sets
+            // `tearing_down` first): a later error now truncates the body.
             if !ctx.tearing_down {
                 ctx.stream = StreamState::BodyStreamed;
             }
@@ -150,12 +153,10 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
             .lines()
             .filter_map(|l: SapiHeader| l.name_value())
             .collect();
-        if let Some(tx) = &ctx.sender {
-            let _ = tx.blocking_send(Frame::Head(ResponseHead {
-                status: h.status(),
-                headers,
-            }));
-        };
+        ctx.head = Some(ResponseHead {
+            status: h.status(),
+            headers,
+        });
         ctx.stream = StreamState::HeadSent;
         SAPI_HEADER_SENT_SUCCESSFULLY as c_int
     })
@@ -188,7 +189,11 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
 }
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
     with_ctx(null_mut(), |ctx| {
-        ctx.c.cookie.as_ptr() as *mut c_char // we own the buffer
+        // we own the buffer; NULL = no Cookie header (the SAPI convention)
+        ctx.c
+            .cookie
+            .as_ref()
+            .map_or(null_mut(), |c| c.as_ptr() as *mut c_char)
     })
 }
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
@@ -334,30 +339,13 @@ pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type:
         log::log!(target: "php", syslog_to_level(syslog_type), "{s}");
     })
 }
-fn send_head(c: &mut Context) {
-    if c.stream != StreamState::NotSent {
-        return;
-    }
-    let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
-
-    if let Some(tx) = &c.sender {
-        let _ = tx.blocking_send(Frame::Head(ResponseHead {
-            status,
-            headers: vec![],
-        }));
-        c.stream = StreamState::HeadSent;
-    }
-}
 pub(crate) fn send_error_head(c: &mut Context, status: u16) {
     if c.stream != StreamState::NotSent {
         return;
     }
-
-    if let Some(tx) = &c.sender {
-        let _ = tx.blocking_send(Frame::Head(ResponseHead {
-            status,
-            headers: vec![],
-        }));
-        c.stream = StreamState::HeadSent;
-    }
+    c.head = Some(ResponseHead {
+        status,
+        headers: vec![],
+    });
+    c.stream = StreamState::HeadSent;
 }

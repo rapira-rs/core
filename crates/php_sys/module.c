@@ -5,9 +5,9 @@ extern bool rapira_rs_handle_request(
     zend_fcall_info_cache *fcc); // Rust: main handler: rapira_worker.rs
 extern void rapira_rs_finish_response(void); // Rust: just ctx.finish()
 
-// ub_write's client-abort raise (php_handle_aborted_connection) longjmps, so run
-// it here in C: the Rust half reports the disconnect via *aborted, and this raises
-// the abort AFTER the Rust catch_unwind frame has returned.
+// ub_write's client-abort raise (php_handle_aborted_connection) longjmps, so
+// run it here in C: the Rust half reports the disconnect via *aborted, and this
+// raises the abort AFTER the Rust catch_unwind frame has returned.
 extern size_t rapira_rs_ub_write(const char *str, size_t len, bool *aborted);
 size_t rapira_ub_write(const char *str, size_t len) {
     bool aborted = false;
@@ -155,10 +155,20 @@ void rapira_request_init(void) {
     CG(unclean_shutdown) = 0;
 
 #if defined(ZEND_MAX_EXECUTION_TIMERS) || !defined(ZTS)
-    /* The request body is read (in Rust) as the handler runs, so the handler is the
-       execution phase: bound it by max_execution_time (EG(timeout_seconds)), not
-       max_input_time. Teardown unsets it. */
-    zend_set_timeout(EG(timeout_seconds), 1);
+    //  The request body is read (in Rust) as the handler runs, so the handler
+    //  is the
+    //    execution phase: bound it by max_execution_time (EG(timeout_seconds)),
+    //    not max_input_time. The value is whatever the configuration says
+    //    (PHP's default or the user's php.ini) — rapira imposes nothing of its
+    //    own. Teardown unsets it, so time spent blocked on the job queue is
+    //    never counted. reset_signals=0: with reset_signals, zend_set_timeout
+    //    reinstalls the SIGRTMIN handler + unblocks it on every call (an
+    //    rt_sigaction + rt_sigprocmask syscall per job). Both are already in
+    //    place for this thread: php_request_startup runs zend_set_timeout(...,
+    //    1) at cycle boot, the disposition is process-wide, and nothing
+    //    re-blocks SIGRTMIN between jobs (rapira only blocks INT/TERM). Same
+    //    pattern as the per-request re-arm in php_execute_script (main.c:2630).
+    zend_set_timeout(EG(timeout_seconds), 0);
 #else
     zend_unset_timeout();
 #endif
@@ -192,20 +202,22 @@ void rapira_activate_auto_globals(void) {
 
     // Re-arm every superglobal so a later access rebuilds it.
     ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
-        auto_global->armed = auto_global->jit || auto_global->auto_global_callback;
+        auto_global->armed =
+            auto_global->jit || auto_global->auto_global_callback;
     }
     ZEND_HASH_FOREACH_END();
 
-    // Eagerly rebuild every callback-backed superglobal now (a create callback that
-    // returns false clears armed). $_ENV is skipped: the environment is constant and
-    // reset_super_globals() keeps $_ENV in the symbol table, so its first-use array
-    // stays correct without a per-request rebuild.
+    // Eagerly rebuild every callback-backed superglobal now (a create callback
+    // that returns false clears armed). $_ENV is skipped: the environment is
+    // constant and reset_super_globals() keeps $_ENV in the symbol table, so
+    // its first-use array stays correct without a per-request rebuild.
     ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
         if (auto_global->name == _env) {
             continue;
         }
         if (auto_global->auto_global_callback) {
-            auto_global->armed = auto_global->auto_global_callback(auto_global->name);
+            auto_global->armed =
+                auto_global->auto_global_callback(auto_global->name);
         }
     }
     ZEND_HASH_FOREACH_END();
@@ -265,8 +277,8 @@ static void rapira_reset_super_global(void) {
     ZVAL_UNDEF(files);
     zend_hash_str_del(&EG(symbol_table), "_SESSION", sizeof("_SESSION") - 1);
 }
-// Runs per-request PHP work under a zend_bailout guard. exit()/die() in PHP 8.4+
-// are not bailouts - they land in EG(exception) as an unwind-exit
+// Runs per-request PHP work under a zend_bailout guard. exit()/die() in
+// PHP 8.4+ are not bailouts - they land in EG(exception) as an unwind-exit
 // (Zend/zend_exceptions.c), which the exception block below classifies.
 int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     int outcome = OK;
@@ -412,9 +424,9 @@ int rapira_request_teardown(void) {
     return bailed;
 }
 
-// Free the captured last error so it doesn't pin request objects across jobs and
-// doesn't trip core_globals_dtor's ZEND_ASSERT(!last_error_message) at shutdown
-// (main/main.c:2099).
+// Free the captured last error so it doesn't pin request objects across jobs
+// and doesn't trip core_globals_dtor's ZEND_ASSERT(!last_error_message) at
+// shutdown (main/main.c:2099).
 void rapira_clear_last_error(void) {
     if (PG(last_error_message)) {
         PG(last_error_type) = 0;

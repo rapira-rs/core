@@ -10,10 +10,11 @@ $handler = static function (): void {
 		echo "done=", Track::$done, " aborted=", connection_aborted();
 		return;
 	}
-	for ($i = 0; $i < 64; $i++) {
-		echo str_repeat('x', 32), "\n";
-	}
-	Track::$done++; // must not run when the client disconnected mid-stream
+	// The test drops the response receiver right after submitting; the sleep
+	// guarantees the drop has landed before the first write observes it.
+	usleep(300000);
+	echo "payload\n"; // aborted write: the SAPI raises php_handle_aborted_connection
+	Track::$done++; // must not run when the client disconnected
 };
 while (\rapira_handle_request($handler)) {
 	gc_collect_cycles();

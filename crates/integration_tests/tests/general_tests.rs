@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use integration_tests::{drain, fixture, php_lock, req};
-use php_sys::{Frame, Mode, Rapira, Request};
+use php_sys::{Mode, Rapira, Request};
 
 /// Body source returning at most one byte per read() call — legal `Read`
 /// behavior that streaming bodies (pipes, chunked decoders) exhibit.
@@ -62,11 +62,9 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("abort-worker.php")), 1)?;
     let h = r.handle()?;
 
-    // 64 chunks through the 16-slot frame channel: the worker blocks in
-    // blocking_send, then fails it when the receiver goes away
-    let mut rx = h.handle_blocking(req("/", "abort-worker.php"))?;
-    let _head = rx.blocking_recv(); // response is live
-    drop(rx); // client disconnects
+    // Drop the receiver before the fixture's first write (it sleeps to hand us
+    // the window): the write then observes the closed channel and aborts.
+    drop(h.handle_blocking(req("/", "abort-worker.php"))?); // client disconnects
 
     let (s2, b2) = drain(h.handle_blocking(req("/?probe=1", "abort-worker.php"))?);
     drop(h);
@@ -174,9 +172,9 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     Ok(())
 }
 
-// exactly one Head frame per response. With display_errors=0 an uncaught
-// throw produces no output before the error path, so the rust-side 500 head
-// and the teardown header flush must not both emit one.
+// exactly one head per response. With display_errors=0 an uncaught throw
+// produces no output before the error path, so the rust-side 500 head and the
+// teardown header flush must not fight over it (first write wins).
 #[test]
 fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -184,20 +182,18 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let h = r.handle()?;
 
     let mut rx = h.handle_blocking(req("/", "throw-quiet-worker.php"))?;
-    let (mut heads, mut status) = (0u32, 0u16);
-    while let Some(frame) = rx.blocking_recv() {
-        if let Frame::Head(head) = frame {
-            heads += 1;
-            status = head.status;
-        }
-    }
+    let frame = rx.blocking_recv().expect("worker must seal a response");
+    assert!(
+        rx.blocking_recv().is_none(),
+        "exactly one frame per response"
+    );
     drop(h);
     r.shutdown();
 
-    assert_eq!(status, 500, "uncaught throw with display_errors=0 is a 500");
+    let head = frame.head.expect("error response must record a head");
     assert_eq!(
-        heads, 1,
-        "exactly one head frame per response (got {heads})"
+        head.status, 500,
+        "uncaught throw with display_errors=0 is a 500"
     );
     Ok(())
 }
@@ -335,9 +331,9 @@ fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("abort-ignore-worker.php")), 1)?;
     let h = r.handle()?;
-    let mut rx = h.handle_blocking(req("/", "abort-ignore-worker.php"))?;
-    let _head = rx.blocking_recv(); // response is live
-    drop(rx); // client disconnects
+    // Drop the receiver before the fixture's write (it sleeps to hand us the
+    // window): the write observes the closed channel and raises the abort.
+    drop(h.handle_blocking(req("/", "abort-ignore-worker.php"))?); // client disconnects
     let (s2, b2) = drain(h.handle_blocking(req("/?probe=1", "abort-ignore-worker.php"))?);
     drop(h);
     r.shutdown();

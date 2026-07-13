@@ -55,6 +55,13 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
 
     // auth → $_SERVER[PHP_AUTH_USER|PHP_AUTH_PW|PHP_AUTH_DIGEST].
     // php-src parses the header and estrndup's the values into SG(request_info),
-    // so sapi_deactivate_module -> efree auth
-    unsafe { php_handle_auth_data(ctx.c.authorization.as_ptr()) };
+    // so sapi_deactivate_module -> efree auth. NULL-safe (main.c guards `auth`).
+    unsafe {
+        php_handle_auth_data(
+            ctx.c
+                .authorization
+                .as_ref()
+                .map_or(null(), |auth| auth.as_ptr()),
+        )
+    };
 }

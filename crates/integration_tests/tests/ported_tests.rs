@@ -12,7 +12,7 @@ fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u
     r
 }
 
-/// Like `drain`, but keeps the head frame(s): (head count, status, headers, body).
+/// Like `drain`, but keeps the head: (head presence, status, headers, body).
 struct Resp {
     heads: u32,
     status: u16,
@@ -21,23 +21,20 @@ struct Resp {
 }
 
 fn recv_all(mut rx: tokio::sync::mpsc::Receiver<Frame>) -> Resp {
-    let (mut heads, mut status, mut headers, mut body) = (0u32, 0u16, Vec::new(), Vec::new());
-    while let Some(frame) = rx.blocking_recv() {
-        match frame {
-            Frame::Head(h) => {
-                heads += 1;
-                status = h.status;
-                headers = h.headers;
-            }
-            Frame::Body(b) => body.extend_from_slice(&b),
-            Frame::End { .. } => {}
+    let (mut heads, mut status, mut headers, mut body) = (0u32, 0u16, Vec::new(), String::new());
+    if let Some(frame) = rx.blocking_recv() {
+        if let Some(h) = frame.head {
+            heads = 1;
+            status = h.status;
+            headers = h.headers;
         }
+        body = String::from_utf8_lossy(&frame.body).into_owned();
     }
     Resp {
         heads,
         status,
         headers,
-        body: String::from_utf8_lossy(&body).into_owned(),
+        body,
     }
 }
 
@@ -484,36 +481,31 @@ fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Unbuffered output arrives as one body frame per write, in order, after the head.
+// Unbuffered output written across several ub_writes (with an explicit flush()
+// between them) arrives whole and in order in the single sealed frame.
 #[test]
-fn flush_chunk_boundaries_worker() -> anyhow::Result<()> {
+fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("flush-worker.php")), 1)?;
     let h = r.handle()?;
     for i in [42, 43] {
         let mut rx =
             h.handle_blocking(req(&format!("/flush-worker.php?i={i}"), "flush-worker.php"))?;
-        let mut frames = Vec::new();
-        while let Some(frame) = rx.blocking_recv() {
-            frames.push(frame);
-        }
-        assert_eq!(frames.len(), 4, "expected head + two body chunks + end");
-        match &frames[0] {
-            Frame::Head(head) => assert_eq!(head.status, 200),
-            _ => panic!("first frame must be the head"),
-        }
-        match &frames[1] {
-            Frame::Body(b) => assert_eq!(&b[..], b"He"),
-            _ => panic!("second frame must be the first chunk"),
-        }
-        match &frames[2] {
-            Frame::Body(b) => assert_eq!(&b[..], format!("llo {i}").as_bytes()),
-            _ => panic!("third frame must be the second chunk"),
-        }
+        let frame = rx
+            .blocking_recv()
+            .expect("worker must seal exactly one frame");
         assert!(
-            matches!(frames[3], Frame::End { truncated: false }),
-            "stream must end with a clean End marker"
+            rx.blocking_recv().is_none(),
+            "exactly one frame per response"
         );
+        let head = frame.head.expect("head must be recorded");
+        assert_eq!(head.status, 200);
+        assert_eq!(
+            &frame.body[..],
+            format!("Hello {i}").as_bytes(),
+            "flushed chunks arrive whole and in order"
+        );
+        assert!(!frame.truncated, "clean completion is not truncated");
     }
     drop(h);
     r.shutdown();

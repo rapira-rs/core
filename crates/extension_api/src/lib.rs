@@ -14,9 +14,6 @@ use tokio::sync::mpsc::Receiver;
 /// Fallible SDK paths report `anyhow::Error`; the host renders it to a log line.
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
-/// Re-exported so streaming extensions can match on frames from [`Php::stream`].
-pub use php_sys::Frame;
-
 /// A native rapira extension: a long-lived service that drives PHP via [`Php`].
 ///
 /// Lifecycle: `init` (construct) → `run` (serve) → `shutdown` (drain). `run` and
@@ -58,11 +55,11 @@ pub struct Php {
 /// The configured PHP entry script plus the CGI vars derived from it, computed once
 /// at construction instead of per request.
 struct ScriptMeta {
-    /// → SCRIPT_FILENAME
+    /// SCRIPT_FILENAME
     filename: PathBuf,
-    /// → DOCUMENT_ROOT (the script's parent directory)
+    /// DOCUMENT_ROOT (the script's parent directory)
     document_root: String,
-    /// → SCRIPT_NAME, e.g. "/index.php"
+    /// SCRIPT_NAME, e.g. "/index.php"
     script_name: String,
 }
 
@@ -99,43 +96,31 @@ impl Php {
         &self.script.filename
     }
 
-    /// Submit `req` and stream PHP response frames as produced — for proxying to a
-    /// client without buffering the body. A well-formed stream ends with
-    /// [`Frame::End`]; a channel that closes without one means the worker died
-    /// mid-response.
-    pub async fn stream(&self, req: Request) -> Result<Receiver<Frame>> {
-        self.rapira.handle(to_request(&self.script, req)).await
-    }
-
-    /// Submit `req` and collect the whole response (buffers the body). Errors when
-    /// PHP produced no response head, when the worker died mid-response (the stream
-    /// ends without its [`Frame::End`] marker), or when PHP errored after it began
-    /// streaming its body (so the buffered body may be incomplete).
+    /// Submit `req` and collect the whole response — the worker seals it into a
+    /// single frame, so the caller wakes once per response. Errors when PHP
+    /// produced no response head, when the worker died mid-response (the channel
+    /// closed without a frame), or when PHP errored after it began writing its
+    /// body (so the body may be incomplete).
     pub async fn exec(&self, req: Request) -> Result<Response> {
-        let mut rx: Receiver<Frame> = self.stream(req).await?;
-        let mut resp: Response = Response::default();
-        let mut head_seen = false;
-        let mut end: Option<bool> = None;
-        while let Some(frame) = rx.recv().await {
-            match frame {
-                // Header-value bytes pass through unchanged: PHP may emit latin1/binary.
-                Frame::Head(head) => {
-                    head_seen = true;
-                    resp.status = head.status;
-                    resp.headers = head.headers;
-                }
-                Frame::Body(bytes) => resp.body.extend_from_slice(&bytes),
-                Frame::End { truncated } => end = Some(truncated),
-            }
+        let mut rx: Receiver<php_sys::Frame> =
+            self.rapira.handle(to_request(&self.script, req)).await?;
+        let Some(frame) = rx.recv().await else {
+            return Err(anyhow::anyhow!(
+                "php worker died mid-response (channel closed without a response)"
+            ));
+        };
+        if frame.truncated {
+            return Err(anyhow::anyhow!("php crashed mid-response; body truncated"));
         }
-        match end {
-            Some(false) if head_seen => Ok(resp),
-            Some(false) => Err(anyhow::anyhow!("php produced no response head")),
-            Some(true) => Err(anyhow::anyhow!("php crashed mid-response; body truncated")),
-            None => Err(anyhow::anyhow!(
-                "php worker died mid-response (stream ended without its end marker)"
-            )),
-        }
+        let Some(head) = frame.head else {
+            return Err(anyhow::anyhow!("php produced no response head"));
+        };
+        // Header/body bytes pass through unchanged: PHP may emit latin1/binary.
+        Ok(Response {
+            status: head.status,
+            headers: head.headers,
+            body: frame.body.into(),
+        })
     }
 }
 

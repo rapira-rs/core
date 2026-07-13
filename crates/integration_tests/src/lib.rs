@@ -62,17 +62,16 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
     }
 }
 
-/// Drain a response stream to `(status, body)`. Status is 0 if no head frame arrived.
+/// Drain a response to `(status, body)`. Status is 0 if no head was produced
+/// (or the worker died before sealing a frame).
 pub fn drain(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
-    let (mut status, mut body) = (0u16, Vec::new());
-    while let Some(frame) = rx.blocking_recv() {
-        match frame {
-            Frame::Head(h) => status = h.status,
-            Frame::Body(b) => body.extend_from_slice(&b),
-            Frame::End { .. } => {}
-        }
+    match rx.blocking_recv() {
+        Some(f) => (
+            f.head.map_or(0, |h| h.status),
+            String::from_utf8_lossy(&f.body).into_owned(),
+        ),
+        None => (0, String::new()),
     }
-    (status, String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Async sibling of `php_lock` for `#[tokio::test]`.
@@ -81,17 +80,15 @@ pub async fn php_lock_async() -> tokio::sync::MutexGuard<'static, ()> {
     PHP_LOCK_ASYNC.lock().await
 }
 
-/// Async sibling of `drain`: drain a response stream to `(status, body)` inside a runtime.
+/// Async sibling of `drain`: drain a response to `(status, body)` inside a runtime.
 pub async fn drain_async(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
-    let (mut status, mut body) = (0u16, Vec::new());
-    while let Some(frame) = rx.recv().await {
-        match frame {
-            Frame::Head(h) => status = h.status,
-            Frame::Body(b) => body.extend_from_slice(&b),
-            Frame::End { .. } => {}
-        }
+    match rx.recv().await {
+        Some(f) => (
+            f.head.map_or(0, |h| h.status),
+            String::from_utf8_lossy(&f.body).into_owned(),
+        ),
+        None => (0, String::new()),
     }
-    (status, String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Point the embedded PHP at the test php.ini so request-level compile/fatal errors
