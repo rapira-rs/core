@@ -66,7 +66,6 @@ impl ExtensionHost {
         let php = Php::new(rapira, script);
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
             .enable_time() // the shutdown timeout in `drive`; extensions own their own IO
             .thread_name("rapira-ext")
             .build()
