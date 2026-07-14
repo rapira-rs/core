@@ -7,10 +7,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         php: ["8.4", "8.5"]
     steps:
       - uses: actions/checkout@v4
@@ -22,19 +23,52 @@ jobs:
         env:
           phpts: ts # thread-safe (ZTS)
 
-      - name: Build deps for bindgen/cc
+      - name: Build deps for bindgen/cc (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
 
-      - name: Expose the ZTS embed lib
+      - name: Expose the ZTS embed lib (Linux)
+        if: runner.os == 'Linux'
         run: |
           LIBPHP=$(find "$(php-config --prefix)" /usr/lib -name 'libphp*.so' 2>/dev/null | head -1)
           test -n "$LIBPHP" || { echo "no ZTS libphp.so from setup-php"; exit 1; }
           echo "LD_LIBRARY_PATH=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
           echo "RUSTFLAGS=-L native=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
 
+      - name: Expose the ZTS embed lib (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          LIBPHP=$(find "$(php-config --prefix)" -name 'libphp*.dylib' 2>/dev/null | head -1)
+          test -n "$LIBPHP" || { echo "no ZTS libphp.dylib from setup-php"; exit 1; }
+          echo "DYLD_LIBRARY_PATH=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-L native=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
+
+      - name: Fetch the PHP devel pack (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          php -v
+          $releases = Invoke-RestMethod -Uri 'https://downloads.php.net/~windows/releases/releases.json'
+          $branch = $releases.'${{ matrix.php }}'
+          $variant = $branch.PSObject.Properties.Name | Where-Object { $_ -like 'ts-*-x64' } | Select-Object -First 1
+          if (-not $variant) { throw "no ts x64 build found for PHP ${{ matrix.php }}" }
+          $develZip = $branch.$variant.devel_pack.path
+          $url = "https://downloads.php.net/~windows/releases/$develZip"
+          Write-Host "downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\php-devel.zip"
+          Expand-Archive "$env:RUNNER_TEMP\php-devel.zip" -DestinationPath "$env:RUNNER_TEMP\php-devel"
+          $devel = (Get-ChildItem "$env:RUNNER_TEMP\php-devel" -Directory | Select-Object -First 1).FullName
+          Write-Host "devel pack at $devel"
+          "PHP_DEVEL_DIR=$devel" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RUSTFLAGS=-L native=$devel\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
+        with:
+          # macOS/Windows legs fail in cargo until the port lands; still save the deps cache.
+          cache-on-failure: true
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
       - run: cargo test --workspace

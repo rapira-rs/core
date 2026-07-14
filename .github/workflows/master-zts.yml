@@ -9,7 +9,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     env:
       PHP_PREFIX: ${{ github.workspace }}/.php-zts-debug
     defaults:
@@ -21,26 +25,45 @@ jobs:
           path: core
           persist-credentials: false
 
-      - name: Install build deps (php-src from git + bindgen/cc)
+      # php-src's Windows install rules pass the prefix unquoted to copy/xcopy,
+      # which treat '/' as a switch — the prefix must be pure backslashes.
+      - name: Use native path separators in PHP_PREFIX (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "PHP_PREFIX=$($env:PHP_PREFIX.Replace('/', '\'))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install build deps (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config curl git autoconf bison re2c \
             libclang-dev llvm-dev
 
+      - name: Install build deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install autoconf bison re2c
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+
       - name: Resolve php-src master commit
         id: phpsrc
+        shell: bash
         run: echo "sha=$(git ls-remote https://github.com/php/php-src.git master | cut -f1)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache ZTS+debug PHP (embed SAPI)
+      # restore/save are split so the 15-25 min PHP build is persisted even when the
+      # later cargo steps fail (expected on macOS/Windows until the port lands) —
+      # actions/cache@v4's post-save only runs on job success.
+      - name: Restore ZTS+debug PHP (embed SAPI)
         id: php
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.PHP_PREFIX }}
           key: php-zts-debug-${{ runner.os }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v6
 
-      - name: Build ZTS+debug PHP (embed SAPI) from php-src master
-        if: steps.php.outputs.cache-hit != 'true'
+      - name: Build ZTS+debug PHP (embed SAPI) from php-src master (Unix)
+        if: runner.os != 'Windows' && steps.php.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch master https://github.com/php/php-src.git
           cd php-src
@@ -53,13 +76,59 @@ jobs:
             --enable-debug \
             --enable-embed=shared \
             --disable-all --disable-cgi --enable-session --enable-filter --without-pear
-          make -j"$(nproc)"
+          make -j"$(getconf _NPROCESSORS_ONLN)"
           make install
 
-      - name: Expose PHP to build + tests
+      - name: Build ZTS+debug PHP (embed SAPI) from php-src master (Windows)
+        if: runner.os == 'Windows' && steps.php.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch master https://github.com/php/php-src.git
+          git clone --depth 1 --branch php-sdk-2.7.1 https://github.com/php/php-sdk-binary-tools.git "$env:RUNNER_TEMP\php-sdk"
+          $task = @'
+          call buildconf.bat || exit /b 1
+          call configure.bat --with-prefix=%PHP_PREFIX% --enable-zts --enable-debug --enable-zend-test --enable-embed --enable-cli --disable-all --disable-cgi --enable-session --enable-filter || exit /b 1
+          nmake || exit /b 1
+          nmake install || exit /b 1
+          '@
+          Set-Content -Path php-src\rapira-build-task.bat -Value $task -Encoding ascii
+          Set-Location php-src
+          cmd /c "$env:RUNNER_TEMP\php-sdk\phpsdk-vs18-x64.bat -t rapira-build-task.bat"
+          if ($LASTEXITCODE -ne 0) { throw "php-src master build failed" }
+          # Make sure import libs + headers land inside the cached prefix, whatever
+          # `nmake install` chose to install (layouts differ between php versions).
+          New-Item -ItemType Directory -Force "$env:PHP_PREFIX\lib" | Out-Null
+          Get-ChildItem -Recurse -Filter 'php8*.lib' x64 | Copy-Item -Destination "$env:PHP_PREFIX\lib" -Force
+          foreach ($d in 'main', 'Zend', 'TSRM', 'ext', 'win32') {
+            robocopy $d "$env:PHP_PREFIX\include\$d" *.h /s | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw "header copy failed for $d" }
+          }
+          cmd /c exit 0
+
+      - name: Save ZTS+debug PHP cache
+        if: steps.php.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.PHP_PREFIX }}
+          key: php-zts-debug-${{ runner.os }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v6
+
+      - name: Expose PHP to build + tests (Unix)
+        if: runner.os != 'Windows'
         run: |
           echo "${PHP_PREFIX}/bin" >> "$GITHUB_PATH"
-          echo "LD_LIBRARY_PATH=${PHP_PREFIX}/lib" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "DYLD_LIBRARY_PATH=${PHP_PREFIX}/lib" >> "$GITHUB_ENV"
+          else
+            echo "LD_LIBRARY_PATH=${PHP_PREFIX}/lib" >> "$GITHUB_ENV"
+          fi
+
+      - name: Expose PHP to build + tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "$env:PHP_PREFIX" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "RUSTFLAGS=-L native=$env:PHP_PREFIX\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -67,6 +136,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+          # macOS/Windows legs fail in cargo until the port lands; still save the deps cache.
+          cache-on-failure: true
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
