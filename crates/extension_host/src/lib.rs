@@ -14,9 +14,6 @@ use tokio::runtime::Runtime;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-/// How long a graceful `shutdown` may take before the task is dropped.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
-
 type Outcome = std::result::Result<(), String>;
 type BoxFuture = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 type Launcher = Box<dyn FnOnce(Php, watch::Receiver<bool>, Duration) -> BoxFuture + Send>;
@@ -58,7 +55,7 @@ impl ExtensionHost {
     /// Spawn every extension on a shared runtime; one `Php` (the single `--script`) is
     /// cloned to each. The returned guard drives them to completion / shutdown.
     pub fn run(self, rapira: RapiraHandle, script: PathBuf) -> Running {
-        self.run_with_grace(rapira, script, SHUTDOWN_GRACE)
+        self.run_with_grace(rapira, script, Duration::from_secs(30))
     }
 
     /// As [`run`](Self::run), with a custom per-extension graceful-shutdown budget.
