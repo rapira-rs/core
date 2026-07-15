@@ -557,8 +557,6 @@ name = "extension_api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "php_sys",
- "tokio",
 ]
 
 [[package]]

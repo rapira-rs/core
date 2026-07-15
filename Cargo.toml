@@ -13,7 +13,7 @@ anyhow = "1"
 log = { version = "0.4", features = ["std"] }
 php_sys = { path = "crates/php_sys" }
 extension_host = { path = "crates/extension_host" }
-extension_api = { path = "crates/extension_api" }
+extension_api = { path = "../extensions_api" }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 

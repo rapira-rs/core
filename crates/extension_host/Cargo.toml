@@ -14,6 +14,4 @@ php_sys = { workspace = true }
 extension_api = { workspace = true }
 # A shared multi-thread runtime drives all extension tasks.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
-# `sigwait`-based shutdown: block SIGINT/SIGTERM and reap them without a signal handler,
-# so rapira coexists with Zend's per-request signal management.
 libc = "0.2"

@@ -5,6 +5,7 @@
 use extension_api::{Extension, Php};
 use php_sys::RapiraHandle;
 use std::future::Future;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -60,7 +61,7 @@ impl ExtensionHost {
 
     /// As [`run`](Self::run), with a custom per-extension graceful-shutdown budget.
     pub fn run_with_grace(self, rapira: RapiraHandle, script: PathBuf, grace: Duration) -> Running {
-        let php = Php::new(rapira, script);
+        let php = Php::new(Arc::new(RapiraBackend::new(rapira, script.clone())), script);
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_time() // the shutdown timeout in `drive`; extensions own their own IO
@@ -85,6 +86,99 @@ impl ExtensionHost {
         }
 
         Running { rt, tasks, stop_tx }
+    }
+}
+
+/// The production [`extension_api::Backend`]: bridges `Php::exec` onto the PHP worker
+/// pool. Owns the entry script's CGI vars, computed once at construction instead of
+/// per request.
+struct RapiraBackend {
+    rapira: RapiraHandle,
+    /// SCRIPT_FILENAME
+    filename: PathBuf,
+    /// DOCUMENT_ROOT (the script's parent directory)
+    document_root: String,
+    /// SCRIPT_NAME, e.g. "/index.php"
+    script_name: String,
+}
+
+impl RapiraBackend {
+    fn new(rapira: RapiraHandle, filename: PathBuf) -> Self {
+        let document_root = filename
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let script_name = filename
+            .file_name()
+            .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
+        Self {
+            rapira,
+            filename,
+            document_root,
+            script_name,
+        }
+    }
+
+    /// The one place the `extension_api::Request → php_sys::Request` mapping lives.
+    fn to_request(&self, req: extension_api::Request) -> php_sys::Request {
+        let query = req.uri.split_once('?').map_or("", |(_, q)| q).to_string();
+        let content_type = req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| String::from_utf8_lossy(v).into_owned());
+
+        php_sys::Request {
+            method: req.method,
+            https: req.https,
+            query,
+            protocol: req.protocol,
+            remote_addr: req.remote_addr,
+            server_name: req.server_name,
+            server_port: req.server_port.to_string(),
+            remote_port: req.remote_port.to_string(),
+            script_name: self.script_name.clone(),
+            document_root: self.document_root.clone(),
+            script_filename: self.filename.clone(),
+            content_type,
+            content_length: req.body.len() as i64,
+            body: Box::new(Cursor::new(req.body)),
+            headers: req.headers,
+            server_vars: Vec::new(),
+            uri: req.uri,
+        }
+    }
+}
+
+impl extension_api::Backend for RapiraBackend {
+    /// Submit `req` and collect the whole response — the worker seals it into a
+    /// single frame, so the caller wakes once per response (the error contract lives
+    /// on `Php::exec`).
+    fn exec(
+        &self,
+        req: extension_api::Request,
+    ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::Response>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let mut rx = self.rapira.handle(self.to_request(req)).await?;
+            let Some(frame) = rx.recv().await else {
+                return Err(anyhow::anyhow!(
+                    "php worker died mid-response (channel closed without a response)"
+                ));
+            };
+            if frame.truncated {
+                return Err(anyhow::anyhow!("php crashed mid-response; body truncated"));
+            }
+            let Some(head) = frame.head else {
+                return Err(anyhow::anyhow!("php produced no response head"));
+            };
+            // Header/body bytes pass through unchanged: PHP may emit latin1/binary.
+            Ok(extension_api::Response {
+                status: head.status,
+                headers: head.headers,
+                body: frame.body.into(),
+            })
+        })
     }
 }
 
