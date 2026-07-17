@@ -10,6 +10,22 @@ use std::time::{Duration, Instant};
 /// Distinct ids so the same type can be registered many times (dup-name check).
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// A bodyless `GET` for `uri` with the defaults every driver here needs.
+fn get_request(uri: &str) -> Request {
+    Request {
+        method: "GET".into(),
+        uri: uri.into(),
+        https: false,
+        protocol: "HTTP/1.1".into(),
+        remote_addr: "127.0.0.1".into(),
+        remote_port: 0,
+        server_name: "localhost".into(),
+        server_port: 80,
+        headers: Vec::new(),
+        body: Vec::new(),
+    }
+}
+
 /// Drives two requests concurrently; distinct bodies prove both ran.
 struct Driver {
     id: String,
@@ -30,8 +46,8 @@ impl Extension for Driver {
         // `join!` starts both exec subtasks before awaiting either, so both are in flight
         // through the PHP pool concurrently (both must complete; not a strict parallelism proof).
         let (a, b) = tokio::join!(
-            php.exec(Request::get("/?from=a")),
-            php.exec(Request::get("/?from=b")),
+            php.exec(get_request("/?from=a")),
+            php.exec(get_request("/?from=b")),
         );
         check(&a?, "ok:a")?;
         check(&b?, "ok:b")?;
@@ -105,7 +121,7 @@ impl Extension for ErrorPathDriver {
 
     async fn run(&mut self, php: Php) -> Result<()> {
         // Before the fix this returned Err("php crashed mid-response; body truncated").
-        let resp = php.exec(Request::get("/")).await?;
+        let resp = php.exec(get_request("/")).await?;
         anyhow::ensure!(resp.status == 404, "expected 404, got {}", resp.status);
         anyhow::ensure!(
             resp.headers
@@ -151,7 +167,7 @@ impl Extension for TruncatedDriver {
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
-        let err = match php.exec(Request::get("/")).await {
+        let err = match php.exec(get_request("/")).await {
             Ok(resp) => anyhow::bail!(
                 "exec must reject a truncated response, got {} with body {:?}",
                 resp.status,
