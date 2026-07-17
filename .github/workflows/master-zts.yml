@@ -127,6 +127,7 @@ jobs:
         shell: pwsh
         run: |
           "$env:PHP_PREFIX" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "PHP_DEVEL_DIR=$env:PHP_PREFIX" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "RUSTFLAGS=-L native=$env:PHP_PREFIX\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 

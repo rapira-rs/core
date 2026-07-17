@@ -9,7 +9,6 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
@@ -208,12 +207,13 @@ async fn drive<E: Extension>(
     }
 }
 
-/// Block SIGINT/SIGTERM in the calling thread so every thread spawned afterwards (the
-/// PHP workers, the extension runtime) inherits the block. rapira then reaps them with
-/// `sigwait` on a dedicated thread instead of a signal handler — which is what lets it
-/// coexist with Zend's per-request signal management: no `sigaction` disposition is ever
-/// replaced, so PHP keeps its own deferred handlers and emits no "handler was replaced"
-/// warning. Call once, in `main`, before booting PHP.
+/// Own process shutdown. On Unix this blocks SIGINT/SIGTERM in the calling thread so every
+/// thread spawned afterwards (the PHP workers, the extension runtime) inherits the block;
+/// rapira then reaps the signal with `sigwait` on a dedicated thread rather than a `sigaction`
+/// handler, so it never replaces a disposition Zend re-installs per request. Call once, in
+/// `main`, before booting PHP. On Windows this is a no-op — the console control handler is
+/// installed later, in `serve`.
+#[cfg(unix)]
 pub fn arm_shutdown_signals() {
     // SAFETY: operates on a stack-owned, freshly-initialized signal set.
     unsafe {
@@ -222,7 +222,13 @@ pub fn arm_shutdown_signals() {
     }
 }
 
+#[cfg(windows)]
+pub fn arm_shutdown_signals() {
+    // Windows has no POSIX signals; the console control handler is installed in `serve`.
+}
+
 /// The {SIGINT, SIGTERM} set rapira blocks and waits on.
+#[cfg(unix)]
 unsafe fn shutdown_sigset() -> libc::sigset_t {
     let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
     unsafe {
@@ -233,18 +239,104 @@ unsafe fn shutdown_sigset() -> libc::sigset_t {
     set
 }
 
-/// Wait up to `timeout` for a blocked SIGINT/SIGTERM. `true` on receipt, `false` on
-/// timeout — so the waiter can re-check whether the extensions already finished.
-fn wait_shutdown_signal(timeout: Duration) -> bool {
-    // SAFETY: every pointer references a stack value live for the whole call.
+/// Block until a blocked SIGINT/SIGTERM is delivered, then return its number. No timeout: the
+/// caller waits on the signal like a channel receive. `sigwait` is portable across macOS,
+/// Linux, and BSD, unlike `sigtimedwait`, which Darwin lacks.
+#[cfg(unix)]
+fn wait_shutdown_signal() -> libc::c_int {
+    // SAFETY: `set` and `sig` are stack values live for the whole call.
     unsafe {
-        let set: libc::sigset_t = shutdown_sigset();
-        let ts: libc::timespec = libc::timespec {
-            tv_sec: timeout.as_secs() as libc::time_t,
-            tv_nsec: timeout.subsec_nanos() as libc::c_long,
-        };
-        let mut info: libc::siginfo_t = std::mem::zeroed();
-        libc::sigtimedwait(&set, &mut info, &ts) >= 0
+        let set = shutdown_sigset();
+        let mut sig: libc::c_int = 0;
+        libc::sigwait(&set, &mut sig);
+        sig
+    }
+}
+
+/// Spawn the shutdown watcher for this platform. It flips `stop_tx` — the same watch channel
+/// every `drive` future selects on — so an external terminate/interrupt becomes a graceful
+/// drain. The returned guard tears the watcher down on drop.
+#[cfg(unix)]
+fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
+    // Detached, like Go's signal goroutine: block on the first signal to drain, on the second
+    // to force exit. If the extensions finish on their own the thread stays parked in `sigwait`
+    // and is reclaimed at process exit.
+    std::thread::Builder::new()
+        .name("rapira-signal".into())
+        .spawn(move || {
+            let _ = wait_shutdown_signal();
+            log::info!("[rapira] shutdown signal received; draining extensions");
+            let _ = stop_tx.send(true);
+            let _ = wait_shutdown_signal();
+            log::warn!("[rapira] second shutdown signal; forcing exit");
+            std::process::exit(130);
+        })
+        .expect("spawn signal thread");
+    ShutdownWatcher
+}
+
+#[cfg(unix)]
+struct ShutdownWatcher; // detached thread — nothing to unwind
+
+#[cfg(windows)]
+fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
+    win_ctrl::install(stop_tx);
+    ShutdownWatcher
+}
+
+#[cfg(windows)]
+struct ShutdownWatcher;
+
+#[cfg(windows)]
+impl Drop for ShutdownWatcher {
+    fn drop(&mut self) {
+        win_ctrl::uninstall();
+    }
+}
+
+#[cfg(windows)]
+mod win_ctrl {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tokio::sync::watch;
+    use windows_sys::Win32::Foundation::BOOL;
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler,
+    };
+
+    static STOP_TX: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    static ASKED: AtomicBool = AtomicBool::new(false);
+
+    // Runs on an OS-injected thread, so it only flips the stop channel and returns — no PHP
+    // calls, no locks. Only Ctrl-C/Ctrl-Break are trappable for a graceful drain (as in
+    // php-src's win32 handler); CLOSE/LOGOFF/SHUTDOWN terminate on handler return, so they fall
+    // through to the default. A second event forces exit, like the Unix reaper's `exit(130)`.
+    unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
+        match ctrl_type {
+            CTRL_C_EVENT | CTRL_BREAK_EVENT => {
+                if ASKED.swap(true, Ordering::SeqCst) {
+                    std::process::exit(130);
+                }
+                log::info!("[rapira] shutdown event received; draining extensions");
+                if let Some(tx) = STOP_TX.get() {
+                    let _ = tx.send(true);
+                }
+                1 // TRUE: handled — don't run the default (terminate) handler
+            }
+            _ => 0, // FALSE: not handled — let the default handler run
+        }
+    }
+
+    pub(super) fn install(stop_tx: watch::Sender<bool>) {
+        let _ = STOP_TX.set(stop_tx);
+        // SAFETY: `handler` is a valid routine for the process lifetime.
+        unsafe { SetConsoleCtrlHandler(Some(handler), 1) };
+    }
+
+    pub(super) fn uninstall() {
+        // SAFETY: removes the handler installed above.
+        unsafe { SetConsoleCtrlHandler(Some(handler), 0) };
     }
 }
 
@@ -258,39 +350,12 @@ pub struct Running {
 
 impl Running {
     /// rapira_core's entry: run until every extension finishes on its own OR a
-    /// terminate/interrupt signal arrives; on signal, ask every extension to shut down
-    /// and drain, then return their outcomes so `main` can exit.
+    /// terminate/interrupt (Unix) or console control event (Windows) arrives; on shutdown,
+    /// ask every extension to stop and drain, then return their outcomes so `main` can exit.
     pub fn serve(mut self) -> Vec<Outcome> {
-        // A dedicated thread reaps SIGINT/SIGTERM via `sigwait` (blocked process-wide by
-        // `arm_shutdown_signals`) and asks every extension to stop. It polls with a
-        // timeout so it can exit once the extensions finish on their own; a second signal
-        // during the drain forces an immediate exit so an operator can bail out.
-        let done = Arc::new(AtomicBool::new(false));
-        let signals = {
-            let done = done.clone();
-            let stop_tx = self.stop_tx.clone();
-            std::thread::Builder::new()
-                .name("rapira-signal".into())
-                .spawn(move || {
-                    let mut asked = false;
-                    while !done.load(Ordering::Relaxed) {
-                        if wait_shutdown_signal(Duration::from_millis(200)) {
-                            if asked {
-                                log::warn!("[rapira] second shutdown signal; forcing exit");
-                                std::process::exit(130);
-                            }
-                            asked = true;
-                            log::info!("[rapira] shutdown signal received; draining extensions");
-                            let _ = stop_tx.send(true);
-                        }
-                    }
-                })
-                .expect("spawn signal thread")
-        };
-        let outcomes = self.drain_all();
-        done.store(true, Ordering::Relaxed);
-        let _ = signals.join();
-        outcomes
+        let _watcher = spawn_shutdown_watcher(self.stop_tx.clone());
+        self.drain_all()
+        // `_watcher` drops here: Unix leaves the reaper detached, Windows removes the handler.
     }
 
     /// Wait for every extension to finish on its own (no signal handling). For tests
@@ -346,19 +411,13 @@ mod tests {
 
     /// The reaper dequeues a blocked, pending signal via `sigwait` instead of letting it
     /// run the default (terminate) action — the basis of graceful shutdown.
+    #[cfg(unix)]
     #[test]
     fn sigwait_reaps_a_blocked_signal() {
         arm_shutdown_signals();
-        assert!(
-            !wait_shutdown_signal(Duration::from_millis(10)),
-            "no signal is pending yet"
-        );
-        // SAFETY: SIGTERM is blocked in this thread, so `raise` leaves it pending here
-        // for `sigwait` to dequeue; it never reaches the default handler.
+        // SAFETY: SIGTERM is blocked in this thread, so `raise` leaves it pending here for
+        // `sigwait` to dequeue; it never reaches the default (terminate) handler.
         unsafe { libc::raise(libc::SIGTERM) };
-        assert!(
-            wait_shutdown_signal(Duration::from_secs(1)),
-            "the pending SIGTERM is reaped"
-        );
+        assert_eq!(wait_shutdown_signal(), libc::SIGTERM);
     }
 }

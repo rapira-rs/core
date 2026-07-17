@@ -35,14 +35,14 @@ enum ModeArg {
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let cli: Cli = Cli::parse();
     // Resolve to an absolute path before anything daemonizes; a daemon's cwd is not
     // the deploy directory.
-    let script = std::path::absolute(&cli.script)?;
+    let script: PathBuf = std::path::absolute(&cli.script)?;
 
     // Extensions are compiled in; register the HTTP front (and any others) here. With
     // none registered there is nothing to serve, so exit before booting PHP.
-    let mut host = ExtensionHost::new();
+    let mut host: ExtensionHost = ExtensionHost::new();
     host.register::<HttpServer>()?;
     if host.is_empty() {
         return Ok(());
@@ -50,7 +50,7 @@ fn main() -> anyhow::Result<()> {
 
     // Block SIGINT/SIGTERM before spawning any threads (PHP workers, the extension
     // runtime), so rapira reaps them on a dedicated waiter and drains extensions on
-    // shutdown — instead of a signal handler that would fight Zend's per-request one.
+    // shutdown - instead of a signal handler that would fight Zend's per-request one.
     extension_host::arm_shutdown_signals();
 
     let mode = match cli.mode {
@@ -59,10 +59,6 @@ fn main() -> anyhow::Result<()> {
     };
     let rapira = Rapira::start(mode, cli.threads)?;
 
-    // Extensions drive PHP through the pool via `php`, running `script`. serve() runs
-    // until they finish or a SIGTERM/SIGINT arrives, drives each extension's shutdown,
-    // and drops the Php/RapiraHandle clones before we drop `rapira` (shutdown
-    // contract). A failed extension is a non-zero exit.
     let outcomes = host.run(rapira.handle()?, script).serve();
     drop(rapira);
     for outcome in outcomes {
