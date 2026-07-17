@@ -5,9 +5,7 @@ use rapira_http::HttpServer;
 use std::path::PathBuf;
 
 // Profiling shows ~50% of CPU under load in glibc malloc/free + arena contention across the
-// worker/IO threads; the Rust-side per-request churn (marshaling, CStrings, buffers) dominates.
-// mimalloc benchmarked fastest here (66.6k vs jemalloc 61k vs glibc 58.5k) — best fit for the
-// many-small-allocations-across-many-threads profile; it cuts alloc cost and arena contention.
+// worker/IO threads.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
