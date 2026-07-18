@@ -61,15 +61,15 @@ fn main() -> anyhow::Result<()> {
         c.include(d);
     }
     if cfg!(windows) {
-        // Match the PHP DLL's C runtime: /MDd for a --enable-debug build, /MD otherwise. A shim on
-        // a different CRT than php8ts.dll gets its own heap and errno/FILE* state, so a buffer
-        // allocated inside PHP and freed across the boundary corrupts. cc has no debug-CRT knob
-        // (static_crt(false) always emits /MD and c.debug only adds /Z7), so append /MDd
-        // explicitly — cl takes the last /M flag (the D9025 override warning is expected).
+        // Always /MD: rustc links only the release CRT on *-msvc (crt-static just picks
+        // static vs dynamic: https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes).
+        // /MDd would define _DEBUG (https://learn.microsoft.com/en-us/cpp/build/reference/md-mt-ld-use-run-time-library),
+        // turning zend_config.w32.h's _CRTDBG_MAP_ALLOC into free -> _free_dbg references
+        // (https://learn.microsoft.com/en-us/cpp/c-runtime-library/crt-debug-heap-details)
+        // that can't resolve against msvcrt. Layout parity with a --enable-debug DLL comes
+        // from the ZEND_DEBUG=1 define; the DLL keeps its own debug CRT, which is fine as
+        // long as CRT allocations don't cross the DLL boundary (ZMM calls run inside it).
         c.static_crt(false);
-        if php.abi.debug {
-            c.flag("-MDd");
-        }
         c.debug(php.abi.debug);
     }
     c.compile("rapira_shim");
@@ -131,8 +131,7 @@ fn windows_defines(abi: &PhpAbi) -> Vec<(&'static str, &'static str)> {
         ("_USE_MATH_DEFINES", "1"),
         // PHP's headers reference ZEND_DEBUG unconditionally (STANDARD_MODULE_HEADER builds the
         // module struct from it), and on Windows it's only ever a command-line define - so it must
-        // always be set: 1 to match a --enable-debug DLL's struct layout, else 0. (The debug CRT
-        // /MDd, passed explicitly for a debug build, defines _DEBUG on its own.)
+        // always be set: 1 to match a --enable-debug DLL's struct layout, else 0.
         ("ZEND_DEBUG", if abi.debug { "1" } else { "0" }),
     ]
 }
