@@ -47,7 +47,7 @@ fn main() -> anyhow::Result<()> {
         println!("cargo:rustc-cfg=php_zts");
     }
 
-    let win_defs = windows_defines(&php.abi);
+    let win_defs: Vec<(&str, &str)> = windows_defines(&php.abi);
 
     let mut c = cc::Build::new();
     c.file("wrapper.c").file("module.c");

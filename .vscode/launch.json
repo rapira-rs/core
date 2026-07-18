@@ -8,11 +8,11 @@
       "cargo": {
         "args": [
           "build",
-          "--bin=rapira_core",
+          "--bin=rapira",
           "--package=rapira_core"
         ],
         "filter": {
-          "name": "rapira_core",
+          "name": "rapira",
           "kind": "bin"
         },
         "env": {
@@ -44,11 +44,11 @@
       "cargo": {
         "args": [
           "build",
-          "--bin=rapira_core",
+          "--bin=rapira",
           "--package=rapira_core"
         ],
         "filter": {
-          "name": "rapira_core",
+          "name": "rapira",
           "kind": "bin"
         },
         "env": {
