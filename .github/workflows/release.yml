@@ -51,17 +51,20 @@ jobs:
   build:
     needs: guard
     runs-on: ${{ matrix.runner }}
+    # Linux legs build inside rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the
+    # binaries and packages serve RHEL 9 as well as Ubuntu 22.04+/Debian 12.
+    # Non-linux legs leave `container` unset and run directly on the runner.
+    container: ${{ matrix.container }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ubuntu-22.04 deliberately: glibc 2.35 floor + pre-t64 soname package names.
-          - { name: linux-x86_64-php8.4,  runner: ubuntu-22.04,     target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.4', provision: source-unix }
-          - { name: linux-x86_64-php8.5,  runner: ubuntu-22.04,     target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.5', provision: source-unix }
-          - { name: linux-aarch64-php8.4, runner: ubuntu-22.04-arm, target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.4', provision: source-unix }
-          - { name: linux-aarch64-php8.5, runner: ubuntu-22.04-arm, target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.5', provision: source-unix }
+          - { name: linux-x86_64-php8.4,  runner: ubuntu-latest,    container: 'rockylinux:9', target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.4', provision: source-unix }
+          - { name: linux-x86_64-php8.5,  runner: ubuntu-latest,    container: 'rockylinux:9', target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.5', provision: source-unix }
+          - { name: linux-aarch64-php8.4, runner: ubuntu-24.04-arm, container: 'rockylinux:9', target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.4', provision: source-unix }
+          - { name: linux-aarch64-php8.5, runner: ubuntu-24.04-arm, container: 'rockylinux:9', target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.5', provision: source-unix }
           - { name: macos-aarch64-php8.4, runner: macos-14,         target_os: macos,   arch: aarch64, php_branch: '8.4', provision: source-unix }
           - { name: macos-aarch64-php8.5, runner: macos-14,         target_os: macos,   arch: aarch64, php_branch: '8.5', provision: source-unix }
           - { name: win-x86_64-php8.4,    runner: windows-2022,     target_os: windows, arch: x86_64,  php_branch: '8.4', provision: win-official }
@@ -74,28 +77,40 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with: { persist-credentials: false }
 
+      # Runs before the resolve step: the rocky container needs python3/curl.
+      # oniguruma-devel lives in the CRB repo.
+      - name: Install build deps (Linux container)
+        if: matrix.provision == 'source-unix' && runner.os == 'Linux'
+        run: |
+          dnf -y install dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf -y install \
+            gcc gcc-c++ make cmake git tar gzip xz findutils python3 \
+            pkgconf-pkg-config clang-devel llvm-devel \
+            openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel
+
       - name: Resolve PHP patch version
         id: php
         shell: bash
+        env:
+          PHP_84_OVERRIDE: ${{ inputs.php_84 }}
+          PHP_85_OVERRIDE: ${{ inputs.php_85 }}
         run: |
           set -euo pipefail
           override=""
-          [ "${{ matrix.php_branch }}" = "8.4" ] && override="${{ inputs.php_84 }}"
-          [ "${{ matrix.php_branch }}" = "8.5" ] && override="${{ inputs.php_85 }}"
-          if [ -n "$override" ]; then FULL="$override"; else
+          [ "${{ matrix.php_branch }}" = "8.4" ] && override="$PHP_84_OVERRIDE"
+          [ "${{ matrix.php_branch }}" = "8.5" ] && override="$PHP_85_OVERRIDE"
+          if [ -n "$override" ]; then
+            [[ "$override" =~ ^8\.[45]\.[0-9]+$ ]] || { echo "::error::invalid PHP override '$override'"; exit 1; }
+            FULL="$override"
+            echo "overridden=true" >> "$GITHUB_OUTPUT"
+          else
             FULL=$(curl -fsSL "https://www.php.net/releases/index.php?json&version=${{ matrix.php_branch }}" \
                     | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
+            echo "overridden=false" >> "$GITHUB_OUTPUT"
           fi
           echo "full=$FULL" >> "$GITHUB_OUTPUT"
           echo "PHP $FULL"
-
-      - name: Install build deps (Linux)
-        if: matrix.provision == 'source-unix' && runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libclang-dev llvm-dev \
-            libssl-dev libcurl4-openssl-dev libxml2-dev libonig-dev zlib1g-dev libsqlite3-dev
 
       - name: Install build deps (macOS)
         if: matrix.provision == 'source-unix' && runner.os == 'macOS'
@@ -108,7 +123,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.PHP_PREFIX }}
-          key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v1
+          key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v2
 
       - name: Build PHP embed from release tarball (Unix)
         if: matrix.provision == 'source-unix' && steps.phpcache.outputs.cache-hit != 'true'
@@ -130,10 +145,11 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.PHP_PREFIX }}
-          key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v1
+          key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v2
 
       # Windows x64: official devel pack (link) + official binary zip (runtime DLLs).
       - name: Provision PHP (Windows official)
+        id: phpwin
         if: matrix.provision == 'win-official'
         shell: pwsh
         run: |
@@ -141,6 +157,13 @@ jobs:
           $branch   = $releases.'${{ matrix.php_branch }}'
           $variant  = $branch.PSObject.Properties.Name | Where-Object { $_ -like 'ts-*-x64' } | Select-Object -First 1
           if (-not $variant) { throw "no ts x64 build for PHP ${{ matrix.php_branch }}" }
+          # windows builds ship exactly one patch per branch; fail if an override
+          # asked for a different one, and record the real version for PHP_VERSION.txt
+          $actual = $branch.version
+          if ('${{ steps.php.outputs.overridden }}' -eq 'true' -and $actual -ne '${{ steps.php.outputs.full }}') {
+            throw "windows builds ship PHP $actual; requested override ${{ steps.php.outputs.full }} is unavailable"
+          }
+          "full=$actual" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.devel_pack.path)" -OutFile "$env:RUNNER_TEMP\devel.zip"
           Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.zip.path)"        -OutFile "$env:RUNNER_TEMP\bin.zip"
           Expand-Archive "$env:RUNNER_TEMP\devel.zip" -DestinationPath "$env:RUNNER_TEMP\devel"
@@ -220,7 +243,7 @@ jobs:
           New-Item -ItemType Directory -Force "$root","$root\ext" | Out-Null
           Copy-Item target\release\rapira.exe "$root\"
           Copy-Item README.md,LICENSE "$root\"
-          "${{ steps.php.outputs.full }}" | Out-File "$root\PHP_VERSION.txt" -Encoding ascii
+          "${{ steps.phpwin.outputs.full }}" | Out-File "$root\PHP_VERSION.txt" -Encoding ascii
           # php8ts.dll + all dependency DLLs sit at the official binary zip's root
           Get-ChildItem "$env:PHP_RUNTIME\*.dll" | Copy-Item -Destination "$root\"
           $exts = 'openssl','curl','mbstring','dom','xml','simplexml','xmlreader','xmlwriter',
@@ -229,6 +252,10 @@ jobs:
             $p = "$env:PHP_RUNTIME\ext\php_$e.dll"
             if (Test-Path $p) { Copy-Item $p "$root\ext\" }
           }
+          # opcache is a zend_extension: not in $exts (those become extension= lines)
+          $opcache = "$env:PHP_RUNTIME\ext\php_opcache.dll"
+          if (-not (Test-Path $opcache)) { throw "php_opcache.dll missing from the official zip" }
+          Copy-Item $opcache "$root\ext\"
           $ini = @('extension_dir=ext', 'zend_extension=opcache') +
                  ($exts | Where-Object { Test-Path "$root\ext\php_$_.dll" } | ForEach-Object { "extension=$_" })
           Set-Content "$root\php.ini" ($ini -join "`n") -Encoding ascii

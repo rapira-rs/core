@@ -10,16 +10,10 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    # macOS/Windows cargo legs are expected to fail until the native port lands —
-    # keep them informational so a genuinely broken Linux leg stands out.
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
-        include:
-          - { os: macos-latest, experimental: true }
-          - { os: windows-latest, experimental: true }
     env:
       PHP_PREFIX: ${{ github.workspace }}/.php-zts-debug
     defaults:
@@ -58,9 +52,8 @@ jobs:
         shell: bash
         run: echo "sha=$(git ls-remote https://github.com/php/php-src.git master | cut -f1)" >> "$GITHUB_OUTPUT"
 
-      # restore/save are split so the 15-25 min PHP build is persisted even when the
-      # later cargo steps fail (expected on macOS/Windows until the port lands) —
-      # actions/cache@v4's post-save only runs on job success.
+      # restore/save are split so the 15-25 min PHP build is persisted even when a
+      # later cargo step fails — actions/cache@v4's post-save only runs on job success.
       - name: Restore ZTS+debug PHP (embed SAPI)
         id: php
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -143,7 +136,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: core
-          # macOS/Windows legs fail in cargo until the port lands; still save the deps cache.
+          # save the deps cache even when a later cargo step fails
           cache-on-failure: true
 
       - run: cargo clippy --workspace --all-targets -- -D warnings

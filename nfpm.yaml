@@ -10,7 +10,7 @@ version_schema: "semver"
 release: "1"
 section: "net"
 priority: "optional"
-maintainer: "Valery Piashchynski <TODO@set-real-contact>" # TODO: set the contact you want public in packages
+maintainer: "Valery Piashchynski <piashchynski.valery@gmail.com>"
 vendor: "Rotor"
 homepage: "https://github.com/rotor-server/core"
 license: "MIT"
@@ -44,9 +44,10 @@ contents:
 overrides:
   deb:
     depends:
-      # built on ubuntu-22.04 (glibc 2.35, pre-t64 package names); the
-      # "pkg | pkgt64" alternatives keep the package installable on 24.04+.
-      - "libc6 (>= 2.35)"
+      # built in a rockylinux:9 container (glibc 2.34, OpenSSL 3.0) so the same
+      # binary serves RHEL 9 and Ubuntu 22.04+/Debian 12; the "pkg | pkgt64"
+      # alternatives keep the package installable across the 24.04 t64 rename.
+      - "libc6 (>= 2.34)"
       - "libgcc-s1"
       - "libssl3 | libssl3t64"
       - "libcurl4 | libcurl4t64"
@@ -56,7 +57,7 @@ overrides:
       - "zlib1g"
   rpm:
     depends:
-      - "glibc >= 2.35"
+      - "glibc >= 2.34"
       - "libgcc"
       - "openssl-libs"
       - "libcurl"
