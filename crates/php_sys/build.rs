@@ -30,7 +30,6 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=PHP_CONFIG");
     println!("cargo:rerun-if-env-changed=PHP_DEVEL_DIR");
-    println!("cargo:rerun-if-env-changed=RAPIRA_ALLOWED_BINDINGS");
 
     let php = discover_php()?;
 
@@ -57,38 +56,52 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.trim_start_matches("-I"))
         .collect();
 
+    let win_defs = windows_defines(&php.abi);
+
     let mut c = cc::Build::new();
     c.file("wrapper.c").file("module.c");
     if php.abi.zts {
         c.define("ZTS", None);
     }
+    for &(k, v) in &win_defs {
+        c.define(k, Some(v));
+    }
     for d in &includes {
         c.include(d);
+    }
+    if cfg!(windows) {
+        // Match the PHP DLL's C runtime: /MDd for a --enable-debug build, /MD otherwise. A shim on
+        // a different CRT than php8ts.dll gets its own heap and errno/FILE* state, so a buffer
+        // allocated inside PHP and freed across the boundary corrupts.
+        c.static_crt(false);
+        c.debug(php.abi.debug);
     }
     c.compile("rapira_shim");
 
     let mut bindings = bindgen::Builder::default()
         .header("wrapper.h")
-        .clang_args(php.includes.split_whitespace());
+        .clang_args(php.includes.split_whitespace())
+        .clang_args(win_defs.iter().map(|(k, v)| format!("-D{k}={v}")))
+        // php-src master on clang >=19 compiles the Zend VM in tail-call dispatch mode: every
+        // opcode handler is a function using the `preserve_none` calling convention, and
+        // `zend_op.handler` points to one. bindgen renders C structs field-by-field, so it must
+        // emit that pointer's ABI - but 0.72.1 has no token for `preserve_none` and panics.
+        // `opaque_type` makes bindgen emit `zend_op` as a byte array of clang's reported
+        // size/align instead of its fields, so the handler pointer is never rendered. rapira reads
+        // no `zend_op` field, so nothing is lost; a no-op on 8.4/8.5, which have no preserve_none.
+        // https://clang.llvm.org/docs/AttributeReference.html#preserve-none
+        .opaque_type("_zend_op");
     if php.abi.zts {
         bindings = bindings.clang_arg("-DZTS");
     }
     bindings = bindings.layout_tests(true);
+    bindings = macos_sysroot(bindings);
 
     for binding in ALLOWED_BINDINGS {
         bindings = bindings
             .allowlist_function(binding)
             .allowlist_type(binding)
             .allowlist_var(binding);
-    }
-
-    if let Ok(extra) = env::var("RAPIRA_ALLOWED_BINDINGS") {
-        for binding in extra.split(',') {
-            bindings = bindings
-                .allowlist_function(binding)
-                .allowlist_type(binding)
-                .allowlist_var(binding);
-        }
     }
 
     bindings
@@ -102,6 +115,53 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// PHP passes these on the compiler command line, never in a header; without ZEND_WIN32 the headers
+// #include the Unix-only <zend_config.h> and the build dies. Empty off Windows, where the generated
+// php_config.h already carries them.
+fn windows_defines(abi: &PhpAbi) -> Vec<(&'static str, &'static str)> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let mut d = vec![
+        ("ZEND_WIN32", "1"),
+        ("PHP_WIN32", "1"),
+        ("WIN32", "1"),
+        ("WINDOWS", "1"),
+        ("_WINDOWS", "1"),
+        ("_MBCS", "1"),
+        ("_USE_MATH_DEFINES", "1"),
+    ];
+    if abi.debug {
+        // ZEND_DEBUG adds fields to core structs (zend_string, execute_data, ...); the shim must
+        // see the same layout as the --enable-debug DLL it links.
+        d.push(("ZEND_DEBUG", "1"));
+        d.push(("_DEBUG", "1"));
+    }
+    d
+}
+
+#[cfg(target_os = "macos")]
+fn macos_sysroot(bindings: bindgen::Builder) -> bindgen::Builder {
+    // The libclang 19+ that reports the preserve_none convention no longer infers the SDK path, so
+    // point it at the active SDK or the parse fails to find <stdlib.h> and friends.
+    if let Ok(out) = Command::new("xcrun").args(["--show-sdk-path"]).output()
+        && out.status.success()
+    {
+        let sdk = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !sdk.is_empty() {
+            return bindings
+                .clang_arg(format!("-isysroot{sdk}"))
+                .clang_arg(format!("-I{sdk}/usr/include"));
+        }
+    }
+    bindings
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_sysroot(bindings: bindgen::Builder) -> bindgen::Builder {
+    bindings
+}
+
 fn parse_version(v: &str) -> anyhow::Result<(u32, u32)> {
     let mut it = v.trim().split('.');
     let major: u32 = it.next().context("php version missing major")?.parse()?;
@@ -111,12 +171,12 @@ fn parse_version(v: &str) -> anyhow::Result<(u32, u32)> {
 
 #[cfg(unix)]
 fn discover_php() -> anyhow::Result<PhpBuild> {
-    let includes = php_config("--includes")?;
-    let prefix = php_config("--prefix")?;
-    let version = parse_version(&php_config("--version")?)?;
-    let bin = resolve_php_binary();
-    let zts = detect_zts(&bin)?;
-    let debug = detect_debug(&bin)?;
+    let includes: String = php_config("--includes")?;
+    let prefix: String = php_config("--prefix")?;
+    let version: (u32, u32) = parse_version(&php_config("--version")?)?;
+    let bin: String = resolve_php_binary();
+    let zts: bool = detect_zts(&bin)?;
+    let debug: bool = detect_debug(&bin)?;
     Ok(PhpBuild {
         includes,
         lib_dirs: vec![format!("{prefix}/lib"), format!("{prefix}/lib64")],
@@ -219,16 +279,7 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
             false,
         ),
     };
-    let lib_name = if zts {
-        format!("php{}ts", version.0)
-    } else {
-        format!("php{}", version.0)
-    };
-    anyhow::ensure!(
-        lib_dir.join(format!("{lib_name}.lib")).exists(),
-        "expected {lib_name}.lib in {}",
-        lib_dir.display()
-    );
+    let lib_name = windows_lib_name(&lib_dir, version.0, zts, debug)?;
     Ok(PhpBuild {
         includes,
         lib_dirs: vec![lib_dir.display().to_string()],
@@ -239,6 +290,41 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
             debug,
         },
     })
+}
+
+// ZTS ships php8ts.lib, NTS php8.lib, and a debug build may add a `_debug` suffix. Probe the
+// candidates in preference order and link whichever the devel pack actually shipped.
+#[cfg(windows)]
+fn windows_lib_name(
+    lib_dir: &std::path::Path,
+    major: u32,
+    zts: bool,
+    debug: bool,
+) -> anyhow::Result<String> {
+    let base = if zts {
+        format!("php{major}ts")
+    } else {
+        format!("php{major}")
+    };
+    let mut candidates = Vec::new();
+    if debug {
+        candidates.push(format!("{base}_debug"));
+    }
+    candidates.push(base);
+    for stem in &candidates {
+        if lib_dir.join(format!("{stem}.lib")).exists() {
+            return Ok(stem.clone());
+        }
+    }
+    anyhow::bail!(
+        "no PHP import lib ({}) in {}",
+        candidates
+            .iter()
+            .map(|s| format!("{s}.lib"))
+            .collect::<Vec<_>>()
+            .join(" / "),
+        lib_dir.display()
+    )
 }
 
 #[cfg(windows)]

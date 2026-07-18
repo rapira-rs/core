@@ -4,8 +4,6 @@ use php_sys::{Mode, Rapira};
 use rapira_http::HttpServer;
 use std::path::PathBuf;
 
-// Profiling shows ~50% of CPU under load in glibc malloc/free + arena contention across the
-// worker/IO threads.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
