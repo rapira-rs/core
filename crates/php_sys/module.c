@@ -1,6 +1,6 @@
 #include "wrapper.h"
 
-extern bool rapira_rs_handle_request(
+extern int rapira_rs_handle_request(
     zend_fcall_info *fci,
     zend_fcall_info_cache *fcc); // Rust: main handler: rapira_worker.rs
 extern void rapira_rs_finish_response(void); // Rust: just ctx.finish()
@@ -24,6 +24,13 @@ enum {
     BAILOUT = 1,
     EXIT = 2,
     THROW = 3,
+};
+
+// Keep in sync with rapira_worker.rs HandleAction.
+enum {
+    RAPIRA_STOP = 0,
+    RAPIRA_CONTINUE = 1,
+    RAPIRA_RECYCLE = 2,
 };
 
 // Guard a teardown step: on bailout, flag it and close the observer frames the
@@ -63,7 +70,15 @@ PHP_FUNCTION(rapira_handle_request) {
     ZEND_PARSE_PARAMETERS_START(1, 1) // min-max
     Z_PARAM_FUNC(fci, fcc)
     ZEND_PARSE_PARAMETERS_END();
-    RETURN_BOOL(rapira_rs_handle_request(&fci, &fcc));
+    int action = rapira_rs_handle_request(&fci, &fcc);
+    if (action == RAPIRA_RECYCLE) {
+        // A teardown/handler bailout left the executor corrupt (imbalanced VM stack, half-torn
+        // request). Unwind the whole resident script - over PHP frames only, up to
+        // php_execute_script's zend_try - so no bytecode runs over it; run_cycle then does the full
+        // php_request_shutdown + recycle. RETURN_BOOL is never reached on this path.
+        zend_bailout();
+    }
+    RETURN_BOOL(action == RAPIRA_CONTINUE);
 }
 
 PHP_FUNCTION(rapira_finish_request) {

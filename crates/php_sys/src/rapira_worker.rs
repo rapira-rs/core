@@ -8,6 +8,7 @@ use crate::{
 };
 use std::{
     cell::RefCell,
+    os::raw::c_int,
     path::{Path, PathBuf},
 };
 
@@ -37,6 +38,14 @@ enum Cycle {
 pub enum WorkerExit {
     Closed,  // intake channel closed - worker_main exits the thread
     Restart, // worker_main drops PhpThread and builds a fresh one
+}
+
+// What the C `rapira_handle_request` does after a worker-loop turn. Keep in sync with module.c.
+#[repr(i32)]
+enum HandleAction {
+    Stop = 0,     // clean loop exit (intake channel closed) -> RETURN_BOOL(false)
+    Continue = 1, // job served, keep looping -> RETURN_BOOL(true)
+    Recycle = 2,  // a bailout occurred -> C raises zend_bailout to unwind the resident script
 }
 
 struct WorkerChan {
@@ -131,19 +140,27 @@ pub extern "C" fn rapira_rs_handle_request(
     // Safety: not safe
     fci: *mut zend_fcall_info,
     fcc: *mut zend_fcall_info_cache,
-) -> bool {
-    let ok = guard(false, || handle_request_impl(fci, fcc));
+) -> c_int {
+    // A caught Rust panic recycles (rebuild over a suspect thread), never silently continues.
+    let action = guard(HandleAction::Recycle, || handle_request_impl(fci, fcc));
     // A caught panic in handle_request_impl skips its unbind_server_context, leaving
     // SG(server_context) dangling to the freed job; run_cycle's php_request_shutdown
     // would then flush output through it. Clear it here (idempotent on the normal
     // path, which already unbound).
     unbind_server_context();
-    ok
+    action as c_int
 }
 
-fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> bool {
+fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> HandleAction {
     let Some(mut job) = next_job() else {
-        return false;
+        // None is terminal: next_job set wc.recycle on a first-call teardown bailout (unwind the
+        // script), else the intake channel closed (clean stop).
+        let recycled = WORKER.with_borrow(|w| w.as_ref().is_some_and(|wc| wc.recycle));
+        return if recycled {
+            HandleAction::Recycle
+        } else {
+            HandleAction::Stop
+        };
     };
 
     bind_server_context(&mut job.ctx);
@@ -196,8 +213,13 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         });
     }
     job.ctx.finish(truncated);
-    // false breaks the PHP worker loop so run_cycle can rebuild the request
-    !recycle
+    // Recycle tells C to zend_bailout so no PHP runs over the post-longjmp state; the response was
+    // already sealed by job.ctx.finish() above. Continue keeps the resident loop going.
+    if recycle {
+        HandleAction::Recycle
+    } else {
+        HandleAction::Continue
+    }
 }
 
 // worker-mode wrapper, still called from inside the PHP loop (via rapira_handle_request):
