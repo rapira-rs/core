@@ -11,8 +11,8 @@ release: "1"
 section: "net"
 priority: "optional"
 maintainer: "Valery Piashchynski <piashchynski.valery@gmail.com>"
-vendor: "Rotor"
-homepage: "https://github.com/rotor-server/core"
+vendor: "rapira"
+homepage: "https://github.com/rapira-rs/core"
 license: "MIT"
 description: |
   Rapira — PHP application server.

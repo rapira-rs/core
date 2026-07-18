@@ -53,7 +53,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # Linux legs build inside rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the
     # binaries and packages serve RHEL 9 as well as Ubuntu 22.04+/Debian 12.
-    # Non-linux legs leave `container` unset and run directly on the runner.
+    # The image is pinned to its multi-arch manifest-list digest (amd64+arm64).
+    # Non-linux legs leave `container` unset (empty expression = no container).
     container: ${{ matrix.container }}
     permissions:
       contents: read
@@ -61,10 +62,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-x86_64-php8.4,  runner: ubuntu-latest,    container: 'rockylinux:9', target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.4', provision: source-unix }
-          - { name: linux-x86_64-php8.5,  runner: ubuntu-latest,    container: 'rockylinux:9', target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.5', provision: source-unix }
-          - { name: linux-aarch64-php8.4, runner: ubuntu-24.04-arm, container: 'rockylinux:9', target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.4', provision: source-unix }
-          - { name: linux-aarch64-php8.5, runner: ubuntu-24.04-arm, container: 'rockylinux:9', target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.5', provision: source-unix }
+          - { name: linux-x86_64-php8.4,  runner: ubuntu-latest,    container: 'rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6', target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.4', provision: source-unix }
+          - { name: linux-x86_64-php8.5,  runner: ubuntu-latest,    container: 'rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6', target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.5', provision: source-unix }
+          - { name: linux-aarch64-php8.4, runner: ubuntu-24.04-arm, container: 'rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6', target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.4', provision: source-unix }
+          - { name: linux-aarch64-php8.5, runner: ubuntu-24.04-arm, container: 'rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6', target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.5', provision: source-unix }
           - { name: macos-aarch64-php8.4, runner: macos-14,         target_os: macos,   arch: aarch64, php_branch: '8.4', provision: source-unix }
           - { name: macos-aarch64-php8.5, runner: macos-14,         target_os: macos,   arch: aarch64, php_branch: '8.5', provision: source-unix }
           - { name: win-x86_64-php8.4,    runner: windows-2022,     target_os: windows, arch: x86_64,  php_branch: '8.4', provision: win-official }
@@ -101,7 +102,9 @@ jobs:
           [ "${{ matrix.php_branch }}" = "8.4" ] && override="$PHP_84_OVERRIDE"
           [ "${{ matrix.php_branch }}" = "8.5" ] && override="$PHP_85_OVERRIDE"
           if [ -n "$override" ]; then
-            [[ "$override" =~ ^8\.[45]\.[0-9]+$ ]] || { echo "::error::invalid PHP override '$override'"; exit 1; }
+            if [[ ! "$override" =~ ^8\.[45]\.[0-9]+$ ]] || [ "${override%.*}" != "${{ matrix.php_branch }}" ]; then
+              echo "::error::invalid PHP override '$override' for branch ${{ matrix.php_branch }}"; exit 1
+            fi
             FULL="$override"
             echo "overridden=true" >> "$GITHUB_OUTPUT"
           else
