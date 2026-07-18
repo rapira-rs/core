@@ -132,7 +132,13 @@ static void rapira_modules_request(bool startup) {
             continue;
         }
         if (startup && module->request_startup_func) {
-            module->request_startup_func(module->type, module->module_number);
+            /* engine contract: RINIT failure is fatal (zend_activate_modules warns and
+            exit(1)s). Bail instead - the zend_try in rapira_request_activate contains
+            it, failing the job and recycling the worker. */
+            if (module->request_startup_func(module->type, module->module_number) == FAILURE) {
+                zend_error(E_WARNING, "request_startup() for %s module failed", module->name);
+                zend_bailout();
+            }
         } else if (!startup && module->request_shutdown_func) {
             module->request_shutdown_func(module->type, module->module_number);
         }
