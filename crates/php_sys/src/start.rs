@@ -27,6 +27,7 @@ impl PhpThread {
         #[cfg(php_zts)]
         unsafe {
             ts_resource_ex(0, null_mut());
+            rapira_tsrmls_cache_update();
         }
         Self
     }
@@ -67,7 +68,10 @@ impl Rapira {
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
             #[cfg(php_zts)]
-            php_tsrm_startup_ex(num_threads as c_int);
+            {
+                php_tsrm_startup_ex(num_threads as c_int);
+                rapira_tsrmls_cache_update();
+            }
             rapira_process_init();
             sapi_startup(&mut module);
             module
@@ -119,7 +123,28 @@ impl Drop for Rapira {
     fn drop(&mut self) {
         info!("[rapira] shutting down, dropping");
         self.intake = None;
-        for w in std::mem::take(&mut self.workers) {
+        let workers: Vec<JoinHandle<()>> = std::mem::take(&mut self.workers);
+
+        // macOS/Windows can't enforce a per-request hard timeout (Zend's per-thread timer is
+        // Linux/FreeBSD-only), so a runaway request would block join() forever. Bound the wait
+        // there and, if a worker is still spinning, skip the C teardown - php_module_shutdown on a
+        // live PHP thread is UB - and let process exit reclaim it. On Linux the timer bounds every
+        // request, so join unconditionally below and tear down cleanly.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline && workers.iter().any(|w| !w.is_finished()) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            if workers.iter().any(|w| !w.is_finished()) {
+                error!(
+                    "[rapira] worker still running after grace; skipping PHP module shutdown to avoid UB on a live thread"
+                );
+                return;
+            }
+        }
+
+        for w in workers {
             let _ = w.join();
         }
         unsafe {

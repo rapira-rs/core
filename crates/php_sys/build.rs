@@ -122,7 +122,7 @@ fn windows_defines(abi: &PhpAbi) -> Vec<(&'static str, &'static str)> {
     if !cfg!(windows) {
         return Vec::new();
     }
-    let mut d = vec![
+    vec![
         ("ZEND_WIN32", "1"),
         ("PHP_WIN32", "1"),
         ("WIN32", "1"),
@@ -130,14 +130,12 @@ fn windows_defines(abi: &PhpAbi) -> Vec<(&'static str, &'static str)> {
         ("_WINDOWS", "1"),
         ("_MBCS", "1"),
         ("_USE_MATH_DEFINES", "1"),
-    ];
-    if abi.debug {
-        // ZEND_DEBUG adds fields to core structs (zend_string, execute_data, ...); the shim must
-        // see the same layout as the --enable-debug DLL it links.
-        d.push(("ZEND_DEBUG", "1"));
-        d.push(("_DEBUG", "1"));
-    }
-    d
+        // PHP's headers reference ZEND_DEBUG unconditionally (STANDARD_MODULE_HEADER builds the
+        // module struct from it), and on Windows it's only ever a command-line define - so it must
+        // always be set: 1 to match a --enable-debug DLL's struct layout, else 0. (The debug CRT
+        // /MDd, applied by c.debug for a debug build, defines _DEBUG on its own.)
+        ("ZEND_DEBUG", if abi.debug { "1" } else { "0" }),
+    ]
 }
 
 #[cfg(target_os = "macos")]

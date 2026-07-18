@@ -6,6 +6,12 @@
 //! php_request_startup, not per job. These tests prove the timer armed that way
 //! still fires on jobs after the first in a cycle, and that the worker recovers
 //! afterwards.
+//!
+//! Skipped on macOS/Windows: rapira arms a per-request timeout only where Zend's per-thread timer
+//! exists (`ZEND_MAX_EXECUTION_TIMERS`, Linux/FreeBSD-only — needs POSIX timer_create, which Darwin
+//! and Windows lack), so elsewhere the busy-loop fixture would spin forever.
+//! https://github.com/php/php-src/pull/10141
+#![cfg(not(any(target_os = "macos", target_os = "windows")))]
 
 use integration_tests::{drain, fixture, php_lock_with_ini, req};
 use php_sys::{Mode, Rapira};
