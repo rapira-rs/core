@@ -112,7 +112,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
                 return 0;
             }
             if ctx.body.len() + len > MAX_BUFFERED_BODY {
-                // over the buffer cap: seal what we have as truncated and abort the
+                // over the buffer cap: seal the buffered body as truncated and abort the
                 // request through the same path as a client disconnect
                 ctx.finish(true);
                 unsafe { *aborted = true };
@@ -140,15 +140,11 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
     guard(SAPI_HEADER_SEND_FAILED as c_int, || {
         let ctx = unsafe {
             let Some(ctx) = ctx() else {
-                // the problem here, is that if we don't send
-                // SAPI_HEADER_SENT_SUCCESSFULLY, PHP will not call ub_write
-                // so send this status to allow in bootstrap to use the ub_write
-                // php_output_header called first
-                // then we have a gate:
-                // if (context.out.data && context.out.used) {
-                //     php_output_header(); <-- our handler (this)
-                //     if (!(OG(flags) & PHP_OUTPUT_DISABLED)) { <-- if we sent failed
-                //         sapi_module.ub_write(...); <-- boom, we don't call ub_write when ctx is null
+                // php_output_op() calls sapi_module.ub_write() only when this hook
+                // returns SAPI_HEADER_SENT_SUCCESSFULLY and OG(flags) lacks
+                // PHP_OUTPUT_DISABLED (php-src main/output.c:1131-1138). Bootstrap
+                // runs with no bound Context, so return success here to keep its
+                // output reaching ub_write.
                 return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
             };
 
@@ -173,13 +169,8 @@ pub(crate) unsafe extern "C" fn flush(_sc: *mut c_void) {
     // nothing to do: the body buffers into the single Frame, delivered at finish
 }
 pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usize {
-    // php-src main/SAPI.c:232-252:
-    // read_bytes = sapi_module.read_post(buffer, buflen);
-    // ...
-    // if (read_bytes < buflen) {
-    // /* done */
-    //     SG(post_read) = 1;
-    // }
+    // A short read (fewer than `count` bytes) signals end-of-body: the engine
+    // sets SG(post_read)=1 and stops calling this (php-src main/SAPI.c:232-252).
     with_ctx(0, |ctx| {
         let dst = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, count) };
         let mut filled = 0;
@@ -196,7 +187,7 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
 }
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
     with_ctx(null_mut(), |ctx| {
-        // we own the buffer; NULL = no Cookie header (the SAPI convention)
+        // the Cookie buffer is request-owned; NULL = no Cookie header (the SAPI convention)
         ctx.c
             .cookie
             .as_ref()
@@ -238,7 +229,10 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         );
         put(c"REMOTE_HOST", &ctx.req.remote_addr);
         put(c"REMOTE_PORT", &ctx.req.remote_port);
-        put(c"REMOTE_IDENT", ""); // RFC 1413: "The REMOTE_IDENT variable is not set by default"
+        // REMOTE_IDENT is optional per CGI/1.1; rapira runs no RFC 1413 ident lookup, so it is empty.
+        // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.10
+        // https://www.rfc-editor.org/rfc/rfc1413
+        put(c"REMOTE_IDENT", "");
         put(c"REQUEST_METHOD", &ctx.req.method);
         put(c"REQUEST_URI", &ctx.req.uri);
         put(c"QUERY_STRING", &ctx.req.query);
@@ -276,8 +270,10 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         }
 
         // Dynamic vars: owned names/values built up front, then registered from a ManuallyDrop so
-        // no drop is pending across the register loop (see the POF note above). Order matches the
-        // previous code: CONTENT_LENGTH, deduped HTTP_* headers, then extra server vars.
+        // no drop is pending across the register loop (see the POF note above). Registration order —
+        // CONTENT_LENGTH, deduped HTTP_* headers, then extra server vars — is load-bearing:
+        // php_register_variable_safe overwrites a same-named entry (last write wins), so extra
+        // server vars registered last take precedence over the derived HTTP_* / CONTENT_LENGTH vars.
         let mut pairs: Vec<(CString, Cow<[u8]>)> =
             Vec::with_capacity(1 + ctx.req.headers.len() + ctx.req.server_vars.len());
         if ctx.req.content_length >= 0 {

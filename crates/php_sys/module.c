@@ -3,11 +3,12 @@
 extern int rapira_rs_handle_request(
     zend_fcall_info *fci,
     zend_fcall_info_cache *fcc); // Rust: main handler: rapira_worker.rs
-extern void rapira_rs_finish_response(void); // Rust: just ctx.finish()
+extern void rapira_rs_finish_response(void); // Rust: ctx.finish()
 
-// ub_write's client-abort raise (php_handle_aborted_connection) longjmps, so
-// run it here in C: the Rust half reports the disconnect via *aborted, and this
-// raises the abort AFTER the Rust catch_unwind frame has returned.
+// ub_write's client-abort raise (php_handle_aborted_connection,
+// main/main.c:2722) longjmps, so run it here in C: the Rust half reports the
+// disconnect via *aborted, and this raises the abort AFTER the Rust
+// catch_unwind frame has returned.
 extern size_t rapira_rs_ub_write(const char *str, size_t len, bool *aborted);
 size_t rapira_ub_write(const char *str, size_t len) {
     bool aborted = false;
@@ -18,7 +19,7 @@ size_t rapira_ub_write(const char *str, size_t len) {
     return written;
 }
 
-// in rust with repr[c]
+// Keep in sync with Outcome in types.rs (#[repr(C)]).
 enum {
     OK = 0,
     BAILOUT = 1,
@@ -50,8 +51,8 @@ enum {
     zend_catch { rapira_observer_end_to(base); }                               \
     zend_end_try()
 
-// found out, that php_output_end_all can also bailout
-// so wrap it in a zend_try block, and return BAILOUT if it does
+// php_output_end_all flushes userland output handlers, which can fatal and
+// bailout; guard it and report BAILOUT.
 int rapira_finish_output(void) {
     zend_try {
         php_output_end_all();
@@ -74,7 +75,7 @@ ZEND_END_ARG_INFO()
 PHP_FUNCTION(rapira_handle_request) {
     zend_fcall_info fci;
     zend_fcall_info_cache fcc;
-    ZEND_PARSE_PARAMETERS_START(1, 1) // min-max
+    ZEND_PARSE_PARAMETERS_START(1, 1)
     Z_PARAM_FUNC(fci, fcc)
     ZEND_PARSE_PARAMETERS_END();
     int action = rapira_rs_handle_request(&fci, &fcc);
@@ -93,7 +94,7 @@ PHP_FUNCTION(rapira_finish_request) {
     if (rapira_finish_output()) { // non-zero == BAILOUT: re-raise so
         zend_bailout(); // rapira_run_handler classifies + 500s + recycles
     }
-    rapira_rs_finish_response(); // commit the response stream to the client now
+    rapira_rs_finish_response();
     RETURN_TRUE;
 }
 
@@ -190,18 +191,21 @@ static void rapira_request_init(void) {
     CG(unclean_shutdown) = 0;
 
 #if defined(ZEND_MAX_EXECUTION_TIMERS) || !defined(ZTS)
-    //  The request body is read (in Rust) as the handler runs, so the handler
-    //  is the
-    //    execution phase: bound it by max_execution_time (the per-cycle capture
-    //    above), not max_input_time. Teardown unsets it, so time spent blocked
-    //    on the job queue is
-    //    never counted. reset_signals=0: with reset_signals, zend_set_timeout
-    //    reinstalls the SIGRTMIN handler + unblocks it on every call (an
-    //    rt_sigaction + rt_sigprocmask syscall per job). Both are already in
-    //    place for this thread: php_request_startup runs zend_set_timeout(...,
-    //    1) at cycle boot, the disposition is process-wide, and nothing
-    //    re-blocks SIGRTMIN between jobs (rapira only blocks INT/TERM). Same
-    //    pattern as the per-request re-arm in php_execute_script (main.c:2630).
+    // The request body is read (in Rust) as the handler runs, so the handler is
+    // the execution phase: bound it by max_execution_time (the per-cycle capture
+    // above), not max_input_time. Teardown unsets it, so time spent blocked on
+    // the job queue is never counted.
+    //
+    // reset_signals=0: with reset_signals, zend_set_timeout reinstalls the
+    // SIGRTMIN handler + unblocks it on every call (an rt_sigaction +
+    // rt_sigprocmask syscall per job). Both are already in place for this thread:
+    // php_request_startup runs zend_set_timeout(..., 1) at cycle boot, the
+    // disposition is process-wide, and nothing re-blocks SIGRTMIN between jobs
+    // (rapira only blocks INT/TERM). Same per-request re-arm as php_execute_script
+    // (main.c:2630).
+    // https://man7.org/linux/man-pages/man7/signal.7.html
+    // https://man7.org/linux/man-pages/man2/sigaction.2.html
+    // https://man7.org/linux/man-pages/man2/sigprocmask.2.html
     if (rapira_job_timeout < 0) {
         rapira_job_timeout = EG(timeout_seconds);
     }
@@ -259,7 +263,6 @@ static void rapira_activate_auto_globals(void) {
     }
     ZEND_HASH_FOREACH_END();
 }
-// handle php sessions
 #ifdef HAVE_PHP_SESSION
 // Worker mode bypasses module RSHUTDOWN, so the session module never flushes/
 // closes an active session between requests - do the work session_rshutdown
@@ -354,9 +357,8 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
                 outcome = EXIT;
                 zend_clear_exception();
             } else {
-                // give set_exception_handler a chance
-                // we use zend_try to protect from the bailout on the exception
-                // in the exception handler
+                // run the userland set_exception_handler; the zend_try guards
+                // against a bailout thrown inside that handler.
                 zend_try_exception_handler();
                 if (EG(exception)) {
                     outcome = THROW;

@@ -12,6 +12,7 @@ use php_sys::{Mode, Rapira};
 // Own binary, own ini: PHPRC is process-global, and zend_test's markers must stay OFF here -
 // printing them perturbs the arena enough to hide the fault. Needs --enable-zend-test;
 // without it the observer API never registers and this degrades to a plain session test.
+// https://github.com/php/php-src/pull/5857
 #[test]
 fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()> {
     let _guard = php_lock_with_ini(Path::new(concat!(

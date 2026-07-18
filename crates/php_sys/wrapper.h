@@ -5,6 +5,7 @@
  * The real compiler never sees it, so neither rewrite touches the shim's own codegen — gating on
  * __clang__ would also fire when cc falls back to clang-cl for the real build, silently changing
  * the shim's ABI (PHP_FUNCTIONs compiled cdecl while the engine calls them __vectorcall).
+ * https://learn.microsoft.com/en-us/cpp/cpp/cdecl
  *
  * 1. zend_operators.h (PHP 8.5+) does overflow-checked math via intsafe.h's LongLongAdd/LongLongSub,
  *    which libclang doesn't declare -> implicit-declaration errors. Take PHP's __builtin_*_overflow
@@ -12,6 +13,7 @@
  *    https://github.com/php/php-src/pull/17472
  *    https://learn.microsoft.com/en-us/windows/win32/api/intsafe/nf-intsafe-longlongadd
  *    https://learn.microsoft.com/en-us/windows/win32/api/intsafe/nf-intsafe-longlongsub
+ *    https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
  * 2. ZEND_FASTCALL = __vectorcall under _MSC_VER makes zif_handler a __vectorcall function pointer.
  *    bindgen 0.72.1 on a stable rust target can't emit `extern "vectorcall"`; it drops the handler
  *    field, so _zend_function_entry / _zend_internal_function generate 8 bytes short and the

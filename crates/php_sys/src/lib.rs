@@ -19,7 +19,8 @@ pub use handler::RapiraHandle;
 pub use start::Rapira;
 pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};
 
-// Zend status codes, which are different on master and 8.5 for example.
+// Zend SUCCESS/FAILURE differ across php-src versions, so they are hardcoded here rather
+// than bound from the headers.
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
 
@@ -39,6 +40,8 @@ unsafe extern "C" {
     pub fn rapira_request_shutdown() -> c_int;
     // C shim (module.c) over rapira_rs_ub_write; raises the client-abort bailout from
     // C so the longjmp doesn't cross the Rust catch_unwind frame.
+    // https://man7.org/linux/man-pages/man3/setjmp.3.html
+    // https://doc.rust-lang.org/std/panic/fn.catch_unwind.html
     pub fn rapira_ub_write(str_: *const std::os::raw::c_char, len: usize) -> usize;
 
     pub fn rapira_run_handler(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> c_int;

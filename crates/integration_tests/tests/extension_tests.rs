@@ -221,8 +221,8 @@ fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A resident extension whose `run` never returns on its own — it only stops when the
-/// host asks it to (the pingora-shaped case).
+/// A long-lived server extension whose `run` never returns on its own — it runs until the
+/// host signals shutdown.
 struct Resident;
 
 static RESIDENT_SHUTDOWN: AtomicBool = AtomicBool::new(false);

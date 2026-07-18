@@ -141,7 +141,6 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) -> WorkerExit {
 /// thread whose `WORKER` thread-local is initialized, inside its active request.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_handle_request(
-    // Safety: not safe
     fci: *mut zend_fcall_info,
     fcc: *mut zend_fcall_info_cache,
 ) -> c_int {
@@ -193,6 +192,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     // every contained bailout recycles: only php_request_shutdown may observe the
     // Zend state a longjmp leaves behind (a live VM stack, a mark-destructed
     // object store, an emalloc arena the executor never unwound)
+    // https://man7.org/linux/man-pages/man3/setjmp.3.html
     let recycle: bool = [outcome, flushed, teardown].contains(&Outcome::Bailout);
     // an uncaught throw is an error response but doesn't need a recycle
     let errored: bool = recycle || outcome == Outcome::Throw;
@@ -257,7 +257,6 @@ fn log_and_clear_last_error() {
                 std::slice::from_raw_parts((*zend_str).val.as_ptr().cast::<u8>(), (*zend_str).len);
             error!("[rapira] last PHP error: {}", String::from_utf8_lossy(msg));
         }
-        // null out the last error message
         rapira_clear_last_error();
     }
 }

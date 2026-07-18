@@ -8,6 +8,7 @@ static PHP_LOCK: Mutex<()> = Mutex::new(());
 static PHP_ENV: Once = Once::new();
 // async sibling of PHP_LOCK for the #[tokio::test] suite — a std guard held across
 // .await trips clippy::await_holding_lock, so the async tests serialize on a tokio mutex.
+// https://rust-lang.github.io/rust-clippy/master/index.html#await_holding_lock
 static PHP_LOCK_ASYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Absolute path to a PHP fixture shipped with this crate (robust to the test's cwd).

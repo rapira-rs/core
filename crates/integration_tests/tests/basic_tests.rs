@@ -661,9 +661,8 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
     Ok(())
 }
 
-// <br />
-// <b>Warning</b>:  worker exiting in <b>integration_tests/fixtures/warn-after-loop-worker.php</b> on line <b>8</b><br />
-// basic_tests-911e2fbb3196c2f2: main.c:2102: core_globals_dtor: Assertion `!core_globals->last_error_message' failed.
+// A post-loop warning left in PG(last_error_message) trips the core_globals_dtor assertion
+// at thread free (main.c:2102).
 #[test]
 fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
     let _guard = php_lock();

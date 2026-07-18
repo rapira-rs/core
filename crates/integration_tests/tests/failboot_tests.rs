@@ -3,9 +3,8 @@ use std::path::Path;
 use integration_tests::{drain, php_lock, req, set_phprc};
 use php_sys::{Mode, Rapira};
 
-// <br />
-// <b>Fatal error</b>:  Directive 'magic_quotes_gpc' is no longer available in PHP in
-// <b>Unknown</b> on line <b>0</b><br />
+// A removed ini directive is a module-startup fatal, which is what makes Rapira::start fail;
+// the follow-up clean-ini start must then run a full module startup.
 #[test]
 fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
     let php = php_lock();

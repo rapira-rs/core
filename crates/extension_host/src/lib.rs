@@ -194,7 +194,7 @@ async fn drive<E: Extension>(
         tokio::pin!(run);
         tokio::select! {
             outcome = &mut run => Some(outcome),
-            // Resolve when the stop flag flips true (or the sender is dropped).
+            // Also resolves if the sender is dropped.
             _ = stop.wait_for(|stopping| *stopping) => None,
         }
     };
@@ -213,9 +213,13 @@ async fn drive<E: Extension>(
 /// handler, so it never replaces a disposition Zend re-installs per request. Call once, in
 /// `main`, before booting PHP. On Windows this is a no-op — the console control handler is
 /// installed later, in `serve`.
+///
+/// https://man7.org/linux/man-pages/man3/sigwait.3.html
+/// https://man7.org/linux/man-pages/man2/sigaction.2.html
 #[cfg(unix)]
 pub fn arm_shutdown_signals() {
     // SAFETY: operates on a stack-owned, freshly-initialized signal set.
+    // https://man7.org/linux/man-pages/man3/pthread_sigmask.3.html
     unsafe {
         let set = shutdown_sigset();
         libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
@@ -242,6 +246,8 @@ unsafe fn shutdown_sigset() -> libc::sigset_t {
 /// Block until a blocked SIGINT/SIGTERM is delivered, then return its number. No timeout: the
 /// caller waits on the signal like a channel receive. `sigwait` is portable across macOS,
 /// Linux, and BSD, unlike `sigtimedwait`, which Darwin lacks.
+///
+/// https://man7.org/linux/man-pages/man2/sigwaitinfo.2.html
 #[cfg(unix)]
 fn wait_shutdown_signal() -> libc::c_int {
     // SAFETY: `set` and `sig` are stack values live for the whole call.
@@ -258,9 +264,9 @@ fn wait_shutdown_signal() -> libc::c_int {
 /// drain. The returned guard tears the watcher down on drop.
 #[cfg(unix)]
 fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
-    // Detached, like Go's signal goroutine: block on the first signal to drain, on the second
-    // to force exit. If the extensions finish on their own the thread stays parked in `sigwait`
-    // and is reclaimed at process exit.
+    // Detached: block on the first signal to drain, on the second to force exit. If the
+    // extensions finish on their own the thread stays parked in `sigwait` and is reclaimed
+    // at process exit.
     std::thread::Builder::new()
         .name("rapira-signal".into())
         .spawn(move || {
@@ -310,9 +316,11 @@ mod win_ctrl {
 
     // Runs on an OS-injected thread (not an async-signal context, so the watch/logger
     // locks are fine) — it only flips the stop channel and returns, no PHP calls.
-    // Only Ctrl-C/Ctrl-Break are trappable for a graceful drain (as in
-    // php-src's win32 handler); CLOSE/LOGOFF/SHUTDOWN terminate on handler return, so they fall
-    // through to the default. A second event forces exit, like the Unix reaper's `exit(130)`.
+    // Only Ctrl-C/Ctrl-Break are trappable for a graceful drain; CLOSE/LOGOFF/SHUTDOWN
+    // terminate on handler return, so they fall through to the default. A second event
+    // forces exit, like the Unix reaper's `exit(130)`.
+    // https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler
+    // https://learn.microsoft.com/en-us/windows/console/handlerroutine
     unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
         match ctrl_type {
             CTRL_C_EVENT | CTRL_BREAK_EVENT => {

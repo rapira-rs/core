@@ -142,8 +142,8 @@ impl ReqC {
 
 /// How far the response has progressed. Monotonic
 /// (`NotSent` → `HeadSent` → `BodyStreamed`), which makes the illegal
-/// "body before head" state unrepresentable and is the single source of truth
-/// for the old `headers_sent`/`body_started` checks.
+/// "body before head" state unrepresentable and replaces separate
+/// `headers_sent`/`body_started` flags with a single source of truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamState {
     /// Nothing recorded yet.
@@ -163,9 +163,8 @@ pub struct Context {
     pub head: Option<ResponseHead>,
     /// Body accumulated by `ub_write` until [`Self::finish`] seals the frame.
     pub body: Vec<u8>,
-    /// Head/body progression.
     pub stream: StreamState,
-    /// True once the handler has returned and we are flushing at teardown, so a
+    /// True once the handler has returned and the teardown flush is running, so a
     /// buffered body pushed out by the teardown flush does not advance `stream` to
     /// `BodyStreamed` — only body written *during* the handler counts as truncation.
     pub tearing_down: bool,

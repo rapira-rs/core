@@ -144,9 +144,6 @@ fn https_server_vars() -> anyhow::Result<()> {
 // classic mode runs userland set_exception_handler for uncaught
 // throwables (zend_execute_scripts); the worker path must do the same. A
 // handled exception is not an error: no 500, no scoreboard error.
-// ----
-// thread 'uncaught_throwable_reaches_exception_handler' (683998) panicked at crates/integration_tests/tests/general_tests.rs:161:5:
-// set_exception_handler must receive the throwable (got: "<br />\n<b>Fatal error</b>:  Uncaught RuntimeException:
 #[test]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -248,16 +245,7 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
     Ok(())
 }
 
-// #[test]
-// fn teardown_from_foreign_thread() -> anyhow::Result<()> {
-//     let _guard = php_lock();
-//     let r = Rapira::start(Mode::Classic, 1)?;
-//     let h = r.handle()?;
-//     assert_eq!(drain(h.handle_blocking(req("/", "hello.php"))?).0, 200);
-//     drop(h);
-//     std::thread::spawn(move || drop(r)).join().unwrap();
-//     Ok(())
-// } <-- this test should not compile due to the PhantomData in Rapira (*const ())
+// Rapira is !Send (PhantomData<*const ()>): tearing it down from a foreign thread does not compile.
 
 #[test]
 fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {

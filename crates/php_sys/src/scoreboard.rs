@@ -42,7 +42,7 @@ pub struct WorkerStat {
 }
 
 pub struct Scoreboard {
-    // we don't know the size
+    // sized at runtime by worker count (Scoreboard::new), so a boxed slice, not a fixed array
     pub workers: Box<[WorkerStat]>,
 }
 

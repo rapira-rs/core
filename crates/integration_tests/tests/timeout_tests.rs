@@ -11,6 +11,8 @@
 //! exists (`ZEND_MAX_EXECUTION_TIMERS`, Linux/FreeBSD-only — needs POSIX timer_create, which Darwin
 //! and Windows lack), so elsewhere the busy-loop fixture would spin forever.
 //! https://github.com/php/php-src/pull/10141
+//! https://man7.org/linux/man-pages/man2/timer_create.2.html
+//! https://man7.org/linux/man-pages/man7/signal.7.html
 #![cfg(not(any(target_os = "macos", target_os = "windows")))]
 
 use integration_tests::{drain, fixture, php_lock_with_ini, req};

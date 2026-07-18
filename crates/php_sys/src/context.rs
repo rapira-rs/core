@@ -49,7 +49,8 @@ pub(crate) fn unbind_server_context() {
 
 pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     let sg = unsafe { &mut *rapira_sg() };
-    // the engine never resets the previous request status (the reset in sapi_activate() is commented out in php-src)
+    // the engine never resets the previous request status (the reset in sapi_activate()
+    // is commented out in php-src, main/SAPI.c:435-437)
     sg.sapi_headers.http_response_code = 200;
     let ri: &mut sapi_request_info = &mut sg.request_info;
     ri.request_method = ctx.c.method.as_ptr();

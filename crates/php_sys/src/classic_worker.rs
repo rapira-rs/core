@@ -10,7 +10,7 @@ use crate::{
     *,
 };
 
-// cgi/fmp like
+// map a script-open failure to an HTTP status: missing -> 404, unreadable -> 403, else 500
 fn status_for_open_error(kind: ErrorKind) -> u16 {
     match kind {
         ErrorKind::NotFound => 404,

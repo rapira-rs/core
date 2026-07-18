@@ -43,9 +43,9 @@ impl Drop for PhpThread {
 }
 
 pub struct Rapira {
-    pub(crate) intake: Option<Sender<Job>>, // producer side
-    workers: Vec<JoinHandle<()>>,           // os threads: execute PHP scripts
-    pub scoreboard: Arc<Scoreboard>,        // shared scoreboard for workers
+    pub(crate) intake: Option<Sender<Job>>,
+    workers: Vec<JoinHandle<()>>,
+    pub scoreboard: Arc<Scoreboard>,
     _not_send: PhantomData<*const ()>, // !Send + !Sync, to prevent dropping from a foreign thread (which would be UB)
 }
 
@@ -130,6 +130,7 @@ impl Drop for Rapira {
         // parking workers in pull_job. Bound the wait and, if a worker is still running, skip
         // the C teardown - php_module_shutdown on a live PHP thread is UB - and let process
         // exit reclaim it.
+        // https://www.php.net/manual/en/info.configuration.php#ini.max-execution-time
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline && workers.iter().any(|w| !w.is_finished()) {
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -160,8 +161,8 @@ fn worker_main(id: usize, board: Arc<Scoreboard>, mode: Mode, rx: JobRx) {
         #[cfg(not(php_zts))]
         unsafe {
             // https://github.com/php/php-src/pull/9104
-            // in NTS, we init module and request on the different threads
-            // so we have to init call stack again
+            // NTS inits module and request on different threads, so the call stack must be
+            // re-initialized here.
             rapira_init_call_stack();
         };
         let exit: WorkerExit = match &mode {

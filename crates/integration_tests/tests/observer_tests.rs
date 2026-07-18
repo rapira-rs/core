@@ -7,6 +7,7 @@ use php_sys::{Mode, Rapira};
 // markers into the response body - so these run in their own process with their own ini,
 // never the shared suite. Requires PHP built with --enable-zend-test; without it the
 // observer API stays disabled and both tests degrade to plain worker runs.
+// https://github.com/php/php-src/pull/5857
 fn observer_lock() -> std::sync::MutexGuard<'static, ()> {
     php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
