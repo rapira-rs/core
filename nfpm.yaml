@@ -1,0 +1,66 @@
+# deb/rpm packaging config for nFPM (https://nfpm.goreleaser.com).
+# Invoked once per {NFPM_ARCH} x {PHP_MINOR} combination by release.yml;
+# nfpm expands ${VAR} from the environment. arch amd64/arm64 maps to
+# rpm x86_64/aarch64 automatically.
+name: "rapira-php${PHP_MINOR}"
+arch: "${NFPM_ARCH}"
+platform: "linux"
+version: "${VERSION}"
+version_schema: "semver"
+release: "1"
+section: "net"
+priority: "optional"
+maintainer: "Valery Piashchynski <TODO@set-real-contact>" # TODO: set the contact you want public in packages
+vendor: "Rotor"
+homepage: "https://github.com/rotor-server/core"
+license: "MIT"
+description: |
+  Rapira — PHP application server.
+  Bundles a thread-safe (ZTS) PHP ${PHP_MINOR} embed runtime (libphp.so,
+  common web extension set) under /usr/lib/rapira.
+# rapira-php8.4 and rapira-php8.5 install identical paths; the
+# provides/conflicts pair on the virtual "rapira" makes them mutually exclusive.
+provides:
+  - "rapira"
+conflicts:
+  - "rapira"
+replaces:
+  - "rapira"
+# nfpm does not env-expand contents.src paths — the workflow stages the
+# arch/php-specific pkgroot at this fixed path before each invocation.
+contents:
+  - src: "./dist/pkgroot-current/usr/bin/rapira"
+    dst: "/usr/bin/rapira"
+    file_info: { mode: 0755 }
+  - src: "./dist/pkgroot-current/usr/lib/rapira/libphp.so"
+    dst: "/usr/lib/rapira/libphp.so"
+    file_info: { mode: 0644 }
+  - src: "./LICENSE"
+    dst: "/usr/share/doc/rapira/LICENSE"
+    file_info: { mode: 0644 }
+  - src: "./README.md"
+    dst: "/usr/share/doc/rapira/README.md"
+    file_info: { mode: 0644 }
+overrides:
+  deb:
+    depends:
+      # built on ubuntu-22.04 (glibc 2.35, pre-t64 package names); the
+      # "pkg | pkgt64" alternatives keep the package installable on 24.04+.
+      - "libc6 (>= 2.35)"
+      - "libgcc-s1"
+      - "libssl3 | libssl3t64"
+      - "libcurl4 | libcurl4t64"
+      - "libxml2 | libxml2t64"
+      - "libsqlite3-0 | libsqlite3-0t64"
+      - "libonig5"
+      - "zlib1g"
+  rpm:
+    depends:
+      - "glibc >= 2.35"
+      - "libgcc"
+      - "openssl-libs"
+      - "libcurl"
+      - "libxml2"
+      - "sqlite-libs"
+      - "oniguruma"
+      - "zlib"
