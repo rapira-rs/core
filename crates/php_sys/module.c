@@ -275,7 +275,11 @@ static void rapira_reset_super_global(void) {
     zval *files = &PG(http_globals)[TRACK_VARS_FILES];
     zval_ptr_dtor(files);
     ZVAL_UNDEF(files);
-    zend_hash_str_del(&EG(symbol_table), "_SESSION", sizeof("_SESSION") - 1);
+    // A top-level $_SESSION is an IS_INDIRECT symbol-table entry aliasing the main frame's CV slot;
+    // plain zend_hash_str_del rips the bucket out without decref'ing through the indirection,
+    // orphaning the live slot. _del_ind follows the indirection (and is a plain delete for a direct
+    // entry), matching the engine's own zend_delete_global_variable.
+    zend_hash_str_del_ind(&EG(symbol_table), "_SESSION", sizeof("_SESSION") - 1);
 }
 // Runs per-request PHP work under a zend_bailout guard. exit()/die() in
 // PHP 8.4+ are not bailouts - they land in EG(exception) as an unwind-exit

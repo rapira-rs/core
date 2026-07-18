@@ -1,5 +1,35 @@
 #ifndef RAPIRA_WRAPPER_H
 #define RAPIRA_WRAPPER_H
+
+/* bindgen/libclang parse ONLY: clang-cl predefines __clang__; the real MSVC cl.exe that compiles
+ * wrapper.c/module.c does not, so neither rewrite touches the shim's own codegen - only what
+ * libclang sees when generating bindings.
+ *
+ * 1. zend_operators.h (PHP 8.5+) does overflow-checked math via intsafe.h's LongLongAdd/LongLongSub,
+ *    which libclang doesn't declare -> implicit-declaration errors. Take PHP's __builtin_*_overflow
+ *    path instead by defining the PHP_HAVE_BUILTIN_* macros the Windows config.w32.h omits.
+ *    https://github.com/php/php-src/pull/17472
+ *    https://learn.microsoft.com/en-us/windows/win32/api/intsafe/nf-intsafe-longlongadd
+ *    https://learn.microsoft.com/en-us/windows/win32/api/intsafe/nf-intsafe-longlongsub
+ * 2. ZEND_FASTCALL = __vectorcall under _MSC_VER makes zif_handler a __vectorcall function pointer.
+ *    bindgen 0.72.1 on a stable rust target can't emit `extern "vectorcall"`; it drops the handler
+ *    field, so _zend_function_entry / _zend_internal_function generate 8 bytes short and the
+ *    layout-test const assert underflows (E0080: 40 - 48). Blank ZEND_FASTCALL for the parse so
+ *    handler is a plain 8-byte extern "C" pointer - identical size, so layout_tests pass for real.
+ *    cl.exe keeps the true __vectorcall for the C shim; nothing in Rust invokes a handler/fastcall.
+ *    https://learn.microsoft.com/en-us/cpp/cpp/vectorcall */
+#if defined(_WIN32) && defined(__clang__)
+#define PHP_HAVE_BUILTIN_SADDL_OVERFLOW 1
+#define PHP_HAVE_BUILTIN_SADDLL_OVERFLOW 1
+#define PHP_HAVE_BUILTIN_SSUBL_OVERFLOW 1
+#define PHP_HAVE_BUILTIN_SSUBLL_OVERFLOW 1
+#define PHP_HAVE_BUILTIN_SMULL_OVERFLOW 1
+#define PHP_HAVE_BUILTIN_SMULLL_OVERFLOW 1
+#include <Zend/zend_portability.h>
+#undef ZEND_FASTCALL
+#define ZEND_FASTCALL
+#endif
+
 // clang-format off
 #include <TSRM/TSRM.h>
 #include <Zend/zend.h>
