@@ -3,6 +3,7 @@ mod macros;
 
 use std::env;
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::Command;
 
 use anyhow::Context;
