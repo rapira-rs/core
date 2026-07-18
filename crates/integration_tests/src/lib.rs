@@ -8,6 +8,7 @@ static PHP_LOCK: Mutex<()> = Mutex::new(());
 static PHP_ENV: Once = Once::new();
 // async sibling of PHP_LOCK for the #[tokio::test] suite — a std guard held across
 // .await trips clippy::await_holding_lock, so the async tests serialize on a tokio mutex.
+// https://rust-lang.github.io/rust-clippy/master/index.html#await_holding_lock
 static PHP_LOCK_ASYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Absolute path to a PHP fixture shipped with this crate (robust to the test's cwd).
@@ -20,6 +21,22 @@ pub fn fixture(name: &str) -> PathBuf {
 pub fn php_lock() -> sync::MutexGuard<'static, ()> {
     init_php_env();
     PHP_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Point PHP at `ini`. PHPRC is process-global and read once per php_module_startup, so a binary
+/// that overrides it must not share its process with tests expecting the suite's php.ini. Taking
+/// the guard by reference proves no other test thread is inside php_module_startup.
+pub fn set_phprc(_php: &sync::MutexGuard<'static, ()>, ini: &Path) {
+    // SAFETY: PHP_LOCK is held for as long as `_php` lives, so nothing reads the environment
+    // concurrently.
+    unsafe { set_var("PHPRC", ini) };
+}
+
+/// `php_lock()` plus a PHPRC override for this whole test binary.
+pub fn php_lock_with_ini(ini: &Path) -> sync::MutexGuard<'static, ()> {
+    let guard = php_lock();
+    set_phprc(&guard, ini);
+    guard
 }
 
 /// Build a minimal `GET` request for `uri`, with `$_SERVER` metadata pointing at `fixture_name`.
@@ -46,16 +63,16 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
     }
 }
 
-/// Drain a response stream to `(status, body)`. Status is 0 if no head frame arrived.
+/// Drain a response to `(status, body)`. Status is 0 if no head was produced
+/// (or the worker died before sealing a frame).
 pub fn drain(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
-    let (mut status, mut body) = (0u16, Vec::new());
-    while let Some(frame) = rx.blocking_recv() {
-        match frame {
-            Frame::Head(h) => status = h.status,
-            Frame::Body(b) => body.extend_from_slice(&b),
-        }
+    match rx.blocking_recv() {
+        Some(f) => (
+            f.head.map_or(0, |h| h.status),
+            String::from_utf8_lossy(&f.body).into_owned(),
+        ),
+        None => (0, String::new()),
     }
-    (status, String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Async sibling of `php_lock` for `#[tokio::test]`.
@@ -64,16 +81,15 @@ pub async fn php_lock_async() -> tokio::sync::MutexGuard<'static, ()> {
     PHP_LOCK_ASYNC.lock().await
 }
 
-/// Async sibling of `drain`: drain a response stream to `(status, body)` inside a runtime.
+/// Async sibling of `drain`: drain a response to `(status, body)` inside a runtime.
 pub async fn drain_async(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
-    let (mut status, mut body) = (0u16, Vec::new());
-    while let Some(frame) = rx.recv().await {
-        match frame {
-            Frame::Head(h) => status = h.status,
-            Frame::Body(b) => body.extend_from_slice(&b),
-        }
+    match rx.recv().await {
+        Some(f) => (
+            f.head.map_or(0, |h| h.status),
+            String::from_utf8_lossy(&f.body).into_owned(),
+        ),
+        None => (0, String::new()),
     }
-    (status, String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Point the embedded PHP at the test php.ini so request-level compile/fatal errors

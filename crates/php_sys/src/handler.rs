@@ -6,15 +6,20 @@ use crate::{
     types::{Context, Frame, Job, Request},
 };
 
-const FRAME_CAP: usize = 16; // before ub_write
+// `Context::finish` seals the response into exactly one frame, so the channel
+// never holds more than one message.
+const FRAME_CAP: usize = 1;
 
 /// A cheaply-cloneable handle for submitting jobs to a running [`Rapira`] pool.
 ///
 /// # Shutdown contract
 /// Every clone holds a copy of the intake `Sender`. Dropping `Rapira` joins all
 /// worker threads after dropping its own `Sender`; the job channel only closes
-/// once every `RapiraHandle` clone has also been dropped. Keeping a clone alive
-/// past the `Rapira` it came from makes `Drop for Rapira` hang forever.
+/// once every `RapiraHandle` clone has also been dropped. A clone kept alive past
+/// its `Rapira` leaves workers parked on the open channel — `Drop for Rapira` then
+/// gives up after a bounded grace and skips the PHP teardown. Drop all handles
+/// first for a clean shutdown.
+#[derive(Clone)]
 pub struct RapiraHandle {
     intake: mpsc::Sender<Job>,
 }
@@ -32,6 +37,8 @@ impl Rapira {
 }
 
 impl RapiraHandle {
+    /// Submit `req`; the sealed response arrives as a single [`Frame`] (a
+    /// channel that closes without one means the worker died).
     pub async fn handle(&self, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
         self.intake

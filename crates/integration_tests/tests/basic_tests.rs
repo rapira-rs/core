@@ -156,14 +156,15 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
         "buffered body is lost to the bailout (got: {b2:?})"
     );
 
-    // worker survived the teardown bailout; counter 1 -> 2 (bail) -> 3
+    // the teardown bailout recycles the worker: full php_request_shutdown +
+    // re-run bootstrap — statics reset, so the counter starts over
     assert_eq!(
         s3, 200,
         "worker must recover after a teardown bailout (got {s3})"
     );
     assert!(
-        b3.contains("ok counter=3"),
-        "worker must survive the teardown bailout and serve the next request (got: {b3:?})"
+        b3.contains("ok counter=1"),
+        "recycle re-runs the bootstrap; statics reset (got: {b3:?})"
     );
 
     drop(h);
@@ -397,6 +398,56 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
 }
 
 #[test]
+fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("shutdown-fatal-worker.php")), 1)?;
+    let h = r.handle()?;
+    // the shutdown-fn fatal bails in php_call_shutdown_functions -> recycle
+    let _ = drain(h.handle_blocking(req("/?boom=1", "shutdown-fatal-worker.php"))?);
+    let (s2, _) = drain(h.handle_blocking(req("/", "shutdown-fatal-worker.php"))?); // recovered
+    drop(h);
+    let snap = r.scoreboard();
+    r.shutdown();
+
+    assert_eq!(s2, 200, "worker recovers after the recycle");
+    assert_eq!(snap.handled, 2, "both jobs handled");
+    assert!(
+        snap.recycles >= 1,
+        "the shutdown-fn fatal must recycle the worker (recycles={})",
+        snap.recycles
+    );
+    assert_eq!(snap.workers.len(), 1);
+    assert!(
+        snap.workers[0].recycles >= 1,
+        "the recycle must be attributed to the worker"
+    );
+    Ok(())
+}
+
+#[test]
+fn scoreboard_aggregates_across_workers() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("worker.php")), 3)?; // 3 threads => 3 WorkerStats
+    if r.scoreboard().workers.len() < 3 {
+        // NTS build: forced to a single worker, nothing to aggregate
+        r.shutdown();
+        return Ok(());
+    }
+    let h = r.handle()?;
+    for i in 0..9 {
+        let (s, _) = drain(h.handle_blocking(req(&format!("/?i={i}"), "worker.php"))?);
+        assert_eq!(s, 200, "request {i}");
+    }
+    drop(h);
+    let snap = r.scoreboard();
+    r.shutdown();
+
+    assert_eq!(snap.workers.len(), 3, "one WorkerStat per thread");
+    assert_eq!(snap.handled, 9, "aggregate handled == total requests");
+    Ok(())
+}
+
+#[test]
 fn scoreboard_counts_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic, 1)?;
@@ -519,6 +570,176 @@ fn status_code_does_not_leak_classic() -> anyhow::Result<()> {
     assert_eq!(
         s2, 200,
         "classic mode reuses SG on the thread; 404 must not leak"
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_finish_request_header_only() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(
+        Mode::Worker(fixture("finish-request-headers-worker.php")),
+        1,
+    )?;
+    let h = r.handle()?;
+    let (status, body) = drain(h.handle_blocking(req("/", "finish-request-headers-worker.php"))?);
+    drop(h);
+    r.shutdown();
+    assert_eq!(status, 302);
+    assert!(body.is_empty());
+    Ok(())
+}
+
+#[test]
+fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("gc-protect-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (_, b1) = drain(h.handle_blocking(req("/?seed=1", "gc-protect-worker.php"))?);
+    assert!(
+        b1.contains("seeded"),
+        "req1 seeds + bails in teardown (got {b1:?})"
+    );
+    // Smoke coverage, not a strict guard for module.c's unconditional gc_protect(0):
+    // every bailout recycles, and the recycle's php_request_startup resets
+    // gc_protected before this request can observe it (so req2 would pass regardless).
+    let (_, b2) = drain(h.handle_blocking(req("/?probe=1", "gc-protect-worker.php"))?);
+    assert!(
+        b2.contains("unprotected"),
+        "worker recovers from a teardown bailout with GC unprotected (got {b2:?})"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+#[test]
+fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("last-error-worker.php")), 1)?;
+    let h = r.handle()?;
+    // req1 raises a non-fatal warning (does NOT bail, so no recycle masks the reset)
+    let (_, b1) = drain(h.handle_blocking(req("/?step=warn", "last-error-worker.php"))?);
+    assert!(b1.contains("warned"), "req1 warns (got {b1:?})");
+    // req2 must see a cleared last error (rapira_clear_last_error between jobs)
+    let (_, b2) = drain(h.handle_blocking(req("/", "last-error-worker.php"))?);
+    assert_eq!(
+        b2, "clean",
+        "error_get_last() must reset between jobs (got {b2:?})"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+#[test]
+fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() -> anyhow::Result<()>
+{
+    let _guard = php_lock();
+    let tmp = std::env::temp_dir();
+    let pid = std::process::id();
+    let sentinel = tmp.join(format!("rapira_h2_sentinel_{pid}"));
+    let boot = tmp.join(format!("rapira_h2_boot_{pid}"));
+    let _ = std::fs::remove_file(&sentinel);
+    let _ = std::fs::remove_file(&boot);
+
+    let r = Rapira::start(Mode::Worker(fixture("h2-boot-bail-worker.php")), 1)?;
+    let h = r.handle()?;
+    // The bootstrap's session save handler fatals on the first-call teardown flush.
+    // Before the fix that bailout was swallowed and the job served in cycle 1 (count
+    // "1"); after the fix it recycles, so the worker re-bootstraps and serves in
+    // cycle 2 (count "2").
+    let (_, body) = drain(h.handle_blocking(req("/", "h2-boot-bail-worker.php"))?);
+    assert_eq!(
+        body, "2",
+        "first-call teardown bailout must recycle + re-bootstrap, not serve in cycle 1 (got {body:?})"
+    );
+    drop(h);
+    r.shutdown();
+    let _ = std::fs::remove_file(&sentinel);
+    let _ = std::fs::remove_file(&boot);
+    Ok(())
+}
+
+// A post-loop warning left in PG(last_error_message) trips the core_globals_dtor assertion
+// at thread free (main.c:2102).
+#[test]
+fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("warn-after-loop-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (status, body) = drain(h.handle_blocking(req("/", "warn-after-loop-worker.php"))?);
+    assert_eq!((status, body.as_str()), (200, "ok"));
+    drop(h);
+    r.shutdown(); // drop(r) joins the worker; the post-loop warning must be cleared before ts_free_thread
+    Ok(())
+}
+
+#[test]
+fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("filter-leak-worker.php")), 1)?;
+    let h = r.handle()?;
+    let mem = |b: String| -> i64 {
+        b.trim()
+            .strip_prefix("mem=")
+            .and_then(|s| s.parse().ok())
+            .expect("mem= output")
+    };
+    let (_, first) = drain(h.handle_blocking(req("/?x=warmup", "filter-leak-worker.php"))?);
+    if first.trim() == "skip" {
+        drop(h);
+        r.shutdown();
+        return Ok(()); // PHP built without ext/filter
+    }
+    for i in 0..5 {
+        let _ = drain(h.handle_blocking(req(&format!("/?x=w{i}"), "filter-leak-worker.php"))?);
+    }
+    let m1 = mem(drain(h.handle_blocking(req("/?x=base", "filter-leak-worker.php"))?).1);
+    for i in 0..200 {
+        let _ = drain(h.handle_blocking(req(&format!("/?x=v{i}"), "filter-leak-worker.php"))?);
+    }
+    let m2 = mem(drain(h.handle_blocking(req("/?x=end", "filter-leak-worker.php"))?).1);
+    let leaked = m2 - m1;
+    assert!(
+        leaked < 32 * 1024,
+        "raw input copies must not accumulate across jobs; {leaked} bytes grown (~90KB pre-fix)"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+#[test]
+fn worker_finish_request_flush_bailout_recycles() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(
+        Mode::Worker(fixture("finish-request-bailout-worker.php")),
+        1,
+    )?;
+    let h = r.handle()?;
+    let (s1, b1) = drain(h.handle_blocking(req("/?boom=0", "finish-request-bailout-worker.php"))?);
+    let (s2, b2) = drain(h.handle_blocking(req("/?boom=1", "finish-request-bailout-worker.php"))?);
+    let (s3, b3) = drain(h.handle_blocking(req("/?boom=0", "finish-request-bailout-worker.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(s1, 200);
+    assert!(b1.contains("ok counter=1"), "req1 baseline (got: {b1:?})");
+    // headers were never sent, so the classified job commits a 500 head; a
+    // swallowed bailout closes the stream with no head at all (status 0)
+    assert_eq!(
+        s2, 500,
+        "fatal during the finish_request flush must commit a 500 (got {s2}, {b2:?})"
+    );
+    assert!(
+        !b2.contains("resumed-after-fatal"),
+        "script must not resume past the bailout (got: {b2:?})"
+    );
+    assert_eq!(s3, 200, "worker must recover (got {s3})");
+    assert!(
+        b3.contains("ok counter=1"),
+        "recycle resets statics (got: {b3:?})"
     );
     Ok(())
 }

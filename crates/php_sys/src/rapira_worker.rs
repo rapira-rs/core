@@ -1,68 +1,137 @@
 use log::error;
 
-use crate::{callbacks::send_error_head, scoreboard::sb_record, *};
-use std::{cell::RefCell, path::PathBuf};
+use crate::{callbacks::*, scoreboard::sb_update, start::pull_job, types::Outcome};
+use std::{
+    cell::RefCell,
+    os::raw::c_int,
+    path::{Path, PathBuf},
+};
 
 use crate::{
-    TRACK_VARS_FILES,
     callbacks::guard,
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
-    php_output_activate, php_request_shutdown, php_request_startup, rapira_eg, rapira_pg,
-    rapira_run_handler, sapi_activate,
+    php_request_startup, rapira_pg, rapira_run_handler,
     start::JobRx,
     types::Job,
-    zend_fcall_info, zend_fcall_info_cache, zend_hash_str_del, zval_ptr_dtor,
+    zend_fcall_info, zend_fcall_info_cache, *,
 };
 
 thread_local! {
     static WORKER: RefCell<Option<WorkerChan>> = const { RefCell::new(None) };
 }
 
+const UNHEALTHY_AFTER: u32 = 5;
+
+enum Cycle {
+    Stop,    // intake channel closed (Rapira dropped) - the only way a worker exits
+    Recycle, // a job bailed - re-bootstrap immediately
+    Failed,  // startup or bootstrap fatal - 503 one queued job, then retry the boot
+    Restart, // php_request_shutdown bailed - rebuild the PHP thread state
+}
+
+pub enum WorkerExit {
+    Closed,  // intake channel closed - worker_main exits the thread
+    Restart, // worker_main drops PhpThread and builds a fresh one
+}
+
+// What the C `rapira_handle_request` does after a worker-loop turn. Keep in sync with module.c.
+#[repr(i32)]
+enum HandleAction {
+    Stop = 0,     // clean loop exit (intake channel closed) -> RETURN_BOOL(false)
+    Continue = 1, // job served, keep looping -> RETURN_BOOL(true)
+    Recycle = 2,  // a bailout occurred -> C raises zend_bailout to unwind the resident script
+}
+
 struct WorkerChan {
     rx: JobRx,
     first_call: bool,
+    recycle: bool,
 }
 
-pub fn rapira_worker(script: PathBuf, rx: JobRx) {
-    WORKER.with_borrow_mut(|w: &mut Option<WorkerChan>| {
-        *w = Some(WorkerChan {
-            rx,
-            first_call: true,
+fn worker_recycle() -> bool {
+    WORKER.with_borrow(|w| w.as_ref().is_some_and(|wc| wc.recycle))
+}
+
+fn set_worker_recycle() {
+    WORKER.with_borrow_mut(|w| {
+        if let Some(wc) = w.as_mut() {
+            wc.recycle = true;
+        }
+    });
+}
+
+fn run_cycle(script: &Path) -> Cycle {
+    let started = unsafe { php_request_startup() } == SUCCESS;
+    if !started {
+        error!("[rapira] php_request_startup() failed");
+    }
+    let completed = started && unsafe { run_script(script) };
+
+    let recycle = WORKER.with_borrow_mut(|w| {
+        w.as_mut().is_some_and(|wc| {
+            wc.first_call = true; // next cycle re-runs the bootstrap
+            std::mem::take(&mut wc.recycle)
         })
     });
 
-    unsafe {
-        match php_request_startup() {
-            FAILURE => {
-                error!("[rapira] rapira_worker() failed to start request");
-                sb_record(true);
-            }
-            SUCCESS => {
-                // all should fail if not ok
-                // TODO: startup algorithm should be more robust
-                let ok: bool = run_script(&script); // blocks in while(rapira_handle_request)) in PHP
-                if !ok {
-                    error!(
-                        "[rapira] rapira_worker() failed to run script: {:?}",
-                        script
-                    );
+    // php_request_shutdown frees PG(last_error_message) (main.c:2024) —
+    // log the bootstrap fatal before it disappears
+    log_and_clear_last_error();
+    if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
+        // the retry reclaimed the request, but the bailed observer walk skipped
+        // end handlers — per-thread extension state is suspect, rebuild it
+        error!("[rapira] php_request_shutdown() bailed; restarting the PHP thread");
+        sb_update(scoreboard::Event::Restart);
+        return Cycle::Restart;
+    }
+
+    if completed && !recycle {
+        Cycle::Stop
+    } else if recycle {
+        Cycle::Recycle
+    } else {
+        Cycle::Failed
+    }
+}
+
+pub fn rapira_worker(script: PathBuf, rx: JobRx) -> WorkerExit {
+    WORKER.with_borrow_mut(|w| {
+        *w = Some(WorkerChan {
+            rx: rx.clone(),
+            first_call: true,
+            recycle: false,
+        })
+    });
+
+    let mut failures: u32 = 0;
+    let exit = loop {
+        match run_cycle(&script) {
+            Cycle::Stop => break WorkerExit::Closed,
+            Cycle::Restart => break WorkerExit::Restart,
+            Cycle::Recycle => failures = 0,
+            Cycle::Failed => {
+                failures += 1;
+                if failures == UNHEALTHY_AFTER {
+                    error!("[rapira] worker keeps failing to boot; flagged unhealthy");
+                    sb_update(scoreboard::Event::Unhealthy);
                 }
-            }
-            _ => {
-                error!("[rapira] rapira_worker() unexpected php_request_startup() result");
-                sb_record(true);
+                // Can't run PHP. Answer one queued job with 503, then loop to
+                // retry the boot (demand-driven — no jobs means we block cheaply
+                // here). None == Rapira dropped: exit instead of hanging Drop.
+                match pull_job(&rx) {
+                    None => break WorkerExit::Closed,
+                    Some(mut job) => {
+                        send_error_head(&mut job.ctx, 503);
+                        job.ctx.finish(false);
+                        sb_update(scoreboard::Event::Handled(true));
+                    }
+                }
             }
         }
     };
-
-    if WORKER.with_borrow(|w: &Option<WorkerChan>| {
-        w.as_ref().is_some_and(|wc: &WorkerChan| wc.first_call)
-    }) {
-        unsafe {
-            php_request_shutdown(std::ptr::null_mut());
-        }
-    }
+    log_and_clear_last_error();
+    exit
 }
 
 /// # Safety
@@ -71,118 +140,123 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) {
 /// `Z_PARAM_FUNC` and remain valid for the call. Must run on the resident worker
 /// thread whose `WORKER` thread-local is initialized, inside its active request.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_handle_request(
-    // Safety: not safe
+pub extern "C" fn rapira_rs_handle_request(
     fci: *mut zend_fcall_info,
     fcc: *mut zend_fcall_info_cache,
-) -> bool {
-    guard(false, || handle_request_impl(fci, fcc))
+) -> c_int {
+    // A caught Rust panic recycles (rebuild over a suspect thread), never silently continues.
+    let action = guard(HandleAction::Recycle, || handle_request_impl(fci, fcc));
+    // A caught panic in handle_request_impl skips its unbind_server_context, leaving
+    // SG(server_context) dangling to the freed job; run_cycle's php_request_shutdown
+    // would then flush output through it. Clear it here (idempotent on the normal
+    // path, which already unbound).
+    unbind_server_context();
+    action as c_int
 }
 
-fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> bool {
+fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> HandleAction {
     let Some(mut job) = next_job() else {
-        return false;
+        // None is terminal: next_job set wc.recycle on a first-call teardown bailout (unwind the
+        // script), else the intake channel closed (clean stop).
+        return if worker_recycle() {
+            HandleAction::Recycle
+        } else {
+            HandleAction::Stop
+        };
     };
 
     bind_server_context(&mut job.ctx);
-    let errored = unsafe {
-        let mut err = false;
+    unsafe {
         populate_request_context(&mut job.ctx);
         rapira_release_temporary_streams();
-        php_output_activate();
-        sapi_activate();
-        rapira_request_init();
-        reset_super_globals();
-        rapira_activate_auto_globals();
-        let h_outcome: types::Outcome = rapira_run_handler(fci, fcc);
-        if matches!(h_outcome, types::Outcome::Bailout | types::Outcome::Throw) {
-            send_error_head(&mut job.ctx, 500);
-            err = true;
-        }
-        let t_outcome: types::Outcome = rapira_request_teardown();
-        if matches!(t_outcome, types::Outcome::Bailout) {
-            error!(
-                "[rapira] rapira_request_teardown() bailed {},{}",
-                job.ctx.req.method, job.ctx.req.uri
-            );
-            err = true;
-        }
-        err
+    }
+
+    let mut outcome = Outcome::from_c(unsafe { rapira_request_activate() });
+    if outcome != Outcome::Bailout {
+        outcome = Outcome::from_c(unsafe { rapira_run_handler(fci, fcc) });
+    }
+
+    // The handler has returned: from here every ub_write is a teardown flush, not
+    // streaming, so mark the context tearing down before flushing. This freezes
+    // `stream` — a buffered body pushed out now stays a complete response; only body
+    // streamed *during* the handler counts as truncated (see `Context::is_truncated`).
+    job.ctx.tearing_down = true;
+    // the real head (status, cookies, php_error_cb's 500) lives in
+    // SG(sapi_headers); teardown destroys it — flush first
+    let flushed = match outcome {
+        Outcome::Bailout | Outcome::Throw => Outcome::from_c(unsafe { rapira_finish_output() }),
+        _ => Outcome::Ok,
     };
+    let teardown: Outcome = Outcome::from_c(unsafe { rapira_request_teardown() });
+
+    // every contained bailout recycles: only php_request_shutdown may observe the
+    // Zend state a longjmp leaves behind (a live VM stack, a mark-destructed
+    // object store, an emalloc arena the executor never unwound)
+    // https://man7.org/linux/man-pages/man3/setjmp.3.html
+    let recycle: bool = [outcome, flushed, teardown].contains(&Outcome::Bailout);
+    // an uncaught throw is an error response but doesn't need a recycle
+    let errored: bool = recycle || outcome == Outcome::Throw;
+    let truncated: bool = finalize_response(&mut job.ctx, errored);
 
     log_and_clear_last_error();
     unbind_server_context();
-    sb_record(errored);
-    job.ctx.finish();
-    true
+    sb_update(scoreboard::Event::Handled(errored));
+    if recycle {
+        sb_update(scoreboard::Event::Recycled);
+        set_worker_recycle();
+    }
+    job.ctx.finish(truncated);
+    // Recycle tells C to zend_bailout so no PHP runs over the post-longjmp state; the response was
+    // already sealed by job.ctx.finish() above. Continue keeps the resident loop going.
+    if recycle {
+        HandleAction::Recycle
+    } else {
+        HandleAction::Continue
+    }
 }
 
+// worker-mode wrapper, still called from inside the PHP loop (via rapira_handle_request):
 fn next_job() -> Option<Job> {
-    WORKER.with_borrow_mut(|w: &mut Option<WorkerChan>| {
+    WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;
         // first iteration: clean up whatever php_request_startup()'s bootstrap
         // left before serving real requests — there's no prior request yet
         if std::mem::take(&mut wc.first_call) {
-            unsafe {
-                let outcome: types::Outcome = rapira_request_teardown();
-                if matches!(outcome, types::Outcome::Bailout) {
-                    error!("[rapira] rapira_request_teardown() failed on first call");
-                }
+            let outcome = Outcome::from_c(unsafe { rapira_request_teardown() });
+            if outcome == Outcome::Bailout {
+                // only php_request_shutdown reclaims the state a longjmp left behind
+                // (php-src main.c) - recycle instead of serving on top of it
+                error!("[rapira] rapira_request_teardown() bailed on first call; recycling");
+                wc.recycle = true;
+                return None;
             }
+            sb_update(scoreboard::Event::Healthy);
         }
-
         log_and_clear_last_error();
-        match wc.rx.lock() {
-            Ok(mut job) => job.blocking_recv(),
-            Err(err) => {
-                error!("[rapira] next_job() failed to lock worker channel: {err}");
-                None
-            }
-        }
+        pull_job(&wc.rx)
     })
 }
 
 /// # Safety
-/// Invoked from C (the `rapira_finish_request` PHP function). Must run on a worker
-/// thread inside an active request whose `Context` is bound in `SG(server_context)`;
-/// it flushes output and finishes the response stream.
+/// Called from C (`rapira_finish_request`). Must run on a worker thread inside an
+/// active request whose `Context` is bound in `SG(server_context)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_finish_request() {
-    guard((), || {
-        unsafe {
-            let outcome = rapira_finish_output();
-            if matches!(outcome, types::Outcome::Bailout) {
-                log::error!("[rapira] rapira_finish_output() bailed");
-            }
+pub extern "C" fn rapira_rs_finish_response() {
+    guard((), || unsafe {
+        if let Some(c) = ctx() {
+            c.finish(false);
         }
-        unsafe {
-            if let Some(c) = ctx() {
-                c.finish();
-            }
-        };
-    })
-}
-
-unsafe fn reset_super_globals() {
-    let files: &mut crate::_zval_struct =
-        unsafe { &mut (*rapira_pg()).http_globals[TRACK_VARS_FILES as usize] };
-    unsafe {
-        zval_ptr_dtor(files);
-        *files = std::mem::zeroed();
-        let _ = zend_hash_str_del(&mut (*rapira_eg()).symbol_table, c"_SESSION".as_ptr(), 8);
-    }
+    });
 }
 
 fn log_and_clear_last_error() {
     unsafe {
         let zend_str = (*rapira_pg()).last_error_message;
-        if zend_str.is_null() {
-            return;
+        if !zend_str.is_null() {
+            let msg =
+                std::slice::from_raw_parts((*zend_str).val.as_ptr().cast::<u8>(), (*zend_str).len);
+            error!("[rapira] last PHP error: {}", String::from_utf8_lossy(msg));
         }
-        let msg =
-            std::slice::from_raw_parts((*zend_str).val.as_ptr().cast::<u8>(), (*zend_str).len);
-        error!("[rapira] last PHP error: {}", String::from_utf8_lossy(msg));
-        // null out the last error message
         rapira_clear_last_error();
     }
 }

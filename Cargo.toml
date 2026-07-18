@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 
+[[bin]]
+name = "rapira"
+path = "src/main.rs"
+
 
 [workspace]
 members = ["crates/*"]
@@ -12,17 +16,28 @@ members = ["crates/*"]
 anyhow = "1"
 log = { version = "0.4", features = ["std"] }
 php_sys = { path = "crates/php_sys" }
+extension_host = { path = "crates/extension_host" }
+extension_api = { git = "https://github.com/rapira-rs/extensions_api.git", branch = "main" }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 
 [workspace.package]
-rust-version = "1.96.1"
+rust-version = "1.97.1"
 
 [workspace.lints.clippy]
 all = "warn"
 
+[profile.release]
+# Cross-crate LTO + single codegen unit: the hot path spans pingora/tokio/plugin
+# crates, and the per-request cost is spread across many small cross-crate calls.
+# NOTE: panic stays "unwind" — php_sys contains bailouts with catch_unwind.
+lto = "thin"
+codegen-units = 1
+
 [dependencies]
 anyhow = { workspace = true }
-log = { workspace = true, features = ["std"] }
+clap = { version = "4", features = ["derive", "env"] }
+extension_host = { workspace = true }
 php_sys = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+rapira_http = { git = "https://github.com/rapira-rs/http.git", branch = "main" }
+mimalloc = "0.1"

@@ -30,15 +30,29 @@ pub(crate) fn bind_server_context(ctx: &mut Context) {
 
 pub(crate) fn unbind_server_context() {
     unsafe {
-        (*rapira_sg()).server_context = null_mut();
+        let sg = &mut *rapira_sg();
+        sg.server_context = null_mut();
+        // populate_request_context / read_cookies point these at the bound job.ctx's CStrings;
+        // rapira_request_teardown (module.c) normally NULLs them, but a Rust panic can recycle
+        // before teardown runs, dropping job.ctx while they still dangle. Clearing here on every
+        // unbind (idempotent once teardown already cleared them) keeps a later
+        // php_request_shutdown off freed memory.
+        let ri = &mut sg.request_info;
+        ri.request_method = null();
+        ri.query_string = null_mut();
+        ri.request_uri = null_mut();
+        ri.path_translated = null_mut();
+        ri.content_type = null();
+        ri.cookie_data = null_mut();
     }
 }
 
 pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     let sg = unsafe { &mut *rapira_sg() };
-    // the engine never resets the previous request status (the reset in sapi_activate() is commented out in php-src)
+    // the engine never resets the previous request status (the reset in sapi_activate()
+    // is commented out in php-src, main/SAPI.c:435-437)
     sg.sapi_headers.http_response_code = 200;
-    let ri: &mut sapi_request_info = unsafe { &mut (*rapira_sg()).request_info };
+    let ri: &mut sapi_request_info = &mut sg.request_info;
     ri.request_method = ctx.c.method.as_ptr();
     ri.query_string = ctx.c.query.as_ptr() as *mut c_char;
     ri.request_uri = ctx.c.uri.as_ptr() as *mut c_char;
@@ -55,6 +69,13 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
 
     // auth → $_SERVER[PHP_AUTH_USER|PHP_AUTH_PW|PHP_AUTH_DIGEST].
     // php-src parses the header and estrndup's the values into SG(request_info),
-    // so sapi_deactivate_module -> efree auth
-    unsafe { php_handle_auth_data(ctx.c.authorization.as_ptr()) };
+    // so sapi_deactivate_module -> efree auth. NULL-safe (main.c guards `auth`).
+    unsafe {
+        php_handle_auth_data(
+            ctx.c
+                .authorization
+                .as_ref()
+                .map_or(null(), |auth| auth.as_ptr()),
+        )
+    };
 }

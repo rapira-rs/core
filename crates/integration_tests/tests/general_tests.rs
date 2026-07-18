@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use integration_tests::{drain, fixture, php_lock, req};
-use php_sys::{Frame, Mode, Rapira, Request};
+use php_sys::{Mode, Rapira, Request};
 
 /// Body source returning at most one byte per read() call — legal `Read`
 /// behavior that streaming bodies (pipes, chunked decoders) exhibit.
@@ -62,11 +62,9 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("abort-worker.php")), 1)?;
     let h = r.handle()?;
 
-    // 64 chunks through the 16-slot frame channel: the worker blocks in
-    // blocking_send, then fails it when the receiver goes away
-    let mut rx = h.handle_blocking(req("/", "abort-worker.php"))?;
-    let _head = rx.blocking_recv(); // response is live
-    drop(rx); // client disconnects
+    // Drop the receiver before the fixture's first write (it sleeps to hand us
+    // the window): the write then observes the closed channel and aborts.
+    drop(h.handle_blocking(req("/", "abort-worker.php"))?); // client disconnects
 
     let (s2, b2) = drain(h.handle_blocking(req("/?probe=1", "abort-worker.php"))?);
     drop(h);
@@ -146,9 +144,6 @@ fn https_server_vars() -> anyhow::Result<()> {
 // classic mode runs userland set_exception_handler for uncaught
 // throwables (zend_execute_scripts); the worker path must do the same. A
 // handled exception is not an error: no 500, no scoreboard error.
-// ----
-// thread 'uncaught_throwable_reaches_exception_handler' (683998) panicked at crates/integration_tests/tests/general_tests.rs:161:5:
-// set_exception_handler must receive the throwable (got: "<br />\n<b>Fatal error</b>:  Uncaught RuntimeException:
 #[test]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -174,9 +169,9 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     Ok(())
 }
 
-// exactly one Head frame per response. With display_errors=0 an uncaught
-// throw produces no output before the error path, so the rust-side 500 head
-// and the teardown header flush must not both emit one.
+// exactly one head per response. With display_errors=0 an uncaught throw
+// produces no output before the error path, so the rust-side 500 head and the
+// teardown header flush must not fight over it (first write wins).
 #[test]
 fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -184,20 +179,18 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let h = r.handle()?;
 
     let mut rx = h.handle_blocking(req("/", "throw-quiet-worker.php"))?;
-    let (mut heads, mut status) = (0u32, 0u16);
-    while let Some(frame) = rx.blocking_recv() {
-        if let Frame::Head(head) = frame {
-            heads += 1;
-            status = head.status;
-        }
-    }
+    let frame = rx.blocking_recv().expect("worker must seal a response");
+    assert!(
+        rx.blocking_recv().is_none(),
+        "exactly one frame per response"
+    );
     drop(h);
     r.shutdown();
 
-    assert_eq!(status, 500, "uncaught throw with display_errors=0 is a 500");
+    let head = frame.head.expect("error response must record a head");
     assert_eq!(
-        heads, 1,
-        "exactly one head frame per response (got {heads})"
+        head.status, 500,
+        "uncaught throw with display_errors=0 is a 500"
     );
     Ok(())
 }
@@ -228,6 +221,118 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
         sid(&b1),
         sid(&b2),
         "a bailing save handler must not leave the previous session active (b1={b1:?}, b2={b2:?})"
+    );
+    Ok(())
+}
+
+#[test]
+fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(
+        Mode::Worker(fixture("fatal-exception-handler-worker.php")),
+        1,
+    )?;
+    let h = r.handle()?;
+    let (s1, _) = drain(h.handle_blocking(req("/", "fatal-exception-handler-worker.php"))?);
+    assert!(s1 == 200, "req1 must return a head, not hang (got {s1})");
+    let (s2, _) = drain(h.handle_blocking(req("/", "fatal-exception-handler-worker.php"))?);
+    assert!(
+        s2 == 200 || s2 == 500,
+        "worker must survive and serve req2 (got {s2})"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// Rapira is !Send (PhantomData<*const ()>): tearing it down from a foreign thread does not compile.
+
+#[test]
+fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("stuck-flag-worker.php")), 1)?;
+    let h = r.handle()?;
+    // req1: fatal inside the include-wrapper -> bailout strands in_user_include (returning proves no hang)
+    let _ = drain(h.handle_blocking(req("/?step=boom", "stuck-flag-worker.php"))?);
+    // Smoke coverage, not a strict guard for module.c's PG(in_user_include)=0: the
+    // req1 bailout forces a recycle whose php_request_startup already re-zeroes the
+    // flag, so req2 would pass even if that reset were reverted.
+    let (_, b2) = drain(h.handle_blocking(req("/", "stuck-flag-worker.php"))?);
+    assert!(
+        b2.contains("PROBE_OK"),
+        "worker recovers; data:// is not rejected as an include (got {b2:?})"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+#[test]
+fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("fatal-backtrace-worker.php")), 1)?;
+    let h = r.handle()?;
+    let mem = |b: String| -> i64 {
+        b.trim()
+            .strip_prefix("mem=")
+            .and_then(|s| s.parse().ok())
+            .expect("mem= output")
+    };
+    let b0 = mem(drain(h.handle_blocking(req("/?step=probe", "fatal-backtrace-worker.php"))?).1);
+    // consumed fatal: execution continues, frame unwinds, backtrace is the sole ref to the 20MB
+    let (_, boom) = drain(h.handle_blocking(req("/?step=boom", "fatal-backtrace-worker.php"))?);
+    assert!(
+        boom.contains("boomed"),
+        "error consumed + execution continued (got {boom:?})"
+    );
+    let leaked =
+        mem(drain(h.handle_blocking(req("/?step=probe", "fatal-backtrace-worker.php"))?).1) - b0;
+    assert!(
+        leaked < 5 * 1024 * 1024,
+        "fatal backtrace must be freed between jobs; {leaked} bytes still pinned (~20MB pre-fix)"
+    );
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+#[test]
+fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("shutdown-fatal-worker.php")), 1)?;
+    let h = r.handle()?;
+    let (_, b1) = drain(h.handle_blocking(req("/?boom=1", "shutdown-fatal-worker.php"))?);
+    let (s2, b2) = drain(h.handle_blocking(req("/", "shutdown-fatal-worker.php"))?);
+    drop(h);
+    r.shutdown();
+    assert!(b1.contains("ok counter=1"), "req1 baseline (got: {b1:?})");
+    assert_eq!(s2, 200, "worker must survive (got {s2})");
+    assert!(
+        b2.contains("ok counter=1"),
+        "fatal in shutdown fn must recycle, resetting statics (got: {b2:?})"
+    );
+    Ok(())
+}
+
+#[test]
+fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("abort-ignore-worker.php")), 1)?;
+    let h = r.handle()?;
+    // Drop the receiver before the fixture's write (it sleeps to hand us the
+    // window): the write observes the closed channel and raises the abort.
+    drop(h.handle_blocking(req("/", "abort-ignore-worker.php"))?); // client disconnects
+    let (s2, b2) = drain(h.handle_blocking(req("/?probe=1", "abort-ignore-worker.php"))?);
+    drop(h);
+    r.shutdown();
+    assert_eq!(s2, 200, "worker must survive the ignored abort");
+    assert!(
+        b2.contains("reached=1"),
+        "work after disconnect must still run (got: {b2:?})"
+    );
+    assert!(
+        b2.contains("aborted=0"),
+        "connection status must reset (got: {b2:?})"
     );
     Ok(())
 }
