@@ -125,23 +125,20 @@ impl Drop for Rapira {
         self.intake = None;
         let workers: Vec<JoinHandle<()>> = std::mem::take(&mut self.workers);
 
-        // macOS/Windows can't enforce a per-request hard timeout (Zend's per-thread timer is
-        // Linux/FreeBSD-only), so a runaway request would block join() forever. Bound the wait
-        // there and, if a worker is still spinning, skip the C teardown - php_module_shutdown on a
-        // live PHP thread is UB - and let process exit reclaim it. On Linux the timer bounds every
-        // request, so join unconditionally below and tear down cleanly.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while std::time::Instant::now() < deadline && workers.iter().any(|w| !w.is_finished()) {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            if workers.iter().any(|w| !w.is_finished()) {
-                error!(
-                    "[rapira] worker still running after grace; skipping PHP module shutdown to avoid UB on a live thread"
-                );
-                return;
-            }
+        // A worker may never come back: the Zend timer only fires when max_execution_time > 0
+        // (and only exists on Linux/FreeBSD), and a leaked RapiraHandle keeps the intake open,
+        // parking workers in pull_job. Bound the wait and, if a worker is still running, skip
+        // the C teardown - php_module_shutdown on a live PHP thread is UB - and let process
+        // exit reclaim it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && workers.iter().any(|w| !w.is_finished()) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if workers.iter().any(|w| !w.is_finished()) {
+            error!(
+                "[rapira] worker still running after grace; skipping PHP module shutdown to avoid UB on a live thread"
+            );
+            return;
         }
 
         for w in workers {
@@ -159,7 +156,7 @@ impl Drop for Rapira {
 fn worker_main(id: usize, board: Arc<Scoreboard>, mode: Mode, rx: JobRx) {
     sb_set(id, board);
     loop {
-        let php = PhpThread::new();
+        let php: PhpThread = PhpThread::new();
         #[cfg(not(php_zts))]
         unsafe {
             // https://github.com/php/php-src/pull/9104
@@ -188,11 +185,11 @@ fn worker_main(id: usize, board: Arc<Scoreboard>, mode: Mode, rx: JobRx) {
 /// down. The single place the shared receiver is consumed; the classic loop,
 /// worker-mode `next_job`, and the boot-failure drain all go through here.
 pub(crate) fn pull_job(rx: &JobRx) -> Option<Job> {
-    match rx.lock() {
-        Ok(mut guard) => guard.blocking_recv(),
-        Err(err) => {
-            error!("[rapira] pull_job() failed to lock worker channel: {err}");
-            None
-        }
-    }
+    // A poisoned lock is a previous panic, not a closed channel — recover the
+    // receiver so worker exit stays tied to channel closure.
+    let mut guard = rx.lock().unwrap_or_else(|poisoned| {
+        error!("[rapira] worker channel lock poisoned; recovering");
+        poisoned.into_inner()
+    });
+    guard.blocking_recv()
 }

@@ -398,6 +398,56 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
 }
 
 #[test]
+fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("shutdown-fatal-worker.php")), 1)?;
+    let h = r.handle()?;
+    // the shutdown-fn fatal bails in php_call_shutdown_functions -> recycle
+    let _ = drain(h.handle_blocking(req("/?boom=1", "shutdown-fatal-worker.php"))?);
+    let (s2, _) = drain(h.handle_blocking(req("/", "shutdown-fatal-worker.php"))?); // recovered
+    drop(h);
+    let snap = r.scoreboard();
+    r.shutdown();
+
+    assert_eq!(s2, 200, "worker recovers after the recycle");
+    assert_eq!(snap.handled, 2, "both jobs handled");
+    assert!(
+        snap.recycles >= 1,
+        "the shutdown-fn fatal must recycle the worker (recycles={})",
+        snap.recycles
+    );
+    assert_eq!(snap.workers.len(), 1);
+    assert!(
+        snap.workers[0].recycles >= 1,
+        "the recycle must be attributed to the worker"
+    );
+    Ok(())
+}
+
+#[test]
+fn scoreboard_aggregates_across_workers() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("worker.php")), 3)?; // 3 threads => 3 WorkerStats
+    if r.scoreboard().workers.len() < 3 {
+        // NTS build: forced to a single worker, nothing to aggregate
+        r.shutdown();
+        return Ok(());
+    }
+    let h = r.handle()?;
+    for i in 0..9 {
+        let (s, _) = drain(h.handle_blocking(req(&format!("/?i={i}"), "worker.php"))?);
+        assert_eq!(s, 200, "request {i}");
+    }
+    drop(h);
+    let snap = r.scoreboard();
+    r.shutdown();
+
+    assert_eq!(snap.workers.len(), 3, "one WorkerStat per thread");
+    assert_eq!(snap.handled, 9, "aggregate handled == total requests");
+    Ok(())
+}
+
+#[test]
 fn scoreboard_counts_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic, 1)?;

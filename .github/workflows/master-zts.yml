@@ -20,7 +20,7 @@ jobs:
       run:
         working-directory: core
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           path: core
           persist-credentials: false
@@ -57,7 +57,7 @@ jobs:
       # actions/cache@v4's post-save only runs on job success.
       - name: Restore ZTS+debug PHP (embed SAPI)
         id: php
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.PHP_PREFIX }}
           key: php-zts-debug-${{ runner.os }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v6
@@ -107,7 +107,7 @@ jobs:
 
       - name: Save ZTS+debug PHP cache
         if: steps.php.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.PHP_PREFIX }}
           key: php-zts-debug-${{ runner.os }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v6
@@ -131,10 +131,10 @@ jobs:
           "RUSTFLAGS=-L native=$env:PHP_PREFIX\lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: core
           # macOS/Windows legs fail in cargo until the port lands; still save the deps cache.

@@ -1,12 +1,12 @@
 use std::{fs::File, io::ErrorKind};
 
 use crate::{
-    callbacks::send_error_head,
+    callbacks::{finalize_response, send_error_head},
     context::{bind_server_context, populate_request_context, unbind_server_context},
     executor::run_script,
     scoreboard::{Event, sb_update},
     start::{JobRx, pull_job},
-    types::{Job, StreamState},
+    types::Job,
     *,
 };
 
@@ -56,13 +56,9 @@ fn classic_executor(job: &mut Job) -> (Event, bool) {
         // php_output_deactivate -> sapi_send_headers
         rapira_request_shutdown();
 
-        // truncated only if the body was already streaming when the script failed
-        let truncated = job.ctx.is_truncated(exec_err);
-        // fallback ONLY if nothing emitted a head (script bailed before any output
-        // and the flush sent none) - never pre-empts the real head now
-        if exec_err && job.ctx.stream == StreamState::NotSent {
-            send_error_head(&mut job.ctx, 500);
-        }
+        // truncated only if the body was already streaming when the script failed; a 500 is
+        // synthesized only when nothing emitted a head (never pre-empts the real head)
+        let truncated = finalize_response(&mut job.ctx, exec_err);
 
         (exec_err, truncated)
     };

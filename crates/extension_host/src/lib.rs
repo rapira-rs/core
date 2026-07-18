@@ -308,8 +308,9 @@ mod win_ctrl {
     static STOP_TX: OnceLock<watch::Sender<bool>> = OnceLock::new();
     static ASKED: AtomicBool = AtomicBool::new(false);
 
-    // Runs on an OS-injected thread, so it only flips the stop channel and returns — no PHP
-    // calls, no locks. Only Ctrl-C/Ctrl-Break are trappable for a graceful drain (as in
+    // Runs on an OS-injected thread (not an async-signal context, so the watch/logger
+    // locks are fine) — it only flips the stop channel and returns, no PHP calls.
+    // Only Ctrl-C/Ctrl-Break are trappable for a graceful drain (as in
     // php-src's win32 handler); CLOSE/LOGOFF/SHUTDOWN terminate on handler return, so they fall
     // through to the default. A second event forces exit, like the Unix reaper's `exit(130)`.
     unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {

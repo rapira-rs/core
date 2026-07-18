@@ -2,6 +2,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::io::Read;
+use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::Sender;
 
@@ -18,6 +19,21 @@ pub enum Outcome {
     Bailout = 1,
     Exit = 2,
     Throw = 3,
+}
+
+impl Outcome {
+    /// The C shims hand back a plain `int`. A value outside this enum's range can't be a valid
+    /// `#[repr(C)]` discriminant (constructing one would be UB), so map anything unexpected to
+    /// `Bailout` — the conservative outcome, forcing a worker recycle instead of trusting it.
+    pub fn from_c(v: c_int) -> Self {
+        match v {
+            0 => Self::Ok,
+            1 => Self::Bailout,
+            2 => Self::Exit,
+            3 => Self::Throw,
+            _ => Self::Bailout,
+        }
+    }
 }
 
 /// The complete response for one job, sealed and delivered as a single message
@@ -176,6 +192,13 @@ impl Context {
     /// `BodyStreamed` during the teardown flush, so this can be read at any point.
     pub fn is_truncated(&self, errored: bool) -> bool {
         errored && self.stream == StreamState::BodyStreamed
+    }
+
+    /// Record the response head (first write wins is enforced by the callers' `stream` guards)
+    /// and advance `stream` to `HeadSent`.
+    pub fn commit_head(&mut self, status: u16, headers: Vec<(String, Vec<u8>)>) {
+        self.head = Some(ResponseHead { status, headers });
+        self.stream = StreamState::HeadSent;
     }
 
     /// Seal the response: deliver the accumulated head/body as the single

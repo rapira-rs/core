@@ -1,11 +1,6 @@
 use log::error;
 
-use crate::{
-    callbacks::*,
-    scoreboard::sb_update,
-    start::pull_job,
-    types::{Outcome, StreamState},
-};
+use crate::{callbacks::*, scoreboard::sb_update, start::pull_job, types::Outcome};
 use std::{
     cell::RefCell,
     os::raw::c_int,
@@ -54,6 +49,18 @@ struct WorkerChan {
     recycle: bool,
 }
 
+fn worker_recycle() -> bool {
+    WORKER.with_borrow(|w| w.as_ref().is_some_and(|wc| wc.recycle))
+}
+
+fn set_worker_recycle() {
+    WORKER.with_borrow_mut(|w| {
+        if let Some(wc) = w.as_mut() {
+            wc.recycle = true;
+        }
+    });
+}
+
 fn run_cycle(script: &Path) -> Cycle {
     let started = unsafe { php_request_startup() } == SUCCESS;
     if !started {
@@ -71,10 +78,7 @@ fn run_cycle(script: &Path) -> Cycle {
     // php_request_shutdown frees PG(last_error_message) (main.c:2024) —
     // log the bootstrap fatal before it disappears
     log_and_clear_last_error();
-    if matches!(
-        unsafe { rapira_request_shutdown() },
-        types::Outcome::Bailout
-    ) {
+    if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
         // the retry reclaimed the request, but the bailed observer walk skipped
         // end handlers — per-thread extension state is suspect, rebuild it
         error!("[rapira] php_request_shutdown() bailed; restarting the PHP thread");
@@ -155,8 +159,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let Some(mut job) = next_job() else {
         // None is terminal: next_job set wc.recycle on a first-call teardown bailout (unwind the
         // script), else the intake channel closed (clean stop).
-        let recycled = WORKER.with_borrow(|w| w.as_ref().is_some_and(|wc| wc.recycle));
-        return if recycled {
+        return if worker_recycle() {
             HandleAction::Recycle
         } else {
             HandleAction::Stop
@@ -169,9 +172,9 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         rapira_release_temporary_streams();
     }
 
-    let mut outcome = unsafe { rapira_request_activate() };
+    let mut outcome = Outcome::from_c(unsafe { rapira_request_activate() });
     if outcome != Outcome::Bailout {
-        outcome = unsafe { rapira_run_handler(fci, fcc) };
+        outcome = Outcome::from_c(unsafe { rapira_run_handler(fci, fcc) });
     }
 
     // The handler has returned: from here every ub_write is a teardown flush, not
@@ -182,10 +185,10 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     // the real head (status, cookies, php_error_cb's 500) lives in
     // SG(sapi_headers); teardown destroys it — flush first
     let flushed = match outcome {
-        Outcome::Bailout | Outcome::Throw => unsafe { rapira_finish_output() },
+        Outcome::Bailout | Outcome::Throw => Outcome::from_c(unsafe { rapira_finish_output() }),
         _ => Outcome::Ok,
     };
-    let teardown: Outcome = unsafe { rapira_request_teardown() };
+    let teardown: Outcome = Outcome::from_c(unsafe { rapira_request_teardown() });
 
     // every contained bailout recycles: only php_request_shutdown may observe the
     // Zend state a longjmp leaves behind (a live VM stack, a mark-destructed
@@ -193,24 +196,14 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let recycle: bool = [outcome, flushed, teardown].contains(&Outcome::Bailout);
     // an uncaught throw is an error response but doesn't need a recycle
     let errored: bool = recycle || outcome == Outcome::Throw;
-    let truncated: bool = job.ctx.is_truncated(errored);
-
-    // No head reached the consumer (script bailed before any output, flush sent none)
-    // → synthesize a 500. A committed head (real or buffered) is the complete response.
-    if errored && job.ctx.stream == StreamState::NotSent {
-        send_error_head(&mut job.ctx, 500);
-    }
+    let truncated: bool = finalize_response(&mut job.ctx, errored);
 
     log_and_clear_last_error();
     unbind_server_context();
     sb_update(scoreboard::Event::Handled(errored));
     if recycle {
         sb_update(scoreboard::Event::Recycled);
-        WORKER.with_borrow_mut(|w| {
-            if let Some(wc) = w.as_mut() {
-                wc.recycle = true;
-            }
-        });
+        set_worker_recycle();
     }
     job.ctx.finish(truncated);
     // Recycle tells C to zend_bailout so no PHP runs over the post-longjmp state; the response was
@@ -229,8 +222,8 @@ fn next_job() -> Option<Job> {
         // first iteration: clean up whatever php_request_startup()'s bootstrap
         // left before serving real requests — there's no prior request yet
         if std::mem::take(&mut wc.first_call) {
-            let outcome: types::Outcome = unsafe { rapira_request_teardown() };
-            if matches!(outcome, types::Outcome::Bailout) {
+            let outcome = Outcome::from_c(unsafe { rapira_request_teardown() });
+            if outcome == Outcome::Bailout {
                 // only php_request_shutdown reclaims the state a longjmp left behind
                 // (php-src main.c) - recycle instead of serving on top of it
                 error!("[rapira] rapira_request_teardown() bailed on first call; recycling");

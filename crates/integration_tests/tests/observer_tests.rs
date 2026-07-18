@@ -28,15 +28,24 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
     }
 
     // outer() -> inner() -> trigger_error(E_USER_ERROR) bails; the closing tags
-    // for both frames open at the bailout must still reach the response body.
+    // for both frames open at the bailout must still reach the response body,
+    // properly nested and exactly once — an out-of-order or duplicated close is
+    // precisely the unbalanced-observer-frames regression this test guards.
     let (_, b1) = drain(h.handle_blocking(req("/?mode=fatal", "observer-bailout.php"))?);
-    assert!(
-        b1.contains("<inner>")
-            && b1.contains("</inner>")
-            && b1.contains("<outer>")
-            && b1.contains("</outer>"),
-        "observer begin+end must both fire for outer and inner despite the bailout (got {b1:?})"
-    );
+    let mut pos = 0;
+    for marker in ["<outer>", "<inner>", "</inner>", "</outer>"] {
+        let i = b1[pos..].find(marker).unwrap_or_else(|| {
+            panic!("observer markers out of order or missing: expected {marker} (got {b1:?})")
+        });
+        pos += i + marker.len();
+    }
+    for close in ["</inner>", "</outer>"] {
+        assert_eq!(
+            b1.matches(close).count(),
+            1,
+            "each frame must close exactly once (got {b1:?})"
+        );
+    }
 
     // worker survives; the next request's frames are balanced too
     let (_, b2) = drain(h.handle_blocking(req("/?mode=ok", "observer-bailout.php"))?);

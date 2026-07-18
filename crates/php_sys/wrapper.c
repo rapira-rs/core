@@ -15,27 +15,11 @@ sapi_globals_struct *rapira_sg(void) {
 #endif
 }
 
-zend_executor_globals *rapira_eg(void) {
-#ifdef ZTS
-    return TSRMG_FAST_BULK(executor_globals_offset, zend_executor_globals *);
-#else
-    return &executor_globals;
-#endif
-}
-
 php_core_globals *rapira_pg(void) {
 #ifdef ZTS
     return TSRMG_FAST_BULK(core_globals_offset, php_core_globals *);
 #else
     return &core_globals;
-#endif
-}
-
-zend_compiler_globals *rapira_cg(void) {
-#ifdef ZTS
-    return TSRMG_FAST_BULK(compiler_globals_offset, zend_compiler_globals *);
-#else
-    return &compiler_globals;
 #endif
 }
 

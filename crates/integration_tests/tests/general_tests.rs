@@ -257,7 +257,7 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
 //     drop(h);
 //     std::thread::spawn(move || drop(r)).join().unwrap();
 //     Ok(())
-// } <-- this test sshould not compile due to the PhantomData in Rapira (*const ())
+// } <-- this test should not compile due to the PhantomData in Rapira (*const ())
 
 #[test]
 fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {

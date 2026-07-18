@@ -15,8 +15,10 @@ const FRAME_CAP: usize = 1;
 /// # Shutdown contract
 /// Every clone holds a copy of the intake `Sender`. Dropping `Rapira` joins all
 /// worker threads after dropping its own `Sender`; the job channel only closes
-/// once every `RapiraHandle` clone has also been dropped. Keeping a clone alive
-/// past the `Rapira` it came from makes `Drop for Rapira` hang forever.
+/// once every `RapiraHandle` clone has also been dropped. A clone kept alive past
+/// its `Rapira` leaves workers parked on the open channel — `Drop for Rapira` then
+/// gives up after a bounded grace and skips the PHP teardown. Drop all handles
+/// first for a clean shutdown.
 #[derive(Clone)]
 pub struct RapiraHandle {
     intake: mpsc::Sender<Job>,

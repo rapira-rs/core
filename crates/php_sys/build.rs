@@ -10,8 +10,8 @@ use anyhow::Context;
 const ALLOWED_BINDINGS: &[&str] = include!("allowed_bindings.rs");
 
 struct PhpBuild {
-    /// clang/cc `-I` include flags, space-separated (as `php-config --includes` emits).
-    includes: String,
+    /// include directories (no `-I` prefix; may contain spaces on Windows).
+    includes: Vec<String>,
     /// directories to search for the PHP link library.
     lib_dirs: Vec<String>,
     /// the PHP link library name (`php` on Unix, `php8ts`/`php8` on Windows).
@@ -26,10 +26,11 @@ struct PhpAbi {
 }
 
 fn main() -> anyhow::Result<()> {
-    println!("cargo:rustc-check-cfg=cfg(php84, php85, php_zts, php_debug)");
+    println!("cargo:rustc-check-cfg=cfg(php85, php_zts)");
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=PHP_CONFIG");
     println!("cargo:rerun-if-env-changed=PHP_DEVEL_DIR");
+    println!("cargo:rerun-if-env-changed=PHP_SDK_PATH");
 
     let php = discover_php()?;
 
@@ -38,23 +39,12 @@ fn main() -> anyhow::Result<()> {
     }
     println!("cargo:rustc-link-lib=dylib={}", php.lib_name);
 
-    for (vmajor, vminor) in [(8, 4), (8, 5)] {
-        if php.abi.version >= (vmajor, vminor) {
-            println!("cargo:rustc-cfg=php{vmajor}{vminor}");
-        }
+    if php.abi.version >= (8, 5) {
+        println!("cargo:rustc-cfg=php85");
     }
     if php.abi.zts {
         println!("cargo:rustc-cfg=php_zts");
     }
-    if php.abi.debug {
-        println!("cargo:rustc-cfg=php_debug");
-    }
-
-    let includes: Vec<&str> = php
-        .includes
-        .split_whitespace()
-        .map(|s| s.trim_start_matches("-I"))
-        .collect();
 
     let win_defs = windows_defines(&php.abi);
 
@@ -66,22 +56,30 @@ fn main() -> anyhow::Result<()> {
     for &(k, v) in &win_defs {
         c.define(k, Some(v));
     }
-    for d in &includes {
+    for d in &php.includes {
         c.include(d);
     }
     if cfg!(windows) {
         // Match the PHP DLL's C runtime: /MDd for a --enable-debug build, /MD otherwise. A shim on
         // a different CRT than php8ts.dll gets its own heap and errno/FILE* state, so a buffer
-        // allocated inside PHP and freed across the boundary corrupts.
+        // allocated inside PHP and freed across the boundary corrupts. cc has no debug-CRT knob
+        // (static_crt(false) always emits /MD and c.debug only adds /Z7), so append /MDd
+        // explicitly — cl takes the last /M flag (the D9025 override warning is expected).
         c.static_crt(false);
+        if php.abi.debug {
+            c.flag("-MDd");
+        }
         c.debug(php.abi.debug);
     }
     c.compile("rapira_shim");
 
     let mut bindings = bindgen::Builder::default()
         .header("wrapper.h")
-        .clang_args(php.includes.split_whitespace())
+        .clang_args(php.includes.iter().map(|d| format!("-I{d}")))
         .clang_args(win_defs.iter().map(|(k, v)| format!("-D{k}={v}")))
+        // marks the bindgen/libclang parse for wrapper.h's parse-only rewrites; the real
+        // compiler (cl.exe or clang-cl) never sees it
+        .clang_arg("-DRAPIRA_BINDGEN=1")
         // php-src master on clang >=19 compiles the Zend VM in tail-call dispatch mode: every
         // opcode handler is a function using the `preserve_none` calling convention, and
         // `zend_op.handler` points to one. bindgen renders C structs field-by-field, so it must
@@ -133,7 +131,7 @@ fn windows_defines(abi: &PhpAbi) -> Vec<(&'static str, &'static str)> {
         // PHP's headers reference ZEND_DEBUG unconditionally (STANDARD_MODULE_HEADER builds the
         // module struct from it), and on Windows it's only ever a command-line define - so it must
         // always be set: 1 to match a --enable-debug DLL's struct layout, else 0. (The debug CRT
-        // /MDd, applied by c.debug for a debug build, defines _DEBUG on its own.)
+        // /MDd, passed explicitly for a debug build, defines _DEBUG on its own.)
         ("ZEND_DEBUG", if abi.debug { "1" } else { "0" }),
     ]
 }
@@ -169,12 +167,16 @@ fn parse_version(v: &str) -> anyhow::Result<(u32, u32)> {
 
 #[cfg(unix)]
 fn discover_php() -> anyhow::Result<PhpBuild> {
-    let includes: String = php_config("--includes")?;
+    // `php-config --includes` emits space-separated `-I` flags; paths with spaces are
+    // unrepresentable in that output, so splitting on whitespace is as good as it gets here.
+    let includes: Vec<String> = php_config("--includes")?
+        .split_whitespace()
+        .map(|s| s.trim_start_matches("-I").to_string())
+        .collect();
     let prefix: String = php_config("--prefix")?;
     let version: (u32, u32) = parse_version(&php_config("--version")?)?;
     let bin: String = resolve_php_binary();
-    let zts: bool = detect_zts(&bin)?;
-    let debug: bool = detect_debug(&bin)?;
+    let (zts, debug): (bool, bool) = detect_abi(&bin)?;
     Ok(PhpBuild {
         includes,
         lib_dirs: vec![format!("{prefix}/lib"), format!("{prefix}/lib64")],
@@ -199,39 +201,47 @@ fn resolve_php_binary() -> String {
     "php".to_string()
 }
 
-fn detect_zts(php_binary: &str) -> anyhow::Result<bool> {
-    if let Ok(out) = Command::new(php_binary)
+// Detect (zts, debug) from one `php -i`. ZTS reads the PHP_ZTS constant first (robust); its text
+// fallback and the debug flag share the single `php -i` output.
+#[cfg(unix)]
+fn detect_abi(php_binary: &str) -> anyhow::Result<(bool, bool)> {
+    let zts_const = Command::new(php_binary)
         .args(["-r", "echo PHP_ZTS;"])
         .output()
-    {
-        match String::from_utf8_lossy(&out.stdout).trim() {
-            "1" => return Ok(true),
-            "0" => return Ok(false),
-            _ => {} // usually not possible, but fallback to `php -i` if it happens
-        }
-    }
+        .ok()
+        .and_then(|out| match String::from_utf8_lossy(&out.stdout).trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None, // usually not possible, but fall back to `php -i` if it happens
+        });
+
+    let info = php_info(php_binary)?;
+    let zts = match zts_const {
+        Some(z) => z,
+        None => php_info_field(&info, "Thread Safety")
+            .map(|v| v == "enabled")
+            .context("could not determine Thread Safety from `php -i`")?,
+    };
+    let debug = php_info_field(&info, "Debug Build") == Some("yes");
+    Ok((zts, debug))
+}
+
+#[cfg(unix)]
+fn php_info(php_binary: &str) -> anyhow::Result<String> {
     let out = Command::new(php_binary)
         .arg("-i")
         .output()
         .context("running `php -i`")?;
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find_map(|l| l.split("Thread Safety => ").nth(1))
-        .map(|v| v.trim() == "enabled")
-        .context("could not determine Thread Safety from `php -i`")
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn detect_debug(php_binary: &str) -> anyhow::Result<bool> {
-    let out = Command::new(php_binary)
-        .arg("-i")
-        .output()
-        .context("running php -i")?;
-
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find_map(|l| l.split("Debug Build => ").nth(1))
-        .map(|v| v.trim() == "yes")
-        .unwrap_or(false))
+// Value after a `Key => ` field in `php -i` output, trimmed.
+#[cfg(unix)]
+fn php_info_field<'a>(info: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("{key} => ");
+    info.lines()
+        .find_map(|l| l.split(needle.as_str()).nth(1))
+        .map(str::trim)
 }
 
 #[cfg(unix)]
@@ -259,25 +269,21 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
     let root = PathBuf::from(root);
     let inc = root.join("include");
     let include_dirs = ["", "main", "Zend", "TSRM", "ext", "win32"];
-    let includes = include_dirs
+    let includes: Vec<String> = include_dirs
         .iter()
-        .map(|d| format!("-I{}", inc.join(d).display()))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .map(|d| inc.join(d).display().to_string())
+        .collect();
     let lib_dir = root.join("lib");
     let version = parse_version(&read_php_version(&inc)?)?;
 
-    // `php` is on PATH on both Windows CI legs (setup-php, or the --enable-cli build), so detect
-    // the ABI at runtime as on Unix. If none runs, infer ZTS from the shipped import lib and
-    // assume a non-debug build.
-    let (zts, debug) = match detect_zts("php") {
-        Ok(zts) => (zts, detect_debug("php").unwrap_or(false)),
-        Err(_) => (
-            lib_dir.join(format!("php{}ts.lib", version.0)).exists(),
-            false,
-        ),
-    };
-    let lib_name = windows_lib_name(&lib_dir, version.0, zts, debug)?;
+    // The devel pack's import libs are the ground truth for the ABI being linked (php8ts.lib /
+    // php8ts_debug.lib / php8.lib / php8_debug.lib); whatever `php` happens to be first on PATH
+    // may be a different install entirely.
+    let major = version.0;
+    let has_lib = |suffix: &str| lib_dir.join(format!("php{major}{suffix}.lib")).exists();
+    let zts = has_lib("ts") || has_lib("ts_debug");
+    let debug = has_lib("ts_debug") || has_lib("_debug");
+    let lib_name = windows_lib_name(&lib_dir, major, zts, debug)?;
     Ok(PhpBuild {
         includes,
         lib_dirs: vec![lib_dir.display().to_string()],

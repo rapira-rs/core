@@ -38,6 +38,12 @@ fn main() -> anyhow::Result<()> {
     // the deploy directory.
     let script: PathBuf = std::path::absolute(&cli.script)?;
 
+    // Block SIGINT/SIGTERM before spawning any threads (PHP workers, the extension
+    // runtime, anything an extension's init may create), so rapira reaps them on a
+    // dedicated waiter and drains extensions on shutdown - instead of a signal
+    // handler that would fight Zend's per-request one.
+    extension_host::arm_shutdown_signals();
+
     // Extensions are compiled in; register the HTTP front (and any others) here. With
     // none registered there is nothing to serve, so exit before booting PHP.
     let mut host: ExtensionHost = ExtensionHost::new();
@@ -45,11 +51,6 @@ fn main() -> anyhow::Result<()> {
     if host.is_empty() {
         return Ok(());
     }
-
-    // Block SIGINT/SIGTERM before spawning any threads (PHP workers, the extension
-    // runtime), so rapira reaps them on a dedicated waiter and drains extensions on
-    // shutdown - instead of a signal handler that would fight Zend's per-request one.
-    extension_host::arm_shutdown_signals();
 
     let mode = match cli.mode {
         ModeArg::Classic => Mode::Classic,
