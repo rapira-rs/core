@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         php: ["8.4", "8.5"]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -67,7 +67,7 @@ jobs:
         with: { components: clippy }
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # macOS/Windows legs fail in cargo until the port lands; still save the deps cache.
+          # save the deps cache even when a later cargo step fails
           cache-on-failure: true
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace

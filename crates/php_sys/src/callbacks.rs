@@ -90,7 +90,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
     guard(0, || {
         let ctx = unsafe {
             let Some(c) = ctx() else {
-                let data = slice::from_raw_parts(buf as *const u8, len);
+                let data = slice::from_raw_parts(buf.cast::<u8>(), len);
                 log::info!(target: "php", "{}", String::from_utf8_lossy(data));
                 return len;
             };
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
                 unsafe { *aborted = true };
                 return 0;
             }
-            let buf = unsafe { slice::from_raw_parts(buf as *const u8, len) };
+            let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
             ctx.body.extend_from_slice(buf);
             // Body output began *during the handler* (the teardown flush sets
             // `tearing_down` first): a later error now truncates the body.
@@ -172,7 +172,7 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
     // A short read (fewer than `count` bytes) signals end-of-body: the engine
     // sets SG(post_read)=1 and stops calling this (php-src main/SAPI.c:232-252).
     with_ctx(0, |ctx| {
-        let dst = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, count) };
+        let dst = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), count) };
         let mut filled = 0;
         while filled < count {
             match ctx.req.body.read(&mut dst[filled..]) {
@@ -336,7 +336,7 @@ pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) 
             return null_mut();
         }
 
-        let key = unsafe { slice::from_raw_parts(name as *const u8, name_len) };
+        let key = unsafe { slice::from_raw_parts(name.cast::<u8>(), name_len) };
         ctx.c
             .env
             .get(key)
