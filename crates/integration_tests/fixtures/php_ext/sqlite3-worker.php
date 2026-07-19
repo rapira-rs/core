@@ -1,0 +1,16 @@
+<?php
+$handler = static function (): void {
+	if (!extension_loaded('sqlite3')) {
+		echo 'skip';
+		return;
+	}
+	if (($_GET['boom'] ?? '') === '1') {
+		ini_set('display_errors', '0');
+		// the ctor throws on open failure; query() on bad SQL only warns
+		new SQLite3('/nonexistent-dir-xyz/db.sqlite');
+		return;
+	}
+	echo 'sqlite:' . (new SQLite3(':memory:'))->querySingle('SELECT 40+2');
+};
+while (\rapira_handle_request($handler)) {
+}
