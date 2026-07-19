@@ -75,8 +75,8 @@ impl ExtensionHost {
                 async move {
                     let outcome = launch(php, stop, grace).await;
                     match &outcome {
-                        Ok(()) => log::info!("[ext {name}] finished"),
-                        Err(msg) => log::error!("[ext {name}] {msg}"),
+                        Ok(()) => log::info!(target: "ext", "{name} finished"),
+                        Err(msg) => log::error!(target: "ext", "{name}: {msg}"),
                     }
                     outcome
                 },
@@ -271,10 +271,10 @@ fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
         .name("rapira-signal".into())
         .spawn(move || {
             let _ = wait_shutdown_signal();
-            log::info!("[rapira] shutdown signal received; draining extensions");
+            log::info!(target: "rapira", "shutdown signal received; draining extensions");
             let _ = stop_tx.send(true);
             let _ = wait_shutdown_signal();
-            log::warn!("[rapira] second shutdown signal; forcing exit");
+            log::warn!(target: "rapira", "second shutdown signal; forcing exit");
             std::process::exit(130);
         })
         .expect("spawn signal thread");
@@ -327,7 +327,7 @@ mod win_ctrl {
                 if ASKED.swap(true, Ordering::SeqCst) {
                     std::process::exit(130);
                 }
-                log::info!("[rapira] shutdown event received; draining extensions");
+                log::info!(target: "rapira", "shutdown event received; draining extensions");
                 if let Some(tx) = STOP_TX.get() {
                     let _ = tx.send(true);
                 }

@@ -1,5 +1,6 @@
 use clap::{Parser, ValueEnum};
 use extension_host::ExtensionHost;
+use log::info;
 use php_sys::{Mode, Rapira};
 use rapira_http::HttpServer;
 use std::path::PathBuf;
@@ -33,6 +34,8 @@ enum ModeArg {
 }
 
 fn main() -> anyhow::Result<()> {
+    env_logger::init();
+    info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
     let cli: Cli = Cli::parse();
     // Resolve to an absolute path before anything daemonizes; a daemon's cwd is not
     // the deploy directory.

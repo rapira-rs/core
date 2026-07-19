@@ -51,12 +51,12 @@ pub struct Rapira {
 
 impl Rapira {
     pub fn start(mode: Mode, req_threads: usize) -> anyhow::Result<Self> {
-        info!("[rapira] booting with mode: {mode:?}, threads: {req_threads}");
+        info!(target: "rapira", "booting with mode: {mode:?}, threads: {req_threads}");
         // NTS: 1 thread only
         #[cfg(not(php_zts))]
         let num_threads: usize = {
             if req_threads > 1 {
-                warn!("[rapira] ZTS not enabled, only 1 thread will be used");
+                warn!(target: "rapira", "ZTS not enabled, only 1 thread will be used");
             }
             1
         };
@@ -80,7 +80,7 @@ impl Rapira {
         };
 
         if !started {
-            error!("[rapira] php_module_startup failed, shutting down");
+            error!(target: "rapira", "php_module_startup failed, shutting down");
             unsafe {
                 php_module_shutdown();
                 sapi_shutdown();
@@ -97,7 +97,7 @@ impl Rapira {
         let workers: Vec<JoinHandle<()>> = (0..num_threads)
             .map(|id| {
                 let (rx, mode, scoreboard) = (rx.clone(), mode.clone(), scoreboard.clone());
-                trace!("[rapira] spawning worker thread");
+                trace!(target: "rapira", "spawning worker thread");
                 thread::spawn(move || worker_main(id, scoreboard, mode, rx))
             })
             .collect();
@@ -111,7 +111,7 @@ impl Rapira {
     }
 
     pub fn shutdown(self) {
-        info!("[rapira] shutdown is noop, deinitialize in Drop");
+        info!(target: "rapira", "shutdown is noop, deinitialize in Drop");
     }
 
     pub fn scoreboard(&self) -> ScoreboardSnapshot {
@@ -121,7 +121,7 @@ impl Rapira {
 
 impl Drop for Rapira {
     fn drop(&mut self) {
-        info!("[rapira] shutting down, dropping");
+        info!(target: "rapira", "shutting down, dropping");
         self.intake = None;
         let workers: Vec<JoinHandle<()>> = std::mem::take(&mut self.workers);
 
@@ -137,7 +137,8 @@ impl Drop for Rapira {
         }
         if workers.iter().any(|w| !w.is_finished()) {
             error!(
-                "[rapira] worker still running after grace; skipping PHP module shutdown to avoid UB on a live thread"
+                target: "rapira",
+                "worker still running after grace; skipping PHP module shutdown to avoid UB on a live thread"
             );
             return;
         }
@@ -189,7 +190,7 @@ pub(crate) fn pull_job(rx: &JobRx) -> Option<Job> {
     // A poisoned lock is a previous panic, not a closed channel — recover the
     // receiver so worker exit stays tied to channel closure.
     let mut guard = rx.lock().unwrap_or_else(|poisoned| {
-        error!("[rapira] worker channel lock poisoned; recovering");
+        error!(target: "rapira", "worker channel lock poisoned; recovering");
         poisoned.into_inner()
     });
     guard.blocking_recv()
