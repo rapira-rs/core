@@ -1,0 +1,16 @@
+<?php
+$handler = static function (): void {
+	if (!extension_loaded('ctype')) {
+		echo 'skip';
+		return;
+	}
+	if (($_GET['boom'] ?? '') === '1') {
+		ini_set('display_errors', '0');
+		// ctype_* take mixed, so only a missing arg throws
+		ctype_digit();
+		return;
+	}
+	echo 'ctype:' . (ctype_digit('12345') ? '1' : '0');
+};
+while (\rapira_handle_request($handler)) {
+}
