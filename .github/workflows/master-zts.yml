@@ -61,7 +61,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.PHP_PREFIX }}
-          key: php-zts-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v8-${{ hashFiles('core/ci/php-configure-flags.txt') }}
+          key: php-zts-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v9-${{ hashFiles('core/ci/php-configure-flags.txt') }}
 
       - name: Build ZTS+debug PHP (embed SAPI) from php-src master (Unix)
         if: runner.os != 'Windows' && steps.php.outputs.cache-hit != 'true'
@@ -97,7 +97,10 @@ jobs:
           $task = @'
           call phpsdk_deps --update --no-backup --branch master --stability staging --deps %RUNNER_TEMP%\php-deps || exit /b 1
           call buildconf.bat || exit /b 1
-          call configure.bat --with-prefix=%PHP_PREFIX% --enable-zts --enable-debug --enable-zend-test --enable-embed --enable-cli --disable-all --disable-cgi --with-php-build=%RUNNER_TEMP%\php-deps --enable-session --enable-filter --enable-ctype --enable-tokenizer --enable-fileinfo --enable-phar --enable-mbstring --enable-zlib --with-iconv --with-openssl --with-curl --with-libxml --with-dom --with-simplexml --with-xml --enable-xmlreader --enable-xmlwriter --enable-pdo --with-pdo-sqlite --with-sqlite3 || exit /b 1
+          rem fileinfo is forced shared on Windows (config.w32 hardcodes it), so it cannot
+          rem be embedded statically - omitted; its tests skip via the fixture guard.
+          rem openssl needs an explicit =yes: the bare flag inherits its "no,shared" default.
+          call configure.bat --with-prefix=%PHP_PREFIX% --enable-zts --enable-debug --enable-zend-test --enable-embed --enable-cli --disable-all --disable-cgi --with-php-build=%RUNNER_TEMP%\php-deps --enable-session --enable-filter --enable-ctype --enable-tokenizer --enable-phar --enable-mbstring --enable-zlib --with-iconv --with-openssl=yes --with-curl --with-libxml --with-dom --with-simplexml --with-xml --enable-xmlreader --enable-xmlwriter --enable-pdo --with-pdo-sqlite --with-sqlite3 || exit /b 1
           nmake || exit /b 1
           nmake install || exit /b 1
           '@
@@ -120,7 +123,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ env.PHP_PREFIX }}
-          key: php-zts-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v8-${{ hashFiles('core/ci/php-configure-flags.txt') }}
+          key: php-zts-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v9-${{ hashFiles('core/ci/php-configure-flags.txt') }}
 
       - name: Expose PHP to build + tests (Unix)
         if: runner.os != 'Windows'
@@ -154,8 +157,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # no fileinfo: forced shared on Windows, not embeddable statically
           $mods = & "$env:PHP_PREFIX\php.exe" -m
-          foreach ($ext in 'ctype','curl','dom','fileinfo','filter','iconv','mbstring','openssl','pdo_sqlite','phar','session','simplexml','sqlite3','tokenizer','xml','xmlreader','xmlwriter','zlib') {
+          foreach ($ext in 'ctype','curl','dom','filter','iconv','mbstring','openssl','pdo_sqlite','phar','session','simplexml','sqlite3','tokenizer','xml','xmlreader','xmlwriter','zlib') {
             if ($mods -notcontains $ext) { throw "missing extension: $ext" }
           }
 

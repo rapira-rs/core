@@ -9,7 +9,7 @@ $handler = static function (): void {
 		mb_convert_encoding('x', 'BOGUS-ENC');
 		return;
 	}
-	echo 'mb:' . mb_strtoupper('héllo');
+	echo 'mb:' . mb_strtoupper('héllo', 'UTF-8');
 };
 while (\rapira_handle_request($handler)) {
 }

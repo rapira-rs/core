@@ -18,10 +18,11 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: "8.5"
-          # keep in sync with ci/php-configure-flags.txt (php_ext_tests coverage)
+          # keep in sync with ci/php-configure-flags.txt
           extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, openssl, pdo_sqlite, phar, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
           phpts: ts # thread-safe (ZTS)
+          fail-fast: true # a missing extension fails the job instead of warning
 
       - name: Build deps for bindgen/cc
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
