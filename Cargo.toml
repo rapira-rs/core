@@ -20,6 +20,7 @@ extension_host = { path = "crates/extension_host" }
 extension_api = { git = "https://github.com/rapira-rs/extensions_api.git", branch = "main" }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
+env_logger = "0.11"
 
 [workspace.package]
 rust-version = "1.97.1"
@@ -41,3 +42,5 @@ extension_host = { workspace = true }
 php_sys = { workspace = true }
 rapira_http = { git = "https://github.com/rapira-rs/http.git", branch = "main" }
 mimalloc = "0.1"
+log.workspace = true
+env_logger.workspace = true

@@ -64,7 +64,7 @@ fn set_worker_recycle() {
 fn run_cycle(script: &Path) -> Cycle {
     let started = unsafe { php_request_startup() } == SUCCESS;
     if !started {
-        error!("[rapira] php_request_startup() failed");
+        error!(target: "rapira", "php_request_startup() failed");
     }
     let completed = started && unsafe { run_script(script) };
 
@@ -81,7 +81,7 @@ fn run_cycle(script: &Path) -> Cycle {
     if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
         // the retry reclaimed the request, but the bailed observer walk skipped
         // end handlers — per-thread extension state is suspect, rebuild it
-        error!("[rapira] php_request_shutdown() bailed; restarting the PHP thread");
+        error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
         sb_update(scoreboard::Event::Restart);
         return Cycle::Restart;
     }
@@ -113,7 +113,7 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) -> WorkerExit {
             Cycle::Failed => {
                 failures += 1;
                 if failures == UNHEALTHY_AFTER {
-                    error!("[rapira] worker keeps failing to boot; flagged unhealthy");
+                    error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
                     sb_update(scoreboard::Event::Unhealthy);
                 }
                 // Can't run PHP. Answer one queued job with 503, then loop to
@@ -226,7 +226,7 @@ fn next_job() -> Option<Job> {
             if outcome == Outcome::Bailout {
                 // only php_request_shutdown reclaims the state a longjmp left behind
                 // (php-src main.c) - recycle instead of serving on top of it
-                error!("[rapira] rapira_request_teardown() bailed on first call; recycling");
+                error!(target: "rapira", "rapira_request_teardown() bailed on first call; recycling");
                 wc.recycle = true;
                 return None;
             }
@@ -255,7 +255,7 @@ fn log_and_clear_last_error() {
         if !zend_str.is_null() {
             let msg =
                 std::slice::from_raw_parts((*zend_str).val.as_ptr().cast::<u8>(), (*zend_str).len);
-            error!("[rapira] last PHP error: {}", String::from_utf8_lossy(msg));
+            error!(target: "php", "last error: {}", String::from_utf8_lossy(msg));
         }
         rapira_clear_last_error();
     }
