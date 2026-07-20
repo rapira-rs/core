@@ -711,6 +711,7 @@ dependencies = [
 [[package]]
 name = "extension_api"
 version = "0.2.0"
+source = "git+https://github.com/rustatian/extensions_api.git?branch=main#a9c87766589af5b4390d204ba6e8f036cd3f9471"
 dependencies = [
  "anyhow",
 ]
@@ -1808,6 +1809,7 @@ dependencies = [
 [[package]]
 name = "rapira_http"
 version = "0.3.0"
+source = "git+https://github.com/rustatian/http.git?branch=main#7634d4d2aa98afce0df27e2021836dd34e757e01"
 dependencies = [
  "anyhow",
  "async-trait",

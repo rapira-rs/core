@@ -26,19 +26,6 @@ env_logger = "0.11"
 [workspace.package]
 rust-version = "1.97.1"
 
-# Temporary, until extension_api 0.2 (instance registration) and rapira_http 0.2
-# (typed listen) land on their main branches: build against the local checkouts.
-# Afterwards: drop all three patches (http 0.2 also switches its extension_api URL
-# to rustatian, so the rapira-rs patch becomes unnecessary too).
-[patch."https://github.com/rapira-rs/extensions_api.git"]
-extension_api = { path = "../extensions_api" }
-
-[patch."https://github.com/rustatian/extensions_api.git"]
-extension_api = { path = "../extensions_api" }
-
-[patch."https://github.com/rustatian/http.git"]
-rapira_http = { path = "../http" }
-
 [workspace.lints.clippy]
 all = "warn"
 
