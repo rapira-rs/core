@@ -107,11 +107,11 @@ zend_module_entry rapira_module_entry = {
     STANDARD_MODULE_HEADER,
     "rapira",
     rapira_functions,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr, /* MINIT, MSHUTDOWN, RINIT, RSHUTDOWN, MINFO */
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL, /* MINIT, MSHUTDOWN, RINIT, RSHUTDOWN, MINFO */
     "0.1.0",
     STANDARD_MODULE_PROPERTIES};
 
@@ -126,7 +126,8 @@ static const char *RELOAD_MODULES[] = {"filter", NULL};
 
 // Run the per-request startup (startup=true) or shutdown hook of each RELOAD_MODULE.
 static void rapira_modules_request(bool startup) {
-    zend_module_entry *module;
+    zend_module_entry *module = NULL;
+    #pragma unroll 2
     for (const char **name = RELOAD_MODULES; *name; name++) {
         module = zend_hash_str_find_ptr(&module_registry, *name, strlen(*name));
         if (!module) {
@@ -156,9 +157,10 @@ static void rapira_observer_end_to(zend_execute_data *base) {
         return;
     }
     zend_execute_data *orig = EG(current_execute_data);
+    #pragma unroll
     while (EG(current_observed_frame) && EG(current_observed_frame) != base) {
         EG(current_execute_data) = EG(current_observed_frame);
-        zend_observer_fcall_end_prechecked(EG(current_observed_frame), nullptr);
+        zend_observer_fcall_end_prechecked(EG(current_observed_frame), NULL);
     }
     EG(current_execute_data) = orig;
 }
@@ -238,7 +240,7 @@ static void rapira_request_init(void) {
 // Zend/zend_compile.h). sapi_activate would re-arm + rebuild them per request;
 // worker mode skips it, so do it here.
 static void rapira_activate_auto_globals(void) {
-    zend_auto_global *auto_global;
+    zend_auto_global *auto_global = NULL;
     zend_string *_env = ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV);
 
     // Re-arm every superglobal so a later access rebuilds it.
