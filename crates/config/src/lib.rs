@@ -205,7 +205,10 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow::anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
 
-    let threads = cli.threads.or(file.pool.threads).unwrap_or_else(default_threads);
+    let threads = cli
+        .threads
+        .or(file.pool.threads)
+        .unwrap_or_else(default_threads);
     if threads == 0 {
         bail!("threads must be at least 1");
     }
@@ -228,7 +231,10 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
     Ok(Settings {
         http: HttpSettings {
             listen,
-            server_name: file.http.server_name.unwrap_or_else(|| "localhost".to_owned()),
+            server_name: file
+                .http
+                .server_name
+                .unwrap_or_else(|| "localhost".to_owned()),
             server_port,
             max_body_size,
         },
@@ -302,10 +308,9 @@ mod tests {
         assert_eq!(s.http.server_port, 9000);
         assert_eq!(s.http.max_body_size, 2 * 1024 * 1024);
 
-        let file = load_str(
-            "[http]\nlisten = \"unix:/run/r.sock\"\n[pool]\nentrypoint = \"a.php\"\n",
-        )
-        .unwrap();
+        let file =
+            load_str("[http]\nlisten = \"unix:/run/r.sock\"\n[pool]\nentrypoint = \"a.php\"\n")
+                .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
         assert_eq!(s.http.server_port, 80);
     }
@@ -314,7 +319,10 @@ mod tests {
     fn file_entrypoint_is_config_dir_relative() {
         let file = load_str("[pool]\nentrypoint = \"public/index.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/srv/app"))).unwrap();
-        assert_eq!(s.pool.entrypoint, PathBuf::from("/srv/app/public/index.php"));
+        assert_eq!(
+            s.pool.entrypoint,
+            PathBuf::from("/srv/app/public/index.php")
+        );
     }
 
     #[test]
@@ -331,10 +339,9 @@ mod tests {
     #[test]
     fn max_body_size_overflow_is_rejected() {
         // 2^44 MB would wrap the byte conversion to 0 on a 64-bit usize.
-        let file = load_str(
-            "[http]\nmax_body_size_mb = 17592186044416\n[pool]\nentrypoint = \"a.php\"\n",
-        )
-        .unwrap();
+        let file =
+            load_str("[http]\nmax_body_size_mb = 17592186044416\n[pool]\nentrypoint = \"a.php\"\n")
+                .unwrap();
         let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
         assert!(err.to_string().contains("too large"));
     }
