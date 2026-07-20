@@ -11,9 +11,17 @@
     "c-cpp-flylint.pclintplus.enable": false,
     "c-cpp-flylint.cppcheck.enable": true,
     "c-cpp-flylint.cppcheck.executable": "/usr/bin/cppcheck",
-    "c-cpp-flylint.cppcheck.standard": ["c17"],
-    "c-cpp-flylint.cppcheck.extraArgs": ["--std=c23", "--enable=warning,style,performance,portability", "--inline-suppr"],
-    "c-cpp-flylint.cppcheck.defines": ["ZTS=1"],
+    "c-cpp-flylint.cppcheck.standard": [
+        "c17"
+    ],
+    "c-cpp-flylint.cppcheck.extraArgs": [
+        "--std=c23",
+        "--enable=warning,style,performance,portability",
+        "--inline-suppr"
+    ],
+    "c-cpp-flylint.cppcheck.defines": [
+        "ZTS=1"
+    ],
     "c-cpp-flylint.cppcheck.includePaths": [
         "/home/valery/.local/php-zts/include/php",
         "/home/valery/.local/php-zts/include/php/main",
@@ -22,5 +30,7 @@
         "/home/valery/.local/php-zts/include/php/ext",
         "/home/valery/.local/php-zts/include/php/ext/date/lib"
     ],
-    "c-cpp-flylint.cppcheck.suppressions": ["*:*php-zts/include*"]
+    "c-cpp-flylint.cppcheck.suppressions": [
+        "*:*php-zts/include*"
+    ]
 }

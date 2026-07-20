@@ -25,26 +25,55 @@ On Windows, extract a PHP devel pack and set `PHP_DEVEL_DIR` to its root (plus `
 At runtime the binary links `libphp.so` dynamically; if it is not in a standard location, set `LD_LIBRARY_PATH`:
 
 ```sh
-LD_LIBRARY_PATH=$HOME/.local/php-zts/lib ./target/release/rapira --script worker.php
+LD_LIBRARY_PATH=$HOME/.local/php-zts/lib ./target/release/rapira serve worker.php
 ```
 
 ## Running
 
 ```sh
-rapira [--mode <classic|worker>] --script <path> [--threads <n>]
+rapira serve [OPTIONS] [SCRIPT]
 ```
 
-| Flag | Default | Description |
-|---|---|---|
-| `--mode` | `worker` | `classic`: the script is executed fresh for every request (front controller, like PHP-FPM). `worker`: the script stays resident and pulls requests in a loop. |
-| `--script` | required | PHP entry script: `index.php` in classic mode, the worker loop script in worker mode. |
-| `--threads` | `1` | Number of PHP worker threads. ZTS only; an NTS build always uses 1. |
+Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml`
+(`--config`) or turnkey flags. Precedence is **CLI flags > config file > defaults**.
 
-The HTTP server listens on `0.0.0.0:8080` (not configurable yet). First `SIGINT`/`SIGTERM` drains in-flight requests and extensions; a second one forces exit.
+| Option | Default | Description |
+|---|---|---|
+| `--config <PATH>` | none | Load settings from a `rapira.toml`. |
+| `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected. |
+| `--threads <N>` | CPU count | PHP worker threads. ZTS only; an NTS build always uses 1. |
+| `--classic` | off | Re-include the script for every request (front controller, like PHP-FPM) instead of keeping it resident. |
+| `SCRIPT` | required¹ | PHP entry script. Overrides `pool.entrypoint`. |
+
+¹ Required unless the config file sets `pool.entrypoint`.
+
+First `SIGINT`/`SIGTERM` drains in-flight requests and extensions; a second one forces exit.
 
 ```sh
-rapira --script app/worker.php --threads 8
-curl http://127.0.0.1:8080/
+rapira serve app/worker.php --threads 8
+curl http://127.0.0.1:8000/
+```
+
+### Configuration file
+
+```toml
+[http]
+listen = "127.0.0.1:8000"
+server_name = "localhost"    # optional; SERVER_NAME reported to PHP
+server_port = 8000           # optional; defaults to the listen TCP port (80 for unix:)
+max_body_size_mb = 8         # optional; larger request bodies get a 413
+
+[pool]
+threads = 4
+entrypoint = "index.php"     # relative → resolved against this file's directory
+classic = false              # optional; default false
+```
+
+Unknown keys are rejected. A relative `SCRIPT` on the command line resolves against the
+current directory; a relative `pool.entrypoint` resolves against the config file's directory.
+
+```sh
+rapira serve --config /etc/rapira/rapira.toml
 ```
 
 ## Worker script
@@ -84,7 +113,7 @@ echo "Method: {$_SERVER['REQUEST_METHOD']}\n";
 ```
 
 ```sh
-rapira --mode classic --script public/index.php --threads 4
+rapira serve --classic public/index.php --threads 4
 ```
 
 ## Logging
@@ -101,9 +130,9 @@ Log targets:
 Examples:
 
 ```sh
-RUST_LOG=info rapira --script worker.php            # info+ for everything
-RUST_LOG=rapira=debug,php=info rapira --script worker.php
-RUST_LOG=warn,rapira=trace rapira --script worker.php  # quiet deps, trace the server
+RUST_LOG=info rapira serve worker.php            # info+ for everything
+RUST_LOG=rapira=debug,php=info rapira serve worker.php
+RUST_LOG=warn,rapira=trace rapira serve worker.php  # quiet deps, trace the server
 ```
 
 Levels: `error`, `warn`, `info`, `debug`, `trace`. `RUST_LOG_STYLE=never` disables colored output.

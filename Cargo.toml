@@ -17,6 +17,7 @@ anyhow = "1"
 log = { version = "0.4", features = ["std"] }
 php_sys = { path = "crates/php_sys" }
 extension_host = { path = "crates/extension_host" }
+rapira_config = { path = "crates/config" }
 extension_api = { git = "https://github.com/rustatian/extensions_api.git", branch = "main" }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
@@ -25,11 +26,18 @@ env_logger = "0.11"
 [workspace.package]
 rust-version = "1.97.1"
 
-# rapira_http still declares extension_api via the pre-move rapira-rs org URL;
-# unify it with the new source so the graph holds a single extension_api copy.
-# Drop this once rustatian/http switches its dependency URL.
+# Temporary, until extension_api 0.2 (instance registration) and rapira_http 0.2
+# (typed listen) land on their main branches: build against the local checkouts.
+# Afterwards: drop all three patches (http 0.2 also switches its extension_api URL
+# to rustatian, so the rapira-rs patch becomes unnecessary too).
 [patch."https://github.com/rapira-rs/extensions_api.git"]
-extension_api = { git = "https://github.com/rustatian/extensions_api.git", branch = "main" }
+extension_api = { path = "../extensions_api" }
+
+[patch."https://github.com/rustatian/extensions_api.git"]
+extension_api = { path = "../extensions_api" }
+
+[patch."https://github.com/rustatian/http.git"]
+rapira_http = { path = "../http" }
 
 [workspace.lints.clippy]
 all = "warn"
@@ -46,6 +54,7 @@ anyhow = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 extension_host = { workspace = true }
 php_sys = { workspace = true }
+rapira_config = { workspace = true }
 rapira_http = { git = "https://github.com/rustatian/http.git", branch = "main" }
 mimalloc = "0.1"
 log.workspace = true
