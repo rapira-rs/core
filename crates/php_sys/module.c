@@ -29,7 +29,7 @@ enum {
 
 // Keep in sync with rapira_worker.rs HandleAction.
 enum {
-    RAPIRA_STOP [[maybe_unused]] = 0,
+    RAPIRA_STOP = 0,
     RAPIRA_CONTINUE = 1,
     RAPIRA_RECYCLE = 2,
 };
@@ -246,7 +246,7 @@ static void rapira_activate_auto_globals(void) {
     // Re-arm every superglobal so a later access rebuilds it.
     ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
         auto_global->armed =
-            auto_global->jit || auto_global->auto_global_callback;
+            ((auto_global->jit || auto_global->auto_global_callback) != 0);
     }
     ZEND_HASH_FOREACH_END();
 
