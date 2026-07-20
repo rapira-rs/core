@@ -1,6 +1,8 @@
 # core
 
 [![codecov](https://codecov.io/gh/rustatian/rapira-rs/graph/badge.svg)](https://app.codecov.io/gh/rustatian/rapira-rs)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/rapira-rs/core?utm_source=badge)
+
 
 Rapira - PHP application server. Embeds PHP (ZTS or NTS) via the embed SAPI, runs requests on a pool of PHP worker threads, and serves HTTP through the [rustatian/http](https://github.com/rustatian/http) extension. This repo contains the SAPI core (`php_sys`), the extension host runtime, and the `rapira` binary.
 
