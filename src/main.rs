@@ -101,10 +101,11 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         max_body_size: settings.http.max_body_size,
     };
 
-    // Extensions are compiled in; construct + register the HTTP front (and any others)
-    // here. With none registered there is nothing to serve, so exit before booting PHP.
+    // Extensions are compiled in; register the HTTP front (and any others) here, each
+    // with its config. With none registered there is nothing to serve, so exit before
+    // booting PHP.
     let mut host: ExtensionHost = ExtensionHost::new();
-    host.register(HttpServer::new(http_cfg))?;
+    host.register::<HttpServer>(http_cfg)?;
     if host.is_empty() {
         return Ok(());
     }

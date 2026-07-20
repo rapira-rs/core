@@ -34,9 +34,11 @@ impl ExtensionHost {
         Self::default()
     }
 
-    /// Stage an already-constructed extension. A duplicate name is a hard error;
-    /// identity is captured for logging before `ext` is moved into the launcher.
-    pub fn register<E: Extension>(&mut self, ext: E) -> anyhow::Result<()> {
+    /// Construct `E` (via `init`, injecting its config) and stage it. A duplicate name
+    /// is a hard error; identity is captured for logging before `E` is moved into the
+    /// launcher.
+    pub fn register<E: Extension>(&mut self, config: E::Config) -> anyhow::Result<()> {
+        let ext = E::init(config);
         let name = ext.name().to_string();
         if self.exts.iter().any(|e| e.name == name) {
             anyhow::bail!("duplicate extension {name:?}");
