@@ -46,10 +46,12 @@ jobs:
           bins: cargo-codspeed
 
       - name: Build the benchmark target(s)
-        run: cargo codspeed build
+        # The root Cargo.toml is both a package (rapira_core) and a workspace, so
+        # --workspace is required to pick up the benches declared in member crates.
+        run: cargo codspeed build --workspace
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v4
         with:
           mode: simulation
-          run: cargo codspeed run
+          run: cargo codspeed run --workspace
