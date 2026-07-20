@@ -112,3 +112,14 @@ Levels: `error`, `warn`, `info`, `debug`, `trace`. `RUST_LOG_STYLE=never` disabl
 make test_zts   # against $HOME/.local/php-zts
 make test_nts   # against the system NTS PHP (needs php-embedded)
 ```
+
+## Benchmarks
+
+Performance is tracked continuously with [CodSpeed](https://app.codspeed.io/rustatian/rapira-rs). The `php_sys` crate carries [divan](https://github.com/CodSpeedHQ/divan) benchmarks for the pure-Rust hot paths (`crates/php_sys/benches/hot_path.rs`): per-request `ReqC::build` and the lock-free `Scoreboard` counters. CI runs them in CodSpeed's simulation instrument on every pull request and reports any regression.
+
+Run them locally:
+
+```sh
+cargo codspeed build --workspace
+codspeed run --mode simulation -- cargo codspeed run --workspace
+```
