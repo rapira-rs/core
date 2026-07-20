@@ -16,10 +16,10 @@ jobs:
     name: Run benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with: { persist-credentials: false }
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: "8.4"
           # keep in sync with ci/php-configure-flags.txt
@@ -39,7 +39,7 @@ jobs:
           echo "RUSTFLAGS=-L native=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
 
       - name: Setup rust toolchain, cache and cargo-codspeed binary
-        uses: moonrepo/setup-rust@v0
+        uses: moonrepo/setup-rust@cafffba5d5c8bc38a5120e6e60f3561d541a47cd # v0
         with:
           channel: stable
           cache-target: release
@@ -51,7 +51,7 @@ jobs:
         run: cargo codspeed build --workspace
 
       - name: Run the benchmarks
-        uses: CodSpeedHQ/action@v4
+        uses: CodSpeedHQ/action@f99becdce5e5d51fd556489ebef684f4ecfd6286 # v4
         with:
           mode: simulation
           run: cargo codspeed run --workspace
