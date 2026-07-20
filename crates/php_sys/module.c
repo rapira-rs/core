@@ -29,7 +29,7 @@ enum {
 
 // Keep in sync with rapira_worker.rs HandleAction.
 enum {
-    RAPIRA_STOP = 0,
+    RAPIRA_STOP [[maybe_unused]] = 0,
     RAPIRA_CONTINUE = 1,
     RAPIRA_RECYCLE = 2,
 };
@@ -107,11 +107,11 @@ zend_module_entry rapira_module_entry = {
     STANDARD_MODULE_HEADER,
     "rapira",
     rapira_functions,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL, /* MINIT, MSHUTDOWN, RINIT, RSHUTDOWN, MINFO */
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr, /* MINIT, MSHUTDOWN, RINIT, RSHUTDOWN, MINFO */
     "0.1.0",
     STANDARD_MODULE_PROPERTIES};
 
@@ -158,7 +158,7 @@ static void rapira_observer_end_to(zend_execute_data *base) {
     zend_execute_data *orig = EG(current_execute_data);
     while (EG(current_observed_frame) && EG(current_observed_frame) != base) {
         EG(current_execute_data) = EG(current_observed_frame);
-        zend_observer_fcall_end_prechecked(EG(current_observed_frame), NULL);
+        zend_observer_fcall_end_prechecked(EG(current_observed_frame), nullptr);
     }
     EG(current_execute_data) = orig;
 }
@@ -384,7 +384,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     }
 
     php_free_shutdown_functions();
-    gc_protect(0); // reset gc_protect to 0, in case _zend_bailout left it at 1
+    gc_protect(false); // reset gc_protect to 0, in case _zend_bailout left it at 1
 
     if (outcome != BAILOUT && clean_at_entry && CG(unclean_shutdown)) {
         outcome = BAILOUT;
@@ -496,7 +496,7 @@ void rapira_release_temporary_streams(void) {
     int stream_type = php_file_le_stream();
     ZEND_HASH_FOREACH_PTR(&EG(regular_list), val) {
         if (val->type == stream_type) {
-            php_stream *stream = (php_stream *)val->ptr;
+            php_stream *stream = val->ptr;
             if (stream != NULL && stream->ops == &php_stream_temp_ops &&
                 stream->__exposed == 0 && GC_REFCOUNT(val) == 1) {
                 zend_list_delete(val);
