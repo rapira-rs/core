@@ -386,7 +386,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     }
 
     php_free_shutdown_functions();
-    gc_protect(false); // reset gc_protect to 0, in case _zend_bailout left it at 1
+    gc_protect(0); // reset gc_protect to 0, in case _zend_bailout left it at 1
 
     if (outcome != BAILOUT && clean_at_entry && CG(unclean_shutdown)) {
         outcome = BAILOUT;
