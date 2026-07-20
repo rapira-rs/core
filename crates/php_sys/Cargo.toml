@@ -21,3 +21,10 @@ cc = "1.2"
 
 [features]
 default = []
+
+[dev-dependencies]
+divan = { version = "5.0.1", package = "codspeed-divan-compat" }
+
+[[bench]]
+name = "hot_path"
+harness = false
