@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use extension_api::{Extension, Php, Request, Result};
+use extension_api::{Extension, ListenAddr, Php, PrepareCtx, PreparedListener, Request, Result};
 use pingora::http::ResponseHeader;
 use pingora::proxy::{ProxyHttp, Session, http_proxy_service};
 use pingora::server::configuration::ServerConf;
+use pingora::server::{Fds, ListenFds};
 use pingora::services::Service as _; // brings start_service() into scope
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorType, Result as PingoraResult};
@@ -63,6 +64,10 @@ impl Default for Config {
 /// The HTTP front extension: holds the running server thread and its shutdown signal.
 pub struct HttpServer {
     config: Config,
+    /// Master-bound listener from `prepare`; rides inside `self` across the
+    /// fork, consumed by `run` in the worker. None → self-bind (tests,
+    /// single-process boots without a prepare phase).
+    prepared: Option<PreparedListener>,
     shutdown: Option<watch::Sender<bool>>,
     thread: Option<JoinHandle<Result<()>>>,
 }
@@ -74,6 +79,7 @@ impl Extension for HttpServer {
     fn init(config: Config) -> Self {
         Self {
             config,
+            prepared: None,
             shutdown: None,
             thread: None,
         }
@@ -83,11 +89,25 @@ impl Extension for HttpServer {
         "rapira-pingora"
     }
 
+    fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
+        let prepared = match &self.config.listen {
+            Listen::Tcp(addr) => ctx.bind_tcp(*addr)?,
+            Listen::Unix(path) => ctx.bind_unix(path)?,
+        };
+        log::info!(
+            "[rapira-pingora] prepared listener on {}",
+            prepared.addr_string()?
+        );
+        self.prepared = Some(prepared);
+        Ok(())
+    }
+
     async fn run(&mut self, php: Php) -> Result<()> {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         // Wakes `run` (on the host runtime) once the server thread finishes.
         let (done_tx, done_rx) = oneshot::channel();
         let config = self.config.clone();
+        let prepared = self.prepared.take();
 
         let thread = std::thread::Builder::new()
             .name("rapira-pingora".into())
@@ -98,7 +118,7 @@ impl Extension for HttpServer {
                     .thread_name("rapira-pingora-io")
                     .build()
                     .expect("build http runtime");
-                let result = rt.block_on(serve(php, config, shutdown_rx));
+                let result = rt.block_on(serve(php, config, prepared, shutdown_rx));
                 let _ = done_tx.send(()); // ignore if `run` was already cancelled
                 result
             })?;
@@ -143,7 +163,12 @@ fn join_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
 
 /// Build the Pingora proxy service and drive its accept loop until `shutdown` flips true,
 /// then wait (bounded) for in-flight requests before the caller drops the runtime.
-async fn serve(php: Php, config: Config, shutdown: watch::Receiver<bool>) -> Result<()> {
+async fn serve(
+    php: Php,
+    config: Config,
+    prepared: Option<PreparedListener>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
     let conf = Arc::new(ServerConf::default());
     let inflight = Arc::new(AtomicUsize::new(0));
     let listen = config.listen.clone();
@@ -155,25 +180,47 @@ async fn serve(php: Php, config: Config, shutdown: watch::Receiver<bool>) -> Res
             inflight: inflight.clone(),
         },
     );
-    match &listen {
-        Listen::Tcp(addr) => {
-            let addr = addr.to_string();
-            service.add_tcp(&addr);
-            log::info!("[rapira-pingora] listening on http://{addr}");
+
+    // ONE string feeds BOTH the endpoint and the Fds key: pingora adopts only on
+    // an exact match (a mismatch silently rebinds — for unix sockets it would
+    // unlink and steal the master's socket). The listener carries the resolved
+    // address, so port 0 configs adopt correctly too.
+    let (addr, fds): (ListenAddr, Option<ListenFds>) = match prepared {
+        Some(p) => {
+            use std::os::fd::IntoRawFd;
+            let addr = p.addr().clone();
+            let key = p.addr_string()?;
+            let mut table = Fds::new();
+            table.add(key, p.into_raw_fd()); // ownership → pingora; closed at teardown
+            (addr, Some(Arc::new(tokio::sync::Mutex::new(table))))
         }
-        Listen::Unix(path) => {
+        None => (
+            match &listen {
+                Listen::Tcp(a) => ListenAddr::Tcp(*a),
+                Listen::Unix(p) => ListenAddr::Unix(p.clone()),
+            },
+            None,
+        ),
+    };
+    match &addr {
+        ListenAddr::Tcp(a) => {
+            let s = a.to_string();
+            service.add_tcp(&s);
+            log::info!("[rapira-pingora] listening on http://{s}");
+        }
+        ListenAddr::Unix(path) => {
             // Reject rather than bind a lossy-converted (corrupted) path.
-            let path = path
+            let s = path
                 .to_str()
                 .ok_or_else(|| anyhow!("unix socket path must be valid UTF-8"))?;
             // None → pingora default perms (0o666): the same local accessibility as a
             // loopback TCP bind, and a proxy running as another user can connect.
-            service.add_uds(path, None);
-            log::info!("[rapira-pingora] listening on unix:{path}");
+            service.add_uds(s, None);
+            log::info!("[rapira-pingora] listening on unix:{s}");
         }
     }
     // (fds, shutdown, listeners_per_fd). Runs on this runtime via Handle::current().
-    service.start_service(None, shutdown, 1).await;
+    service.start_service(fds, shutdown, 1).await;
     // start_service only joined the accept loops; connection tasks are detached and die
     // with the runtime. Wait for the requests still in flight so their responses go out.
     let deadline = tokio::time::Instant::now() + DRAIN_GRACE;

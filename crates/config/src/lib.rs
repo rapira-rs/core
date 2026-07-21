@@ -92,6 +92,35 @@ pub struct Overrides {
 pub struct Settings {
     pub http: HttpSettings,
     pub pool: PoolSettings,
+    pub pm: PmSettings,
+}
+
+/// Process-manager policy: how the master scales the worker-process pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmMode {
+    /// Fixed pool of `pool.processes` workers.
+    Static,
+    /// Scale between spare-capacity thresholds, capped by `pool.processes`.
+    Dynamic { min_spare: usize, max_spare: usize },
+    /// Fork on demand, up to `pool.processes`; idle workers exit after
+    /// `process_idle_timeout`.
+    Ondemand,
+}
+
+#[derive(Debug)]
+pub struct PmSettings {
+    pub mode: PmMode,
+    /// Requests a worker serves before recycling itself (with jitter); 0 = unlimited.
+    pub max_requests: u64,
+    /// Ondemand: idle worker lifetime before the master retires it.
+    pub process_idle_timeout: std::time::Duration,
+    /// Graceful-stop budget before the master escalates QUIT → TERM → KILL.
+    pub process_control_timeout: std::time::Duration,
+    /// Wall-clock bound on a single request; a worker whose request runs longer
+    /// is killed and replaced. Zero = disabled.
+    pub request_terminate_timeout: std::time::Duration,
+    /// Master pidfile; relative paths resolve against the config file's directory.
+    pub pidfile: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -122,6 +151,8 @@ struct FileConfig {
     http: HttpSection,
     #[serde(default)]
     pool: PoolSection,
+    #[serde(default)]
+    pm: PmSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -141,9 +172,29 @@ struct PoolSection {
     classic: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PmModeKey {
+    Static,
+    Dynamic,
+    Ondemand,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PmSection {
+    mode: Option<PmModeKey>,
+    min_spare: Option<usize>,
+    max_spare: Option<usize>,
+    max_requests: Option<u64>,
+    process_idle_timeout_secs: Option<u64>,
+    process_control_timeout_secs: Option<u64>,
+    request_terminate_timeout_secs: Option<u64>,
+    pidfile: Option<String>,
+}
+
 /// Default worker-process count: one per logical CPU. Falls back to 1 if the
-/// platform can't report it. Consumed by the fork-based pool; until it lands the
-/// server runs a single process and values > 1 log a warning at boot.
+/// platform can't report it.
 fn default_processes() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -229,6 +280,63 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         bail!("no entrypoint: pass a SCRIPT argument or set pool.entrypoint in the config file");
     };
 
+    let mode = match file.pm.mode.unwrap_or(PmModeKey::Static) {
+        PmModeKey::Dynamic => {
+            let (Some(min_spare), Some(max_spare)) = (file.pm.min_spare, file.pm.max_spare) else {
+                bail!("pm.mode = \"dynamic\" requires pm.min_spare and pm.max_spare");
+            };
+            if !(1..=max_spare).contains(&min_spare) || max_spare > processes {
+                bail!(
+                    "pm spares must satisfy 1 <= min_spare ({min_spare}) <= max_spare ({max_spare}) <= pool.processes ({processes})"
+                );
+            }
+            PmMode::Dynamic {
+                min_spare,
+                max_spare,
+            }
+        }
+        other => {
+            // A spare key under static/ondemand is a mode typo, not a tunable.
+            if file.pm.min_spare.is_some() || file.pm.max_spare.is_some() {
+                bail!("pm.min_spare/pm.max_spare are only valid with pm.mode = \"dynamic\"");
+            }
+            if other == PmModeKey::Static {
+                PmMode::Static
+            } else {
+                PmMode::Ondemand
+            }
+        }
+    };
+    // Cap the pm timeouts so the master's deadline arithmetic can't overflow.
+    let process_idle_timeout_secs = file.pm.process_idle_timeout_secs.unwrap_or(10);
+    let process_control_timeout_secs = file.pm.process_control_timeout_secs.unwrap_or(30);
+    let request_terminate_timeout_secs = file.pm.request_terminate_timeout_secs.unwrap_or(0);
+    for (key, secs) in [
+        ("pm.process_idle_timeout_secs", process_idle_timeout_secs),
+        (
+            "pm.process_control_timeout_secs",
+            process_control_timeout_secs,
+        ),
+        (
+            "pm.request_terminate_timeout_secs",
+            request_terminate_timeout_secs,
+        ),
+    ] {
+        if secs > 86_400 {
+            bail!("{key} {secs} is too large (max 86400)");
+        }
+    }
+    let pidfile = file
+        .pm
+        .pidfile
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|p| {
+            let base = config_dir.unwrap_or_else(|| Path::new("."));
+            std::path::absolute(base.join(p))
+        })
+        .transpose()?;
+
     Ok(Settings {
         http: HttpSettings {
             listen,
@@ -243,6 +351,16 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
             processes,
             entrypoint,
             classic,
+        },
+        pm: PmSettings {
+            mode,
+            max_requests: file.pm.max_requests.unwrap_or(0),
+            process_idle_timeout: std::time::Duration::from_secs(process_idle_timeout_secs),
+            process_control_timeout: std::time::Duration::from_secs(process_control_timeout_secs),
+            request_terminate_timeout: std::time::Duration::from_secs(
+                request_terminate_timeout_secs,
+            ),
+            pidfile,
         },
     })
 }
@@ -353,7 +471,62 @@ mod tests {
     fn unknown_keys_are_rejected() {
         assert!(load_str("[pool]\nbogus = 1\n").is_err());
         assert!(load_str("[nope]\nx = 1\n").is_err());
+        assert!(load_str("[pm]\nbogus = 1\n").is_err());
         // pre-1.0 rename: the old `threads` key is gone, not aliased
         assert!(load_str("[pool]\nthreads = 1\n").is_err());
+    }
+
+    #[test]
+    fn pm_timeout_cap_is_enforced() {
+        for key in [
+            "process_control_timeout_secs",
+            "process_idle_timeout_secs",
+            "request_terminate_timeout_secs",
+        ] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\n[pm]\n{key} = 100000\n"
+            ))
+            .unwrap();
+            let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
+            assert!(err.to_string().contains("too large"), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn pm_dynamic_requires_valid_spares() {
+        let toml = |pm: &str| {
+            load_str(&format!(
+                "[pool]\nprocesses = 4\nentrypoint = \"a.php\"\n[pm]\n{pm}"
+            ))
+            .unwrap()
+        };
+        let merged = |pm: &str| merge(toml(pm), Overrides::default(), Some(Path::new("/w")));
+
+        assert!(merged("mode = \"dynamic\"\n").is_err()); // spares required
+        assert!(merged("mode = \"dynamic\"\nmin_spare = 3\nmax_spare = 2\n").is_err());
+        assert!(merged("mode = \"dynamic\"\nmin_spare = 1\nmax_spare = 5\n").is_err()); // > processes
+        assert!(merged("mode = \"static\"\nmin_spare = 1\nmax_spare = 2\n").is_err()); // spares w/o dynamic
+
+        let s = merged("mode = \"dynamic\"\nmin_spare = 1\nmax_spare = 3\nmax_requests = 500\n")
+            .unwrap();
+        assert_eq!(
+            s.pm.mode,
+            PmMode::Dynamic {
+                min_spare: 1,
+                max_spare: 3
+            }
+        );
+        assert_eq!(s.pm.max_requests, 500);
+    }
+
+    #[test]
+    fn pm_pidfile_resolves_against_config_dir() {
+        let file =
+            load_str("[pool]\nentrypoint = \"a.php\"\n[pm]\npidfile = \"rapira.pid\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/etc/rapira"))).unwrap();
+        assert_eq!(
+            s.pm.pidfile.as_deref(),
+            Some(Path::new("/etc/rapira/rapira.pid"))
+        );
     }
 }

@@ -127,7 +127,6 @@ static const char *RELOAD_MODULES[] = {"filter", NULL};
 // Run the per-request startup (startup=true) or shutdown hook of each RELOAD_MODULE.
 static void rapira_modules_request(bool startup) {
     zend_module_entry *module = NULL;
-    #pragma unroll 2
     for (const char **name = RELOAD_MODULES; *name; name++) {
         module = zend_hash_str_find_ptr(&module_registry, *name, strlen(*name));
         if (!module) {
@@ -157,7 +156,6 @@ static void rapira_observer_end_to(zend_execute_data *base) {
         return;
     }
     zend_execute_data *orig = EG(current_execute_data);
-    #pragma unroll
     while (EG(current_observed_frame) && EG(current_observed_frame) != base) {
         EG(current_execute_data) = EG(current_observed_frame);
         zend_observer_fcall_end_prechecked(EG(current_observed_frame), NULL);
@@ -218,7 +216,6 @@ static void rapira_request_init(void) {
     /* main/main.c php_request_startup(): honor the output INIs per request */
     if (PG(output_handler) && PG(output_handler)[0]) {
         zval oh;
-        #pragma unroll
         ZVAL_STRING(&oh, PG(output_handler));
         php_output_start_user(&oh, 0, PHP_OUTPUT_HANDLER_STDFLAGS);
         zval_ptr_dtor(&oh);
@@ -277,7 +274,6 @@ static void rapira_reset_session(void) {
     }
     if (!Z_ISUNDEF(PS(http_session_vars))) {
         zval_ptr_dtor(&PS(http_session_vars));
-        #pragma unroll
         ZVAL_UNDEF(&PS(http_session_vars));
     }
     if (PS(mod_data) || PS(mod_user_implemented)) {
@@ -300,7 +296,7 @@ static void rapira_reset_session(void) {
     // Transient guards that php_rinit_session_globals() scrubs at each request
     // start. Worker mode skips RINIT, so a userland save handler that bails
     // mid-call (or uses partial parent:: delegation) can leave them set. Cheap
-    // defensive parity:
+    // defensive reset:
     PS(mod_user_is_open) = 0;
     PS(in_save_handler) = 0;
     PS(set_handler) = 0;
@@ -312,7 +308,6 @@ static void rapira_reset_session(void) {}
 static void rapira_reset_super_global(void) {
     zval *files = &PG(http_globals)[TRACK_VARS_FILES];
     zval_ptr_dtor(files);
-    #pragma unroll
     ZVAL_UNDEF(files);
     // A top-level $_SESSION is an IS_INDIRECT symbol-table entry aliasing the main frame's CV slot;
     // plain zend_hash_str_del rips the bucket out without decref'ing through the indirection,
@@ -326,7 +321,6 @@ static void rapira_reset_super_global(void) {
 int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     int outcome = OK;
     zval retval;
-    #pragma unroll
     ZVAL_UNDEF(&retval);
     fci->size = sizeof *fci;
     fci->retval = &retval;
@@ -359,7 +353,6 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
             } else {
                 // run the userland set_exception_handler; the zend_try guards
                 // against a bailout thrown inside that handler.
-                #pragma unroll
                 zend_try_exception_handler();
                 if (EG(exception)) {
                     outcome = THROW;
@@ -472,11 +465,9 @@ void rapira_clear_last_error(void) {
     // field.
     zend_try {
         zval_ptr_dtor(&EG(last_fatal_error_backtrace));
-        #pragma unroll
         ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
     }
     zend_catch { 
-        #pragma unroll
         ZVAL_UNDEF(&EG(last_fatal_error_backtrace)); 
     }
     zend_end_try();
@@ -491,13 +482,22 @@ void rapira_process_init(void) {
     zend_signal_startup();
 }
 
+/* Once per forked worker, before any PHP runs in the child. The Zend MM heap
+   was created by the master's MINIT; 8.5+ requires the child to re-key it
+   (debug builds assert getpid() == heap->pid in zend_mm_shutdown) and re-arm
+   the per-process execution timer, which fork does not inherit. */
+void rapira_child_init(void) {
+#if PHP_VERSION_ID >= 80500
+    php_child_init();
+#endif
+}
+
 /* Temp streams (POST request_body) are only NULLed by sapi_deactivate_module();
   nothing reclaims the resource in a resident request, so sweep dead ones
   before serving the next job. Safe here: the previous request is finished. */
 void rapira_release_temporary_streams(void) {
     zend_resource *val;
     int stream_type = php_file_le_stream();
-    #pragma unroll
     ZEND_HASH_FOREACH_PTR(&EG(regular_list), val) {
         if (val->type == stream_type) {
             php_stream *stream = val->ptr;

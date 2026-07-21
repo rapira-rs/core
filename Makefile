@@ -6,10 +6,16 @@
 PHP_CONFIG ?= php-config
 LOCATE_PHP = PREFIX=$$($(PHP_CONFIG) --prefix 2>/dev/null); test -n "$$PREFIX" || { echo "$(PHP_CONFIG) not found; set PHP_CONFIG=/path/to/php-config"; exit 1; }; LIBPHP=$$(find "$$PREFIX/lib64" "$$PREFIX/lib" "$$PREFIX"/lib/php* -maxdepth 1 \( -name 'libphp*.so' -o -name 'libphp*.dylib' \) 2>/dev/null | head -1); test -n "$$LIBPHP" || { echo "no libphp*.so/.dylib under $$PREFIX; install your distro's PHP embed package or build PHP with --enable-embed=shared"; exit 1; }; LIBDIR=$$(dirname "$$LIBPHP"); mkdir -p target/phplib || exit 1; case "$$LIBPHP" in *.dylib) ln -sf "$$LIBPHP" target/phplib/libphp.dylib || exit 1;; *) ln -sf "$$LIBPHP" target/phplib/libphp.so || exit 1;; esac; PHPLIB="$$PWD/target/phplib"
 
-.PHONY: test test_nts coverage
+.PHONY: test test_nts test_e2e coverage
 
-test: test_nts
+# Sequential recipe (not prerequisites) so `make -j` cannot run the suites
+# concurrently; the e2e servers must not overlap the in-process PHP tests.
+test:
+	@$(MAKE) test_nts
+	@$(MAKE) test_e2e
 
+# In-process unit + integration suites. The e2e target is feature-gated off, so
+# `cargo test --workspace` skips it here.
 test_nts:
 	@$(LOCATE_PHP); \
 	CARGO_TARGET_DIR=target/nts \
@@ -18,6 +24,25 @@ test_nts:
 	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
 	RUSTFLAGS="-L native=$$PHPLIB" \
 	cargo test --workspace
+
+# The spawn-the-binary end-to-end suite (crates/integration_tests, --features e2e):
+# forks workers, binds ports, drives real HTTP, asserts signal/reload/scaling. Run
+# separately so the forking servers do not oversubscribe the in-process PHP tests.
+# Builds the rapira bin first; the harness locates it beside the test binary.
+test_e2e:
+	@$(LOCATE_PHP); \
+	CARGO_TARGET_DIR=target/nts \
+	PHP_CONFIG=$(PHP_CONFIG) \
+	LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
+	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
+	RUSTFLAGS="-L native=$$PHPLIB" \
+	cargo build -p rapira_core --bin rapira && \
+	CARGO_TARGET_DIR=target/nts \
+	PHP_CONFIG=$(PHP_CONFIG) \
+	LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
+	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
+	RUSTFLAGS="-L native=$$PHPLIB" \
+	cargo test -p integration_tests --test e2e --features e2e -- --test-threads=1
 
 # Requires: cargo install cargo-llvm-cov && rustup component add llvm-tools-preview
 coverage:

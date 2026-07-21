@@ -1,13 +1,13 @@
-//! Registers native rapira extensions and drives each on a shared runtime. `serve`
-//! runs until every extension finishes or a terminate/interrupt signal arrives; on a
-//! signal it stops and drains them all — this is how rapira_core shuts down and exits.
+//! Registers native rapira extensions and drives each on a shared runtime. The
+//! master runs `prepare_all` before forking; each forked worker then drives its
+//! extensions with `serve_worker` until they finish or a drain signal arrives.
 
 // Signal handling below calls POSIX APIs unconditionally; fail fast with a clear
 // message instead of scattered libc symbol errors.
 #[cfg(not(unix))]
 compile_error!("rapira supports Unix (Linux/macOS) only");
 
-use extension_api::{Extension, Php};
+use extension_api::{Extension, Php, PrepareCtx};
 use php_sys::RapiraHandle;
 use std::future::Future;
 use std::io::Cursor;
@@ -21,11 +21,35 @@ use tokio::task::JoinSet;
 
 type Outcome = std::result::Result<(), String>;
 type BoxFuture = Pin<Box<dyn Future<Output = Outcome> + Send>>;
-type Launcher = Box<dyn FnOnce(Php, watch::Receiver<bool>, Duration) -> BoxFuture + Send>;
+
+/// Object-safe shim so the host can touch the SAME extension value twice:
+/// `prepare` in the master (pre-fork), `launch` in the worker (post-fork). The
+/// extension value — including any `PreparedListener` it stored — is what
+/// crosses the fork.
+trait ErasedExt: Send {
+    fn prepare(&mut self, ctx: &mut PrepareCtx) -> anyhow::Result<()>;
+    fn launch(self: Box<Self>, php: Php, stop: watch::Receiver<bool>, grace: Duration)
+    -> BoxFuture;
+}
+
+impl<E: Extension> ErasedExt for E {
+    fn prepare(&mut self, ctx: &mut PrepareCtx) -> anyhow::Result<()> {
+        Extension::prepare(self, ctx)
+    }
+
+    fn launch(
+        self: Box<Self>,
+        php: Php,
+        stop: watch::Receiver<bool>,
+        grace: Duration,
+    ) -> BoxFuture {
+        Box::pin(drive(*self, php, stop, grace))
+    }
+}
 
 struct Registered {
     name: String,
-    launch: Launcher,
+    ext: Box<dyn ErasedExt>,
 }
 
 /// Collects native extensions, then drives them all with one `run` call.
@@ -40,17 +64,28 @@ impl ExtensionHost {
     }
 
     /// Construct `E` (via `init`, injecting its config) and stage it. A duplicate name
-    /// is a hard error; identity is captured for logging before `E` is moved into the
-    /// launcher.
+    /// is a hard error.
     pub fn register<E: Extension>(&mut self, config: E::Config) -> anyhow::Result<()> {
         let ext = E::init(config);
         let name = ext.name().to_string();
         if self.exts.iter().any(|e| e.name == name) {
             anyhow::bail!("duplicate extension {name:?}");
         }
-        let launch: Launcher =
-            Box::new(move |php, stop, grace| Box::pin(drive(ext, php, stop, grace)));
-        self.exts.push(Registered { name, launch });
+        self.exts.push(Registered {
+            name,
+            ext: Box::new(ext),
+        });
+        Ok(())
+    }
+
+    /// Master-side, pre-fork: run every extension's `prepare` in registration
+    /// order; the first error aborts boot, tagged with the extension name.
+    pub fn prepare_all(&mut self, ctx: &mut PrepareCtx) -> anyhow::Result<()> {
+        use anyhow::Context;
+        for Registered { name, ext } in &mut self.exts {
+            ext.prepare(ctx)
+                .with_context(|| format!("extension {name}: prepare failed"))?;
+        }
         Ok(())
     }
 
@@ -75,11 +110,12 @@ impl ExtensionHost {
             .expect("build extension runtime");
 
         let mut tasks: JoinSet<Result<(), String>> = JoinSet::new();
-        for Registered { name, launch } in self.exts {
+        for Registered { name, ext } in self.exts {
             let (php, stop) = (php.clone(), stop_rx.clone());
+            let fut = ext.launch(php, stop, grace);
             tasks.spawn_on(
                 async move {
-                    let outcome = launch(php, stop, grace).await;
+                    let outcome = fut.await;
                     match &outcome {
                         Ok(()) => log::info!(target: "ext", "{name} finished"),
                         Err(msg) => log::error!(target: "ext", "{name}: {msg}"),
@@ -213,74 +249,83 @@ async fn drive<E: Extension>(
     }
 }
 
-/// Own process shutdown. Blocks SIGINT/SIGTERM in the calling thread so every thread
-/// spawned afterwards (the PHP workers, the extension runtime) inherits the block; rapira
-/// then reaps the signal with `sigwait` on a dedicated thread rather than a `sigaction`
-/// handler, so it never replaces a disposition Zend re-installs per request. Call once, in
-/// `main`, before booting PHP.
-///
-/// https://man7.org/linux/man-pages/man3/sigwait.3.html
-/// https://man7.org/linux/man-pages/man2/sigaction.2.html
-pub fn arm_shutdown_signals() {
+/// Build a sigset from a signal list.
+fn sigset(signals: &[libc::c_int]) -> libc::sigset_t {
     // SAFETY: operates on a stack-owned, freshly-initialized signal set.
-    // https://man7.org/linux/man-pages/man3/pthread_sigmask.3.html
     unsafe {
-        let set = shutdown_sigset();
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-    }
-}
-
-/// The {SIGINT, SIGTERM} set rapira blocks and waits on.
-unsafe fn shutdown_sigset() -> libc::sigset_t {
-    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
-    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        libc::sigaddset(&mut set, libc::SIGTERM);
+        for &sig in signals {
+            libc::sigaddset(&mut set, sig);
+        }
+        set
     }
-    set
 }
 
-/// Block until a blocked SIGINT/SIGTERM is delivered, then return its number. No timeout: the
-/// caller waits on the signal like a channel receive. `sigwait` is portable across macOS,
-/// Linux, and BSD, unlike `sigtimedwait`, which Darwin lacks.
+/// Block until one of `signals` (already blocked) is delivered; return its
+/// number. No timeout: the caller waits on the signal like a channel receive.
+/// `sigwait` is portable across macOS, Linux, and BSD, unlike `sigtimedwait`,
+/// which Darwin lacks.
 ///
 /// https://man7.org/linux/man-pages/man2/sigwaitinfo.2.html
-fn wait_shutdown_signal() -> libc::c_int {
+fn wait_signal(signals: &[libc::c_int]) -> libc::c_int {
     // SAFETY: `set` and `sig` are stack values live for the whole call.
     unsafe {
-        let set = shutdown_sigset();
+        let set = sigset(signals);
         let mut sig: libc::c_int = 0;
         libc::sigwait(&set, &mut sig);
         sig
     }
 }
 
-/// Spawn the shutdown watcher for this platform. It flips `stop_tx` — the same watch channel
-/// every `drive` future selects on — so an external terminate/interrupt becomes a graceful
-/// drain. The returned guard tears the watcher down on drop.
-fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
-    // Detached: block on the first signal to drain, on the second to force exit. If the
-    // extensions finish on their own the thread stays parked in `sigwait` and is reclaimed
-    // at process exit.
+/// Spawn a thread that raises SIGQUIT (pending on the blocked set → picked up
+/// by the `serve_worker` watcher as a graceful drain) when the master dies:
+/// the inherited lifeline read end returns EOF once every master-held write
+/// end is gone.
+pub fn spawn_lifeline_watch(lifeline: std::os::fd::OwnedFd) {
     std::thread::Builder::new()
-        .name("rapira-signal".into())
+        .name("rapira-lifeline".into())
         .spawn(move || {
-            let _ = wait_shutdown_signal();
-            log::info!(target: "rapira", "shutdown signal received; draining extensions");
-            let _ = stop_tx.send(true);
-            let _ = wait_shutdown_signal();
-            log::warn!(target: "rapira", "second shutdown signal; forcing exit");
-            std::process::exit(130);
+            use std::os::fd::AsRawFd;
+            let mut byte = 0u8;
+            loop {
+                // SAFETY: reads into a 1-byte stack buffer on an fd we own.
+                let n = unsafe { libc::read(lifeline.as_raw_fd(), (&raw mut byte).cast(), 1) };
+                if n == 0 {
+                    log::warn!(target: "rapira", "master died (lifeline EOF); draining");
+                    // Process-directed (kill self), not raise(): raise is
+                    // thread-directed, so a blocked SIGQUIT would sit in this
+                    // thread's private pending set where the serve_worker sigwait
+                    // (on another thread) never sees it. kill() targets the
+                    // process, landing in the shared pending set the watcher drains.
+                    unsafe { libc::kill(libc::getpid(), libc::SIGQUIT) };
+                    return;
+                }
+                if n < 0
+                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                return; // master never writes; anything else is fd teardown
+            }
         })
-        .expect("spawn signal thread");
-    ShutdownWatcher
+        .expect("spawn lifeline thread");
 }
 
-struct ShutdownWatcher; // detached thread — nothing to unwind
+/// A cheap handle that asks a [`Running`] host to stop gracefully. Callable
+/// from plain threads (`watch::Sender::send` needs no runtime); used by the
+/// max_requests recycle hook and tests.
+#[derive(Clone)]
+pub struct Stopper(watch::Sender<bool>);
 
-/// Drives the extension tasks. `serve` also stops them on a signal; `join` only waits;
-/// `drop` is the safety net.
+impl Stopper {
+    pub fn stop(&self) {
+        let _ = self.0.send(true);
+    }
+}
+
+/// Drives the extension tasks. `serve_worker` stops them on a worker signal;
+/// `join` only waits; `drop` is the safety net.
 pub struct Running {
     rt: Runtime,
     tasks: JoinSet<Outcome>,
@@ -288,15 +333,6 @@ pub struct Running {
 }
 
 impl Running {
-    /// rapira_core's entry: run until every extension finishes on its own OR a
-    /// terminate/interrupt arrives; on shutdown, ask every extension to stop and
-    /// drain, then return their outcomes so `main` can exit.
-    pub fn serve(mut self) -> Vec<Outcome> {
-        let _watcher = spawn_shutdown_watcher(self.stop_tx.clone());
-        self.drain_all()
-        // `_watcher` drops here; the detached reaper thread is reclaimed at process exit.
-    }
-
     /// Wait for every extension to finish on its own (no signal handling). For tests
     /// and run-to-completion extensions.
     pub fn join(mut self) -> Vec<Outcome> {
@@ -308,6 +344,32 @@ impl Running {
     pub fn stop(self) -> Vec<Outcome> {
         let _ = self.stop_tx.send(true);
         self.join()
+    }
+
+    /// External graceful-stop trigger (max_requests recycle, tests).
+    pub fn stopper(&self) -> Stopper {
+        Stopper(self.stop_tx.clone())
+    }
+
+    /// Forked-worker entry: run until done OR a QUIT/INT arrives — first signal
+    /// drains, a second one force-exits 131. The master's fork bracket owns
+    /// child signal hygiene: dispositions reset to SIG_DFL, USR1/USR2 ignored,
+    /// mask exactly {QUIT, INT} for the watcher here, TERM left at SIG_DFL so
+    /// the master's escalation kills fast.
+    pub fn serve_worker(mut self) -> Vec<Outcome> {
+        let stop_tx = self.stop_tx.clone();
+        std::thread::Builder::new()
+            .name("rapira-worker-signal".into())
+            .spawn(move || {
+                let sig = wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
+                log::info!(target: "rapira", "signal {sig} received; draining worker");
+                let _ = stop_tx.send(true);
+                let _ = wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
+                log::warn!(target: "rapira", "second signal; forcing worker exit");
+                std::process::exit(131);
+            })
+            .expect("spawn worker signal thread");
+        self.drain_all()
     }
 
     /// Take the staged tasks and drive them to completion on the runtime.
@@ -352,10 +414,13 @@ mod tests {
     /// run the default (terminate) action — the basis of graceful shutdown.
     #[test]
     fn sigwait_reaps_a_blocked_signal() {
-        arm_shutdown_signals();
-        // SAFETY: SIGTERM is blocked in this thread, so `raise` leaves it pending here for
-        // `sigwait` to dequeue; it never reaches the default (terminate) handler.
-        unsafe { libc::raise(libc::SIGTERM) };
-        assert_eq!(wait_shutdown_signal(), libc::SIGTERM);
+        let set = sigset(&[libc::SIGTERM]);
+        // SAFETY: blocks SIGTERM in this thread, so `raise` leaves it pending here
+        // for `sigwait` to dequeue; it never reaches the default (terminate) action.
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            libc::raise(libc::SIGTERM);
+        }
+        assert_eq!(wait_signal(&[libc::SIGTERM]), libc::SIGTERM);
     }
 }

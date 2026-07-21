@@ -121,7 +121,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                     Some(mut job) => {
                         send_error_head(&mut job.ctx, 503);
                         job.ctx.finish(false);
-                        sb_update(scoreboard::Event::Handled(true));
+                        sb_update(scoreboard::Event::Shed);
                     }
                 }
             }

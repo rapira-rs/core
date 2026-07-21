@@ -7,6 +7,7 @@ pub mod context;
 pub mod executor;
 pub mod handler;
 pub mod module;
+pub mod quota;
 pub mod rapira_worker;
 pub mod scoreboard;
 pub mod start;
@@ -16,7 +17,8 @@ use std::ffi::c_int;
 
 pub use bindings::*;
 pub use handler::RapiraHandle;
-pub use start::Rapira;
+pub use quota::WorkerHooks;
+pub use start::{PhpModule, Rapira};
 pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};
 
 // Zend SUCCESS/FAILURE differ across php-src versions, so they are hardcoded here rather
@@ -34,6 +36,7 @@ unsafe extern "C" {
     pub fn rapira_clear_last_error();
     pub fn rapira_request_teardown() -> c_int;
     pub fn rapira_process_init();
+    pub fn rapira_child_init();
     pub fn rapira_release_temporary_streams();
     pub fn rapira_request_activate() -> c_int;
     pub fn rapira_request_shutdown() -> c_int;

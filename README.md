@@ -1,20 +1,29 @@
 # core
 
 [![codecov](https://codecov.io/gh/rapira-rs/rapira/graph/badge.svg)](https://app.codecov.io/gh/rapira-rs/rapira)
-[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/rapira-rs/rapira?utm_source=badge)
 ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rapira-rs/rapira?utm_source=oss&utm_medium=github&utm_campaign=rapira-rs%2Frapira&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
-
 
 Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HTTP through the bundled `rapira_pingora` plugin (`crates/plugins/pingora`). This repo contains the SAPI core (`php_sys`), the extension host runtime, and the `rapira` binary. Linux and macOS only.
 
 ## Build requirements
 
-- Rust 1.97.1+ (stable; `rust-toolchain.toml` pins the channel)
+- Rust stable (`rust-toolchain.toml` selects the channel)
 - C compiler and `pkg-config` (the build compiles `wrapper.c`/`module.c` against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, NTS, built with the embed SAPI (`--enable-embed=shared`, provides `libphp.so`; `libphp.dylib` on macOS). ZTS builds are rejected at compile time. `ci/php-configure-flags.txt` has the full configure line used for release builds.
 
-Distro embed packages: Debian/Ubuntu `libphpX.Y-embed` (deb.sury.org / ppa:ondrej for 8.4+), Fedora/RHEL `php-embedded`, Arch `php-embed`, Alpine `phpXX-embed`. Homebrew's `php` formula does not build the embed SAPI — on macOS build PHP from source with the flags file. Debian/Ubuntu ship only a versioned `libphpX.Y.so`; the linker needs a plain `libphp.so` name, which `make test` (and CI) provide via a symlink — a direct `cargo build` there needs the same symlink on the linker path.
+Install PHP with the embed SAPI from your package manager:
+
+```sh
+sudo apt install php8.4-dev libphp8.4-embed   # Debian/Ubuntu (deb.sury.org / ppa:ondrej)
+sudo dnf install php-devel php-embedded       # Fedora/RHEL
+sudo pacman -S php php-embed                  # Arch
+sudo apk add php84-dev php84-embed            # Alpine
+```
+
+macOS: Homebrew's `php` has no embed SAPI — build from source with the flags file.
+Debian/Ubuntu ship only a versioned `libphpX.Y.so`; `make test` and CI symlink it to the
+plain `libphp.so` the linker wants, a direct `cargo build` needs the same symlink.
 
 PHP is discovered through `php-config`. If it is not the one on `PATH`, point to it explicitly:
 
@@ -42,8 +51,8 @@ Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml`
 |---|---|---|
 | `--config <PATH>` | none | Load settings from a `rapira.toml`. |
 | `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected. |
-| `--processes <N>` | CPU count | Worker processes. Accepted now; the fork-based pool will use it — until then one process runs (values > 1 log a warning). |
-| `--classic` | off | Re-include the script for every request (front controller, like PHP-FPM) instead of keeping it resident. |
+| `--processes <N>` | CPU count | Worker processes to fork (static count / max_children for dynamic & ondemand). |
+| `--classic` | off | Re-include the script for every request (front-controller style) instead of keeping it resident. |
 | `SCRIPT` | required¹ | PHP entry script. Overrides `pool.entrypoint`. |
 
 ¹ Required unless the config file sets `pool.entrypoint`.
@@ -65,13 +74,35 @@ server_port = 8000           # optional; defaults to the listen TCP port (80 for
 max_body_size_mb = 8         # optional; larger request bodies get a 413
 
 [pool]
-processes = 4                # accepted now; consumed by the fork-based pool — currently one process runs
+processes = 4                # worker processes to fork (max_children for pm = dynamic/ondemand)
 entrypoint = "index.php"     # relative → resolved against this file's directory
 classic = false              # optional; default false
+
+[pm]                         # optional; process-manager policy
+mode = "dynamic"             # static (default) | dynamic | ondemand
+min_spare = 1                # dynamic only: keep at least this many idle workers
+max_spare = 3                # dynamic only: trim to at most this many idle workers (rejected under other modes)
+max_requests = 0             # recycle a worker after N requests (+jitter); 0 = unlimited
+process_idle_timeout_secs = 10   # ondemand: retire an idle worker after this long
+process_control_timeout_secs = 30 # graceful-stop budget before QUIT → TERM → KILL
+request_terminate_timeout_secs = 0 # kill a worker whose single request runs longer (wall clock); 0 = off
+pidfile = "/run/rapira.pid"  # optional; relative paths resolve against this file's dir
 ```
 
 Unknown keys are rejected. A relative `SCRIPT` on the command line resolves against the
 current directory; a relative `pool.entrypoint` resolves against the config file's directory.
+
+### Process model
+
+rapira runs a **single-threaded master** that binds the listen socket(s), starts PHP once
+(`MINIT`, so OPcache's SHM is shared with every worker), then forks worker processes — a
+pre-fork process model. Each worker runs one NTS PHP interpreter behind its own async
+HTTP runtime and accepts on the inherited socket. The master itself never serves requests;
+it supervises: it reaps and respawns crashed workers (with backoff), recycles workers after
+`max_requests`, kills workers whose request exceeds `request_terminate_timeout_secs`,
+scales the pool for `pm = dynamic`/`ondemand`, and reloads on `SIGUSR2` by
+rolling the pool one worker at a time with no dropped connections. `SIGINT`/`SIGTERM` drains
+gracefully (a second one forces exit). Send signals to the master pid (see `pidfile`).
 
 ```sh
 rapira serve --config /etc/rapira/rapira.toml
@@ -145,5 +176,4 @@ make test   # PHP from php-config on PATH; override with PHP_CONFIG=/path/to/php
 ```
 
 The embed library is located under the `php-config` prefix automatically (`lib`, `lib64`,
-`lib/phpXX`; plain or versioned `libphp*.so`, `libphp.dylib` on macOS); install your
-distro's PHP embed package if it is missing.
+`lib/phpXX`; plain or versioned `libphp*.so`, `libphp.dylib` on macOS).

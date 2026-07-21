@@ -233,17 +233,38 @@ jobs:
             codesign -v "$BIN"
           fi
           "$BIN" --help
-          # best-effort boot check (portable: GNU timeout is absent on macOS)
+          # End-to-end gate: the fork master must boot, serve a request, and
+          # drain to exit 0 on SIGQUIT. Poll loops keep it portable (GNU
+          # timeout is absent on macOS).
           cat > "$RUNNER_TEMP/smoke.php" <<'PHP'
-          <?php while (true) { usleep(100000); }
+          <?php
+          $handler = static function (): void {
+              echo 'ok:' . getmypid();
+          };
+          while (rapira_handle_request($handler)) {
+          }
           PHP
-          "$BIN" serve "$RUNNER_TEMP/smoke.php" &
-          BOOT_PID=$!
-          sleep 6
-          if kill -0 "$BOOT_PID" 2>/dev/null; then
-            kill "$BOOT_PID" || true; echo "worker stayed up 6s — boot OK"
+          PORT=18923
+          "$BIN" serve --listen "127.0.0.1:$PORT" --processes 2 "$RUNNER_TEMP/smoke.php" &
+          MASTER=$!
+          served=""
+          for _ in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:$PORT/" 2>/dev/null | grep -q '^ok:'; then
+              served=1; break
+            fi
+            kill -0 "$MASTER" 2>/dev/null || break
+            sleep 0.5
+          done
+          if [ -z "$served" ]; then
+            echo "::error::release binary never served a request"
+            kill -9 "$MASTER" 2>/dev/null || true
+            exit 1
+          fi
+          kill -QUIT "$MASTER"
+          if wait "$MASTER"; then
+            echo "served and drained cleanly"
           else
-            echo "::warning::worker exited early (best-effort check, not gating)"
+            echo "::error::master exited non-zero after SIGQUIT"; exit 1
           fi
 
       - name: Archive
@@ -280,6 +301,7 @@ jobs:
     env:
       VERSION: ${{ needs.guard.outputs.version }}
       NFPM_VERSION: "2.47.0"
+      NFPM_SHA256: "3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with: { persist-credentials: false }
@@ -294,6 +316,7 @@ jobs:
           cp incoming/*.tar.gz dist/
           cp -r incoming/pkgroot-* dist/
           curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
+          echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c -
           sudo dpkg -i /tmp/nfpm.deb
           for arch in amd64 arm64; do
             for minor in 8.4 8.5; do

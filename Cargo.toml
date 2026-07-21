@@ -1,8 +1,7 @@
 [package]
 name = "rapira_core"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
-rust-version.workspace = true
 
 [[bin]]
 name = "rapira"
@@ -17,7 +16,9 @@ members = [
     "crates/extension_host",
     "crates/extensions_api",
     "crates/integration_tests",
+    "crates/master",
     "crates/php_sys",
+    "crates/scoreboard",
     "crates/plugins/*",
 ]
 
@@ -29,12 +30,11 @@ extension_host = { path = "crates/extension_host" }
 rapira_config = { path = "crates/config" }
 extension_api = { path = "crates/extensions_api" }
 rapira_pingora = { path = "crates/plugins/pingora" }
+rapira_master = { path = "crates/master" }
+rapira_scoreboard = { path = "crates/scoreboard" }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 env_logger = "0.11"
-
-[workspace.package]
-rust-version = "1.97.1"
 
 [workspace.lints.clippy]
 all = "warn"
@@ -49,6 +49,9 @@ codegen-units = 1
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+extension_api = { workspace = true }
+rapira_master = { workspace = true }
+rapira_scoreboard = { workspace = true }
 extension_host = { workspace = true }
 php_sys = { workspace = true }
 rapira_config = { workspace = true }
