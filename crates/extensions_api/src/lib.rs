@@ -11,14 +11,19 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+mod prepare;
+pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
+
 /// Fallible SDK paths report `anyhow::Error`; the host renders it to a log line.
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
 /// A native rapira extension: a long-lived service that drives PHP via [`Php`].
 ///
-/// Lifecycle: `init` (construct, injecting [`Extension::Config`]) → `run` (serve) →
-/// `shutdown` (drain). `run` and `shutdown` are never borrowed at once — the host drops
-/// the in-flight `run` future before it calls `shutdown` (see `extension_host`).
+/// Lifecycle: `init` (construct, injecting [`Extension::Config`]) → `prepare`
+/// (master-side, pre-fork: bind inheritable resources) → `run` (serve, in the worker
+/// process) → `shutdown` (drain). `run` and `shutdown` are never borrowed at once — the
+/// host drops the in-flight `run` future before it calls `shutdown` (see
+/// `extension_host`).
 pub trait Extension: Send + 'static {
     /// Extension-specific configuration, injected at construction. `()` when the
     /// extension needs none.
@@ -32,6 +37,16 @@ pub trait Extension: Send + 'static {
 
     /// Stable id for logs; unique across the registry.
     fn name(&self) -> &str;
+
+    /// Master-side pre-fork hook: synchronous, single-threaded, no runtime exists.
+    /// Runs once after `init`, before any fork and before `run`. Bind inheritable
+    /// resources here (listen sockets via [`PrepareCtx`]) and store them in `self` —
+    /// this same value crosses the fork, and `run` consumes them in the worker.
+    /// Must not spawn threads or create runtime primitives. Default: no-op
+    /// (queue-consumer extensions prepare nothing).
+    fn prepare(&mut self, _ctx: &mut PrepareCtx) -> Result<()> {
+        Ok(())
+    }
 
     /// Drive to completion. Serve requests here, reaching PHP through `php`. `Ok` on a
     /// clean finish, `Err` to report a failure. Must stay cooperative — reach `.await`

@@ -3,7 +3,6 @@ name = "php_sys"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
-rust-version.workspace = true
 
 [lints]
 workspace = true
@@ -12,6 +11,7 @@ workspace = true
 anyhow = { workspace = true }
 log = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["sync"] }
+rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
 
 [build-dependencies]

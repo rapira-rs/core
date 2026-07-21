@@ -7,6 +7,7 @@ pub mod context;
 pub mod executor;
 pub mod handler;
 pub mod module;
+pub mod quota;
 pub mod rapira_worker;
 pub mod scoreboard;
 pub mod start;
@@ -16,7 +17,8 @@ use std::ffi::c_int;
 
 pub use bindings::*;
 pub use handler::RapiraHandle;
-pub use start::Rapira;
+pub use quota::WorkerHooks;
+pub use start::{PhpModule, Rapira};
 pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};
 
 // Zend SUCCESS/FAILURE differ across php-src versions, so they are hardcoded here rather

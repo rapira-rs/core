@@ -127,7 +127,11 @@ static const char *RELOAD_MODULES[] = {"filter", NULL};
 // Run the per-request startup (startup=true) or shutdown hook of each RELOAD_MODULE.
 static void rapira_modules_request(bool startup) {
     zend_module_entry *module = NULL;
-    #pragma unroll 2
+    #if defined(__clang__)
+        #pragma unroll 4
+    #elif defined(__GNUC__)
+        #pragma GCC unroll 4
+    #endif
     for (const char **name = RELOAD_MODULES; *name; name++) {
         module = zend_hash_str_find_ptr(&module_registry, *name, strlen(*name));
         if (!module) {
@@ -300,7 +304,7 @@ static void rapira_reset_session(void) {
     // Transient guards that php_rinit_session_globals() scrubs at each request
     // start. Worker mode skips RINIT, so a userland save handler that bails
     // mid-call (or uses partial parent:: delegation) can leave them set. Cheap
-    // defensive parity:
+    // defensive reset:
     PS(mod_user_is_open) = 0;
     PS(in_save_handler) = 0;
     PS(set_handler) = 0;

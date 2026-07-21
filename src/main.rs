@@ -1,10 +1,13 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use extension_api::PrepareCtx;
 use extension_host::ExtensionHost;
-use log::{info, warn};
+use log::info;
 use php_sys::{Mode, Rapira};
-use rapira_config::{Listen, Overrides, Settings};
+use rapira_config::{Listen, Overrides, PmMode, Settings};
 use rapira_pingora::{Config as HttpConfig, HttpServer, Listen as HttpListen};
 use std::path::PathBuf;
+
+mod worker;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -80,11 +83,10 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     )?;
     let script: PathBuf = settings.pool.entrypoint.clone();
 
-    // Block SIGINT/SIGTERM before spawning any threads (PHP workers, the extension
-    // runtime, anything an extension's constructor may create), so rapira reaps them on
-    // a dedicated waiter and drains extensions on shutdown - instead of a signal
-    // handler that would fight Zend's per-request one.
-    extension_host::arm_shutdown_signals();
+    // Boot order: block the reload/child signals before anything else so a
+    // stray USR1/USR2 (default disposition: terminate) can't kill the master
+    // before its handlers exist.
+    rapira_master::block_early_signals();
 
     // rapira_config::Listen and rapira_pingora::Listen are distinct types on purpose: the
     // extension crate stays independent of core's config crate, and core owns the one
@@ -108,28 +110,67 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Both forms run the same worker pool; --classic only changes whether the script is
-    // re-included per request (Classic) or stays resident (Worker). Either way the script
-    // is also handed to host.run below, where the backend derives SCRIPT_FILENAME /
-    // DOCUMENT_ROOT / SCRIPT_NAME from it.
+    // Master-side pre-fork binds: every worker inherits these fds; the master
+    // holds them for its whole life so respawned generations re-inherit.
+    let mut prepare_ctx = PrepareCtx::new();
+    host.prepare_all(&mut prepare_ctx)?;
+    let listeners = prepare_ctx.listener_fds().to_vec();
+
+    // Both forms run the same worker model; --classic only changes whether the script is
+    // re-included per request (Classic) or stays resident (Worker).
     let mode = if settings.pool.classic {
         Mode::Classic
     } else {
         Mode::Worker(script.clone())
     };
-    if settings.pool.processes > 1 {
-        warn!(
-            target: "rapira",
-            "pool.processes={} configured, but the fork-based process pool is not implemented yet; running a single process",
-            settings.pool.processes
-        );
-    }
-    let rapira = Rapira::start(mode)?;
 
-    let outcomes = host.run(rapira.handle()?, script).serve();
-    drop(rapira);
-    for outcome in outcomes {
-        outcome.map_err(|msg| anyhow::anyhow!("extension failed: {msg}"))?;
+    // PHP MINIT once, in the still-single-threaded master (opcache SHM created
+    // here is shared with every forked worker). Workers never tear this down.
+    let module = Rapira::boot_master()?;
+
+    // 2x headroom: reload generations overlap without slot-reuse races.
+    let scoreboard = rapira_scoreboard::Scoreboard::create(
+        (settings.pool.processes * 2).clamp(1, rapira_scoreboard::SB_MAX_SLOTS),
+    )?;
+
+    let cfg = rapira_master::MasterConfig {
+        processes: settings.pool.processes,
+        pm: match settings.pm.mode {
+            PmMode::Static => rapira_master::PmMode::Static,
+            PmMode::Dynamic {
+                min_spare,
+                max_spare,
+            } => rapira_master::PmMode::Dynamic {
+                min_spare,
+                max_spare,
+            },
+            PmMode::Ondemand => rapira_master::PmMode::Ondemand,
+        },
+        process_idle_timeout: settings.pm.process_idle_timeout,
+        process_control_timeout: settings.pm.process_control_timeout,
+        pidfile: settings.pm.pidfile.clone(),
+        listeners,
+    };
+    let max_requests = settings.pm.max_requests;
+
+    // The closure runs ONLY in freshly-forked children: each child's COW copy
+    // of `host_cell` is Some, taken exactly once per child. The parent's copy
+    // stays untouched (and keeps the prepared fds alive for re-inheritance).
+    let mut host_cell = Some(host);
+    let stop = rapira_master::run(cfg, scoreboard, move |env| {
+        let host = host_cell.take().expect("fresh child owns the host copy");
+        worker::worker_body(env, host, mode.clone(), script.clone(), max_requests)
+    });
+
+    match stop {
+        Ok(rapira_master::StopReason::Drained) => {
+            drop(module); // clean php_module_shutdown in the master
+            Ok(())
+        }
+        Ok(rapira_master::StopReason::Forced) => std::process::exit(130),
+        Err(e) => {
+            log::error!(target: "rapira", "master failed: {e:#}");
+            std::process::exit(rapira_master::MASTER_EXIT_FAILBOOT);
+        }
     }
-    Ok(())
 }

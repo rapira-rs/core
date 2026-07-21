@@ -42,3 +42,13 @@ jobs:
               with: { components: clippy }
             - uses: Swatinem/rust-cache@v2
             - run: cargo clippy --workspace --all-targets -- -D warnings
+            # --all-targets skips the feature-gated e2e target; lint it explicitly.
+            - run: cargo clippy -p integration_tests --features e2e --tests -- -D warnings
+
+            # The pre-fork master must never gain an async runtime: it forks, and a
+            # live tokio runtime cannot be safely carried across fork().
+            - name: Master stays tokio-free
+              run: |
+                  if cargo tree -i tokio -p rapira_master 2>/dev/null | grep -q .; then
+                    echo "::error::rapira_master must not depend on tokio (it forks)"; exit 1
+                  fi

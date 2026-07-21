@@ -1,35 +1,57 @@
 use log::{error, info, trace};
 use std::cell::RefCell;
 use std::marker::PhantomData;
-use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use types::Job;
 
+use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
-use crate::scoreboard::{Scoreboard, ScoreboardSnapshot, sb_set};
+use crate::scoreboard::{Event, ScoreboardSnapshot, sb_set, sb_update};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 thread_local! {
     // Owned by the single PHP worker thread; installed once by worker_main and
-    // reused across worker restarts on the same OS thread. The fork-based pool
-    // keeps this shape: one receiver per worker process.
+    // reused across worker restarts on the same OS thread. One receiver per
+    // worker process in the fork-based pool.
     static JOB_RX: RefCell<Option<Receiver<Job>>> = const { RefCell::new(None) };
+}
+
+/// Proof that sapi_startup + php_module_startup (MINIT) succeeded in THIS
+/// process. `!Send`: created and dropped on the module-startup thread. Drop
+/// runs the module teardown, so exactly one place holds it:
+/// - fused path: inside `Rapira` (single-process semantics);
+/// - fork mode: the master, for its whole life (opcache SHM mmap'd at MINIT is
+///   shared by every fork). Forked workers NEVER drop it — they leave via
+///   process exit, which skips Drop; the master owns the single engine teardown.
+pub struct PhpModule {
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for PhpModule {
+    fn drop(&mut self) {
+        unsafe {
+            php_module_shutdown();
+            sapi_shutdown();
+        }
+    }
 }
 
 pub struct Rapira {
     pub(crate) intake: Option<Sender<Job>>,
     worker: Option<JoinHandle<()>>,
-    pub scoreboard: Arc<Scoreboard>,
+    /// Some = fused/private board (tests, single-process); None = external slot.
+    board: Option<rapira_scoreboard::Scoreboard>,
+    /// Some = this value owns module teardown (fused path); None = worker flavor.
+    module: Option<PhpModule>,
     _not_send: PhantomData<*const ()>, // !Send + !Sync, to prevent dropping from a foreign thread (which would be UB)
 }
 
 impl Rapira {
-    pub fn start(mode: Mode) -> anyhow::Result<Self> {
-        info!(target: "rapira", "booting with mode: {mode:?}");
-        let scoreboard: Arc<Scoreboard> = Arc::new(Scoreboard::default());
-
+    /// Master-side boot: MINIT only, on the calling (still single-threaded)
+    /// thread. No worker thread, no channels. Once per process, pre-fork.
+    pub fn boot_master() -> anyhow::Result<PhpModule> {
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
             rapira_process_init();
@@ -45,24 +67,58 @@ impl Rapira {
                 php_module_shutdown();
                 sapi_shutdown();
             }
-
             return Err(anyhow::anyhow!("php_module_startup failed"));
         }
+        Ok(PhpModule {
+            _not_send: PhantomData,
+        })
+    }
+
+    /// Worker-side (post-fork) start: job channel + the single PHP worker
+    /// thread, against the engine inherited from `boot_master` in the parent.
+    /// No module startup here; the returned value never tears the module down.
+    pub fn start_worker(mode: Mode, hooks: WorkerHooks) -> anyhow::Result<Self> {
+        let WorkerHooks {
+            max_requests,
+            on_quota,
+            on_unhealthy,
+            slot,
+        } = hooks;
+        let (board, slot) = match slot {
+            Some(s) => (None, s),
+            None => {
+                let board = rapira_scoreboard::Scoreboard::create(1)?;
+                (Some(board), board.slot(0).expect("slot 0 exists"))
+            }
+        };
+        slot.bind(std::process::id());
 
         let (intake, intake_rx) = mpsc::channel::<Job>(1024);
 
         trace!(target: "rapira", "spawning worker thread");
-        let worker: JoinHandle<()> = {
-            let scoreboard = scoreboard.clone();
-            thread::spawn(move || worker_main(scoreboard, mode, intake_rx))
-        };
+        let worker: JoinHandle<()> = thread::spawn(move || {
+            sb_set(slot);
+            quota::install(max_requests, on_quota, on_unhealthy);
+            worker_main(mode, intake_rx)
+        });
 
         Ok(Self {
             intake: Some(intake),
             worker: Some(worker),
-            scoreboard,
+            board,
+            module: None,
             _not_send: PhantomData,
         })
+    }
+
+    /// Fused single-process boot — module + worker in one. The in-process
+    /// integration tests run through here.
+    pub fn start(mode: Mode) -> anyhow::Result<Self> {
+        info!(target: "rapira", "booting with mode: {mode:?}");
+        let module = Self::boot_master()?;
+        let mut rapira = Self::start_worker(mode, WorkerHooks::default())?;
+        rapira.module = Some(module);
+        Ok(rapira)
     }
 
     pub fn shutdown(self) {
@@ -70,7 +126,10 @@ impl Rapira {
     }
 
     pub fn scoreboard(&self) -> ScoreboardSnapshot {
-        self.scoreboard.snapshot()
+        match &self.board {
+            Some(board) => crate::scoreboard::snapshot(board),
+            None => ScoreboardSnapshot::default(),
+        }
     }
 }
 
@@ -79,6 +138,8 @@ impl Drop for Rapira {
         info!(target: "rapira", "shutting down, dropping");
         self.intake = None;
         let Some(worker) = self.worker.take() else {
+            // No thread to wait for; preserve "no teardown" exactly.
+            std::mem::forget(self.module.take());
             return;
         };
 
@@ -97,19 +158,18 @@ impl Drop for Rapira {
                 target: "rapira",
                 "worker still running after grace; skipping PHP module shutdown to avoid UB on a live thread"
             );
+            // Leak the module teardown; process exit reclaims it.
+            std::mem::forget(self.module.take());
             return;
         }
 
         let _ = worker.join();
-        unsafe {
-            php_module_shutdown();
-            sapi_shutdown();
-        }
+        // Fused: module teardown, same order as before the split; worker flavor: no-op.
+        drop(self.module.take());
     }
 }
 
-fn worker_main(board: Arc<Scoreboard>, mode: Mode, rx: Receiver<Job>) {
-    sb_set(board);
+fn worker_main(mode: Mode, rx: Receiver<Job>) {
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
     loop {
         unsafe {
@@ -137,8 +197,17 @@ fn worker_main(board: Arc<Scoreboard>, mode: Mode, rx: Receiver<Job>) {
 /// closed — every `Sender`/`RapiraHandle` was dropped, i.e. Rapira is shutting
 /// down. The single place the receiver is consumed; the classic loop,
 /// worker-mode `next_job`, and the boot-failure drain all go through here.
+/// Also the scoreboard idle/active hinge: parked here = spare capacity.
 pub(crate) fn pull_job() -> Option<Job> {
     // Holding the RefCell borrow across the blocking recv is safe: the thread is
     // parked inside it and pull_job is never re-entered on this thread.
-    JOB_RX.with_borrow_mut(|rx| rx.as_mut()?.blocking_recv())
+    JOB_RX.with_borrow_mut(|rx| {
+        let rx = rx.as_mut()?;
+        sb_update(Event::Idle);
+        let job = rx.blocking_recv();
+        if job.is_some() {
+            sb_update(Event::Active);
+        }
+        job
+    })
 }
