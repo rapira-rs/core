@@ -12,7 +12,6 @@ use crate::{
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
     php_request_startup, rapira_pg, rapira_run_handler,
-    start::JobRx,
     types::Job,
     zend_fcall_info, zend_fcall_info_cache, *,
 };
@@ -44,7 +43,6 @@ enum HandleAction {
 }
 
 struct WorkerChan {
-    rx: JobRx,
     first_call: bool,
     recycle: bool,
 }
@@ -95,10 +93,9 @@ fn run_cycle(script: &Path) -> Cycle {
     }
 }
 
-pub fn rapira_worker(script: PathBuf, rx: JobRx) -> WorkerExit {
+pub fn rapira_worker(script: PathBuf) -> WorkerExit {
     WORKER.with_borrow_mut(|w| {
         *w = Some(WorkerChan {
-            rx: rx.clone(),
             first_call: true,
             recycle: false,
         })
@@ -119,7 +116,7 @@ pub fn rapira_worker(script: PathBuf, rx: JobRx) -> WorkerExit {
                 // Can't run PHP. Answer one queued job with 503, then loop to
                 // retry the boot (demand-driven — no jobs means we block cheaply
                 // here). None == Rapira dropped: exit instead of hanging Drop.
-                match pull_job(&rx) {
+                match pull_job() {
                     None => break WorkerExit::Closed,
                     Some(mut job) => {
                         send_error_head(&mut job.ctx, 503);
@@ -233,7 +230,7 @@ fn next_job() -> Option<Job> {
             sb_update(scoreboard::Event::Healthy);
         }
         log_and_clear_last_error();
-        pull_job(&wc.rx)
+        pull_job()
     })
 }
 

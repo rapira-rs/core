@@ -80,7 +80,7 @@ impl FromStr for Listen {
 #[derive(Debug, Default)]
 pub struct Overrides {
     pub listen: Option<Listen>,
-    pub threads: Option<usize>,
+    pub processes: Option<usize>,
     /// `--classic`; force-on only (there is no `--no-classic`).
     pub classic: bool,
     /// Positional `SCRIPT`; overrides `pool.entrypoint`.
@@ -106,7 +106,7 @@ pub struct HttpSettings {
 
 #[derive(Debug)]
 pub struct PoolSettings {
-    pub threads: usize,
+    pub processes: usize,
     /// Absolute path to the PHP entry script.
     pub entrypoint: PathBuf,
     pub classic: bool,
@@ -136,14 +136,15 @@ struct HttpSection {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PoolSection {
-    threads: Option<usize>,
+    processes: Option<usize>,
     entrypoint: Option<String>,
     classic: Option<bool>,
 }
 
-/// Default worker count: one per logical CPU. Falls back to 1 if the platform can't
-/// report it. (Clamped to 1 inside `Rapira::start` until the fork-based pool lands.)
-fn default_threads() -> usize {
+/// Default worker-process count: one per logical CPU. Falls back to 1 if the
+/// platform can't report it. Consumed by the fork-based pool; until it lands the
+/// server runs a single process and values > 1 log a warning at boot.
+fn default_processes() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -205,12 +206,12 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow::anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
 
-    let threads = cli
-        .threads
-        .or(file.pool.threads)
-        .unwrap_or_else(default_threads);
-    if threads == 0 {
-        bail!("threads must be at least 1");
+    let processes = cli
+        .processes
+        .or(file.pool.processes)
+        .unwrap_or_else(default_processes);
+    if processes == 0 {
+        bail!("processes must be at least 1");
     }
 
     let classic = cli.classic || file.pool.classic.unwrap_or(false);
@@ -239,7 +240,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
             max_body_size,
         },
         pool: PoolSettings {
-            threads,
+            processes,
             entrypoint,
             classic,
         },
@@ -280,20 +281,20 @@ mod tests {
             [http]
             listen = "0.0.0.0:9000"
             [pool]
-            threads = 2
+            processes = 2
             entrypoint = "app.php"
         "#,
         )
         .unwrap();
         let cli = Overrides {
             listen: Some("127.0.0.1:1234".parse().unwrap()),
-            threads: Some(7),
+            processes: Some(7),
             classic: false,
             entrypoint: Some(PathBuf::from("cli.php")),
         };
         let s = merge(file, cli, Some(Path::new("/etc/rapira"))).unwrap();
         assert_eq!(s.http.listen.to_string(), "127.0.0.1:1234");
-        assert_eq!(s.pool.threads, 7);
+        assert_eq!(s.pool.processes, 7);
         assert!(s.pool.entrypoint.is_absolute());
         assert!(s.pool.entrypoint.ends_with("cli.php"));
     }
@@ -352,5 +353,7 @@ mod tests {
     fn unknown_keys_are_rejected() {
         assert!(load_str("[pool]\nbogus = 1\n").is_err());
         assert!(load_str("[nope]\nx = 1\n").is_err());
+        // pre-1.0 rename: the old `threads` key is gone, not aliased
+        assert!(load_str("[pool]\nthreads = 1\n").is_err());
     }
 }

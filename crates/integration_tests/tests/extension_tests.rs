@@ -70,9 +70,10 @@ fn check(res: &Response, want: &str) -> Result<()> {
 #[test]
 fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     let _guard = php_lock();
-    // Worker mode: the resident script answers each exec with "ok:<from>". Two workers
-    // so the two join!ed execs can run in parallel.
-    let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")), 2)?;
+    // Worker mode: the resident script answers each exec with "ok:<from>". The two
+    // join!ed execs serialize onto the single interpreter; this proves completion,
+    // not parallelism.
+    let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")))?;
     let mut host = ExtensionHost::new();
     host.register::<Driver>(())?;
     let outcomes = host
@@ -89,7 +90,7 @@ fn classic_mode_serves_exec() -> anyhow::Result<()> {
     let _guard = php_lock();
     // Classic mode runs the front controller per exec, with the URI in $_GET, so it
     // echoes "ok:<from>" — exec works with a real front controller (why serve takes a SCRIPT).
-    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionHost::new();
     host.register::<Driver>(())?;
     let outcomes = host
@@ -140,7 +141,7 @@ impl Extension for ErrorPathDriver {
 #[test]
 fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture("error-keeps-headers-worker.php")), 1)?;
+    let rapira = Rapira::start(Mode::Worker(fixture("error-keeps-headers-worker.php")))?;
     let mut host = ExtensionHost::new();
     host.register::<ErrorPathDriver>(())?;
     let outcomes = host
@@ -192,7 +193,7 @@ impl Extension for TruncatedDriver {
 #[test]
 fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture("output-then-throw-worker.php")), 1)?;
+    let rapira = Rapira::start(Mode::Worker(fixture("output-then-throw-worker.php")))?;
     let mut host = ExtensionHost::new();
     host.register::<TruncatedDriver>(())?;
     let outcomes = host
@@ -211,7 +212,7 @@ fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
 #[test]
 fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionHost::new();
     host.register::<ErrorPathDriver>(())?;
     let outcomes = host
@@ -258,7 +259,7 @@ impl Extension for Resident {
 fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
     let _guard = php_lock();
     RESIDENT_SHUTDOWN.store(false, Ordering::Relaxed);
-    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionHost::new();
     host.register::<Resident>(())?;
     let running = host.run(rapira.handle()?, fixture("ext-driver-classic.php"));
@@ -283,9 +284,9 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
 fn many_extensions_run() -> anyhow::Result<()> {
     let _guard = php_lock();
     const N: usize = 12;
-    // A few PHP workers so the fan-out has room to overlap (12 drivers × 2 execs over 4
-    // workers). This proves all N extensions complete, not a strict parallelism bound.
-    let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")), 4)?;
+    // The fan-out (12 drivers × 2 execs) serializes onto the single PHP interpreter.
+    // This proves all N extensions complete, not a strict parallelism bound.
+    let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")))?;
     let mut host = ExtensionHost::new();
     for _ in 0..N {
         host.register::<Driver>(())?;
@@ -334,7 +335,7 @@ fn duplicate_extension_name_is_rejected() {
 /// Register one `E`, drive it to completion in classic mode, and return its outcomes.
 fn run_one<E: Extension<Config = ()>>() -> anyhow::Result<Vec<Result<(), String>>> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionHost::new();
     host.register::<E>(())?;
     let outcomes = host
@@ -430,7 +431,7 @@ impl Extension for SlowShutdown {
 #[test]
 fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Classic, 1)?;
+    let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionHost::new();
     host.register::<SlowShutdown>(())?;
     // A tiny grace so the timeout branch fires fast instead of after the 30s default.

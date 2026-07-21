@@ -19,7 +19,7 @@ fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()
         env!("CARGO_MANIFEST_DIR"),
         "/tests/observer-quiet.ini"
     )));
-    let r = Rapira::start(Mode::Worker(fixture("session-bailout-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("session-bailout-worker.php")))?;
     let h = r.handle()?;
 
     // each job bails in teardown and recycles; the cycle end walks the observer chain

@@ -29,7 +29,7 @@ fn post(fixture_name: &str, body: Box<dyn Read + Send>, len: i64) -> Request {
 #[test]
 fn post_body_survives_partial_reads() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("input-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("input-worker.php")))?;
     let h = r.handle()?;
 
     let payload = b"hello rapira post".to_vec(); // 17 bytes
@@ -59,7 +59,7 @@ fn post_body_survives_partial_reads() -> anyhow::Result<()> {
 #[test]
 fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("abort-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("abort-worker.php")))?;
     let h = r.handle()?;
 
     // Drop the receiver before the fixture's first write (it sleeps to hand us
@@ -88,7 +88,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
 #[test]
 fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("resources-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("resources-worker.php")))?;
     let h = r.handle()?;
 
     let send = |h: &php_sys::RapiraHandle| -> anyhow::Result<i64> {
@@ -121,7 +121,7 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
 #[test]
 fn https_server_vars() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("server-variables.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("server-variables.php")))?;
     let h = r.handle()?;
     let mut request = req("/", "server-variables.php");
     request.https = true;
@@ -147,7 +147,7 @@ fn https_server_vars() -> anyhow::Result<()> {
 #[test]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("exception-handler-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("exception-handler-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain(h.handle_blocking(req("/", "exception-handler-worker.php"))?);
     let (s2, b2) = drain(h.handle_blocking(req("/", "exception-handler-worker.php"))?);
@@ -175,7 +175,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
 #[test]
 fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("throw-quiet-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("throw-quiet-worker.php")))?;
     let h = r.handle()?;
 
     let mut rx = h.handle_blocking(req("/", "throw-quiet-worker.php"))?;
@@ -202,7 +202,7 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
 #[test]
 fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("session-bailout-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("session-bailout-worker.php")))?;
     let h = r.handle()?;
     let (_, b1) = drain(h.handle_blocking(req("/", "session-bailout-worker.php"))?);
     let (_, b2) = drain(h.handle_blocking(req("/", "session-bailout-worker.php"))?);
@@ -228,10 +228,7 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
 #[test]
 fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(
-        Mode::Worker(fixture("fatal-exception-handler-worker.php")),
-        1,
-    )?;
+    let r = Rapira::start(Mode::Worker(fixture("fatal-exception-handler-worker.php")))?;
     let h = r.handle()?;
     let (s1, _) = drain(h.handle_blocking(req("/", "fatal-exception-handler-worker.php"))?);
     assert!(s1 == 200, "req1 must return a head, not hang (got {s1})");
@@ -250,7 +247,7 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
 #[test]
 fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("stuck-flag-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("stuck-flag-worker.php")))?;
     let h = r.handle()?;
     // req1: fatal inside the include-wrapper -> bailout strands in_user_include (returning proves no hang)
     let _ = drain(h.handle_blocking(req("/?step=boom", "stuck-flag-worker.php"))?);
@@ -270,7 +267,7 @@ fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
 #[test]
 fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("fatal-backtrace-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("fatal-backtrace-worker.php")))?;
     let h = r.handle()?;
     let mem = |b: String| -> i64 {
         b.trim()
@@ -299,7 +296,7 @@ fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
 #[test]
 fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("shutdown-fatal-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("shutdown-fatal-worker.php")))?;
     let h = r.handle()?;
     let (_, b1) = drain(h.handle_blocking(req("/?boom=1", "shutdown-fatal-worker.php"))?);
     let (s2, b2) = drain(h.handle_blocking(req("/", "shutdown-fatal-worker.php"))?);
@@ -317,7 +314,7 @@ fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
 #[test]
 fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("abort-ignore-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("abort-ignore-worker.php")))?;
     let h = r.handle()?;
     // Drop the receiver before the fixture's write (it sleeps to hand us the
     // window): the write observes the closed channel and raises the abort.

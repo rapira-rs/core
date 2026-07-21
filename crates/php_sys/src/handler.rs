@@ -10,15 +10,15 @@ use crate::{
 // never holds more than one message.
 const FRAME_CAP: usize = 1;
 
-/// A cheaply-cloneable handle for submitting jobs to a running [`Rapira`] pool.
+/// A cheaply-cloneable handle for submitting jobs to a running [`Rapira`] instance.
 ///
 /// # Shutdown contract
-/// Every clone holds a copy of the intake `Sender`. Dropping `Rapira` joins all
-/// worker threads after dropping its own `Sender`; the job channel only closes
+/// Every clone holds a copy of the intake `Sender`. Dropping `Rapira` joins the
+/// worker thread after dropping its own `Sender`; the job channel only closes
 /// once every `RapiraHandle` clone has also been dropped. A clone kept alive past
-/// its `Rapira` leaves workers parked on the open channel — `Drop for Rapira` then
-/// gives up after a bounded grace and skips the PHP teardown. Drop all handles
-/// first for a clean shutdown.
+/// its `Rapira` leaves the worker parked on the open channel — `Drop for Rapira`
+/// then gives up after a bounded grace and skips the PHP teardown. Drop all
+/// handles first for a clean shutdown.
 #[derive(Clone)]
 pub struct RapiraHandle {
     intake: mpsc::Sender<Job>,

@@ -42,7 +42,7 @@ Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml`
 |---|---|---|
 | `--config <PATH>` | none | Load settings from a `rapira.toml`. |
 | `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected. |
-| `--threads <N>` | 1 | PHP worker threads; pinned to 1 (values > 1 log a warning). Multi-worker returns with the fork-based pool. |
+| `--processes <N>` | CPU count | Worker processes. Accepted now; the fork-based pool will use it — until then one process runs (values > 1 log a warning). |
 | `--classic` | off | Re-include the script for every request (front controller, like PHP-FPM) instead of keeping it resident. |
 | `SCRIPT` | required¹ | PHP entry script. Overrides `pool.entrypoint`. |
 
@@ -65,7 +65,7 @@ server_port = 8000           # optional; defaults to the listen TCP port (80 for
 max_body_size_mb = 8         # optional; larger request bodies get a 413
 
 [pool]
-threads = 1                  # currently always 1; multi-worker returns with the fork-based pool
+processes = 4                # accepted now; consumed by the fork-based pool — currently one process runs
 entrypoint = "index.php"     # relative → resolved against this file's directory
 classic = false              # optional; default false
 ```
@@ -123,7 +123,7 @@ Logging is `env_logger`-based and configured with the `RUST_LOG` environment var
 
 Log targets:
 
-- `rapira` — server lifecycle: boot, worker threads, shutdown
+- `rapira` — server lifecycle: boot, worker lifecycle, shutdown
 - `ext` — extension task outcomes
 - `php` — output and errors coming from PHP itself
 - dependencies log under their module paths (`pingora`, `tokio`, …)

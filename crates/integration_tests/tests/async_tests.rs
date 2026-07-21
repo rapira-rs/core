@@ -4,7 +4,7 @@ use php_sys::{Mode, Rapira};
 #[tokio::test]
 async fn hello_world_worker() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
-    let r = Rapira::start(Mode::Worker(fixture("worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("worker.php")))?;
     let h = r.handle()?;
     let (_, body1) = drain_async(h.handle(req("/?x=1", "worker.php")).await?).await;
     assert!(
@@ -19,7 +19,7 @@ async fn hello_world_worker() -> anyhow::Result<()> {
 #[tokio::test]
 async fn worker_request_isolation() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
-    let r = Rapira::start(Mode::Worker(fixture("leak-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("leak-worker.php")))?;
     let h = r.handle()?;
     let (_, body1) = drain_async(h.handle(req("/?x=1", "leak-worker.php")).await?).await;
     let (_, body2) = drain_async(h.handle(req("/?x=2", "leak-worker.php")).await?).await;
@@ -44,7 +44,7 @@ async fn worker_request_isolation() -> anyhow::Result<()> {
 async fn worker_survives_exit() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
-    let r = Rapira::start(Mode::Worker(fixture("bailout-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("bailout-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain_async(h.handle(req("/?boom=0", "bailout-worker.php")).await?).await; // normal
     let (s2, b2) = drain_async(h.handle(req("/?boom=1", "bailout-worker.php")).await?).await; // exit(1) -> unwind-exit
@@ -78,7 +78,7 @@ async fn worker_survives_exit() -> anyhow::Result<()> {
 async fn fibers_stress_worker() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
-    let r = Rapira::start(Mode::Worker(fixture("fibers-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("fibers-worker.php")))?;
     let h = r.handle()?;
     let (status, body) = drain_async(h.handle(req("/", "fibers-worker.php")).await?).await;
     drop(h);
@@ -99,7 +99,7 @@ async fn fibers_stress_worker() -> anyhow::Result<()> {
 async fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
-    let r = Rapira::start(Mode::Worker(fixture("teardown-bailout-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("teardown-bailout-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain_async(
         h.handle(req("/?boom=0", "teardown-bailout-worker.php"))
@@ -149,7 +149,7 @@ async fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
 async fn many_producers_test() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
-    let r = Rapira::start(Mode::Worker(fixture("worker.php")), 10)?;
+    let r = Rapira::start(Mode::Worker(fixture("worker.php")))?;
 
     let producers: Vec<_> = (0..24)
         .map(|t| {
@@ -191,7 +191,7 @@ async fn many_producers_test() -> anyhow::Result<()> {
 async fn worker_basic_auth() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
-    let r = Rapira::start(Mode::Worker(fixture("auth-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("auth-worker.php")))?;
     let h = r.handle()?;
 
     // Authorization: Basic base64("user:pass")
@@ -227,7 +227,7 @@ async fn worker_basic_auth() -> anyhow::Result<()> {
 async fn server_variables() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
-    let r: Rapira = Rapira::start(Mode::Worker(fixture("server-variables.php")), 1)?;
+    let r: Rapira = Rapira::start(Mode::Worker(fixture("server-variables.php")))?;
     let h: php_sys::RapiraHandle = r.handle()?;
 
     let mut request: php_sys::Request =
@@ -272,7 +272,7 @@ async fn server_variables() -> anyhow::Result<()> {
 async fn worker_finish_request() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
-    let r = Rapira::start(Mode::Worker(fixture("finish-request-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("finish-request-worker.php")))?;
     let h = r.handle()?;
 
     let (s1, b1) = drain_async(h.handle(req("/", "finish-request-worker.php")).await?).await;
@@ -313,7 +313,7 @@ async fn getenv_worker() -> anyhow::Result<()> {
     unsafe {
         std::env::set_var("FOO", "BAR");
     }
-    let r = Rapira::start(Mode::Worker(fixture("env-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("env-worker.php")))?;
     let h = r.handle()?;
     let (status, body) = drain_async(h.handle(req("/", "env-worker.php")).await?).await;
     drop(h);
@@ -326,7 +326,7 @@ async fn getenv_worker() -> anyhow::Result<()> {
 #[tokio::test]
 async fn scoreboard_counts_worker() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
-    let r = Rapira::start(Mode::Worker(fixture("throw-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("throw-worker.php")))?;
     let h = r.handle()?;
     let _ = drain_async(h.handle(req("/?boom=0", "throw-worker.php")).await?).await; // ok
     let _ = drain_async(h.handle(req("/?boom=0", "throw-worker.php")).await?).await; // ok
@@ -346,7 +346,7 @@ async fn scoreboard_counts_worker() -> anyhow::Result<()> {
 #[tokio::test]
 async fn worker_session_isolation() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
-    let r = Rapira::start(Mode::Worker(fixture("session-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("session-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain_async(h.handle(req("/", "session-worker.php")).await?).await;
     let (s2, b2) = drain_async(h.handle(req("/", "session-worker.php")).await?).await;
