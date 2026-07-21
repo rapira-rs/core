@@ -2,19 +2,17 @@
     "version": 4,
     "configurations": [
         {
-            "name": "php-zts",
+            "name": "php-nts",
             "includePath": [
                 "${workspaceFolder}/**",
-                "${env:HOME}/.local/php-zts/include/php",
-                "${env:HOME}/.local/php-zts/include/php/main",
-                "${env:HOME}/.local/php-zts/include/php/TSRM",
-                "${env:HOME}/.local/php-zts/include/php/Zend",
-                "${env:HOME}/.local/php-zts/include/php/ext",
-                "${env:HOME}/.local/php-zts/include/php/ext/date/lib"
+                "/usr/include/php",
+                "/usr/include/php/main",
+                "/usr/include/php/TSRM",
+                "/usr/include/php/Zend",
+                "/usr/include/php/ext",
+                "/usr/include/php/ext/date/lib"
             ],
-            "defines": [
-                "ZTS=1"
-            ],
+            "defines": [],
             "compilerPath": "/usr/bin/clang",
             "cStandard": "c23",
             "intelliSenseMode": "linux-clang-x64",

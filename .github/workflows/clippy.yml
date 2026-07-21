@@ -17,10 +17,6 @@ jobs:
 
     clippy:
         runs-on: ubuntu-latest
-        strategy:
-            fail-fast: false
-            matrix:
-                phpts: [ts, nts]
         steps:
             - uses: actions/checkout@v4
               with: { persist-credentials: false }
@@ -29,7 +25,7 @@ jobs:
               with:
                   php-version: "8.5"
               env:
-                  phpts: ${{ matrix.phpts }}
+                  phpts: nts
 
             - name: Build deps for bindgen/cc
               run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev

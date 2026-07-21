@@ -32,7 +32,7 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// PHP worker threads (ZTS only; NTS always uses 1). Defaults to the CPU count.
+    /// PHP worker threads. Rapira runs one PHP thread; values > 1 are ignored with a warning.
     #[arg(long)]
     threads: Option<usize>,
 
@@ -91,10 +91,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let http_cfg = HttpConfig {
         listen: match settings.http.listen {
             Listen::Tcp(addr) => HttpListen::Tcp(addr),
-            #[cfg(unix)]
             Listen::Unix(path) => HttpListen::Unix(path),
-            #[cfg(not(unix))]
-            Listen::Unix(_) => anyhow::bail!("unix sockets are unsupported on this platform"),
         },
         server_name: settings.http.server_name,
         server_port: settings.http.server_port,

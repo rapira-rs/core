@@ -4,27 +4,28 @@
 ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rustatian/rapira-rs?utm_source=oss&utm_medium=github&utm_campaign=rustatian%2Frapira-rs&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 
-Rapira - PHP application server. Embeds PHP (ZTS or NTS) via the embed SAPI, runs requests on a pool of PHP worker threads, and serves HTTP through the bundled `rapira_pingora` plugin (`crates/plugins/pingora`). This repo contains the SAPI core (`php_sys`), the extension host runtime, and the `rapira` binary.
+Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HTTP through the bundled `rapira_pingora` plugin (`crates/plugins/pingora`). This repo contains the SAPI core (`php_sys`), the extension host runtime, and the `rapira` binary. Linux and macOS only.
 
 ## Build requirements
 
 - Rust 1.97.1+ (stable; `rust-toolchain.toml` pins the channel)
 - C compiler and `pkg-config` (the build compiles `wrapper.c`/`module.c` against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
-- PHP 8.4 or 8.5 built with the embed SAPI (`--enable-embed=shared`, provides `libphp.so`). ZTS (`--enable-zts`) is required for more than one worker thread; on an NTS build rapira runs single-threaded. `ci/php-configure-flags.txt` has the full configure line used for release builds.
+- PHP 8.4 or 8.5, NTS, built with the embed SAPI (`--enable-embed=shared`, provides `libphp.so`; `libphp.dylib` on macOS). ZTS builds are rejected at compile time. `ci/php-configure-flags.txt` has the full configure line used for release builds.
+
+Distro embed packages: Debian/Ubuntu `libphpX.Y-embed` (deb.sury.org / ppa:ondrej for 8.4+), Fedora/RHEL `php-embedded`, Arch `php-embed`, Alpine `phpXX-embed`. Homebrew's `php` formula does not build the embed SAPI — on macOS build PHP from source with the flags file. Debian/Ubuntu ship only a versioned `libphpX.Y.so`; the linker needs a plain `libphp.so` name, which `make test` (and CI) provide via a symlink — a direct `cargo build` there needs the same symlink on the linker path.
 
 PHP is discovered through `php-config`. If it is not the one on `PATH`, point to it explicitly:
 
 ```sh
-PHP_CONFIG=$HOME/.local/php-zts/bin/php-config cargo build --release
+PHP_CONFIG=$HOME/.local/php-nts/bin/php-config cargo build --release
 ```
 
-On Windows, extract a PHP devel pack and set `PHP_DEVEL_DIR` to its root (plus `LIBCLANG_PATH` to the LLVM `bin` directory).
-
-At runtime the binary links `libphp.so` dynamically; if it is not in a standard location, set `LD_LIBRARY_PATH`:
+At runtime the binary links `libphp.so` (`libphp.dylib` on macOS) dynamically; if it is not in a standard location, point the loader at it:
 
 ```sh
-LD_LIBRARY_PATH=$HOME/.local/php-zts/lib ./target/release/rapira serve worker.php
+LD_LIBRARY_PATH=$HOME/.local/php-nts/lib ./target/release/rapira serve worker.php     # Linux
+DYLD_LIBRARY_PATH=$HOME/.local/php-nts/lib ./target/release/rapira serve worker.php   # macOS
 ```
 
 ## Running
@@ -40,7 +41,7 @@ Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml`
 |---|---|---|
 | `--config <PATH>` | none | Load settings from a `rapira.toml`. |
 | `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected. |
-| `--threads <N>` | CPU count | PHP worker threads. ZTS only; an NTS build always uses 1. |
+| `--threads <N>` | 1 | PHP worker threads; pinned to 1 (values > 1 log a warning). Multi-worker returns with the fork-based pool. |
 | `--classic` | off | Re-include the script for every request (front controller, like PHP-FPM) instead of keeping it resident. |
 | `SCRIPT` | required¹ | PHP entry script. Overrides `pool.entrypoint`. |
 
@@ -49,7 +50,7 @@ Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml`
 First `SIGINT`/`SIGTERM` drains in-flight requests and extensions; a second one forces exit.
 
 ```sh
-rapira serve app/worker.php --threads 8
+rapira serve app/worker.php
 curl http://127.0.0.1:8000/
 ```
 
@@ -63,7 +64,7 @@ server_port = 8000           # optional; defaults to the listen TCP port (80 for
 max_body_size_mb = 8         # optional; larger request bodies get a 413
 
 [pool]
-threads = 4
+threads = 1                  # currently always 1; multi-worker returns with the fork-based pool
 entrypoint = "index.php"     # relative → resolved against this file's directory
 classic = false              # optional; default false
 ```
@@ -112,7 +113,7 @@ echo "Method: {$_SERVER['REQUEST_METHOD']}\n";
 ```
 
 ```sh
-rapira serve --classic public/index.php --threads 4
+rapira serve --classic public/index.php
 ```
 
 ## Logging
@@ -139,6 +140,9 @@ Levels: `error`, `warn`, `info`, `debug`, `trace`. `RUST_LOG_STYLE=never` disabl
 ## Tests
 
 ```sh
-make test_zts   # against $HOME/.local/php-zts
-make test_nts   # against the system NTS PHP (needs php-embedded)
+make test   # PHP from php-config on PATH; override with PHP_CONFIG=/path/to/php-config
 ```
+
+The embed library is located under the `php-config` prefix automatically (`lib`, `lib64`,
+`lib/phpXX`; plain or versioned `libphp*.so`, `libphp.dylib` on macOS); install your
+distro's PHP embed package if it is missing.

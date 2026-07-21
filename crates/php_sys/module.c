@@ -165,7 +165,6 @@ static void rapira_observer_end_to(zend_execute_data *base) {
     EG(current_execute_data) = orig;
 }
 
-#if defined(ZEND_MAX_EXECUTION_TIMERS) || !defined(ZTS)
 /* Per-job execution budget, captured once per cycle. EG(timeout_seconds) is
 runtime-mutable (set_time_limit()/ini_set() go through OnUpdateTimeout) and the
 worker path never restores INI per job, so re-arming straight from it would let
@@ -173,8 +172,7 @@ one job's set_time_limit(0) disable the timer for every later job. The first
 rapira_request_init of a cycle runs after the bootstrap top-level, so the capture
 honors the bootstrap's own set_time_limit; rapira_request_shutdown resets it at
 cycle end. -1 = not captured yet. */
-ZEND_TLS zend_long rapira_job_timeout = -1;
-#endif
+static zend_long rapira_job_timeout = -1;
 
 /* Per-request state php_request_startup() resets that the worker path skips. */
 static void rapira_request_init(void) {
@@ -192,7 +190,6 @@ static void rapira_request_init(void) {
     // clean_at_entry detector for later jobs. Re-clear it at each job start.
     CG(unclean_shutdown) = 0;
 
-#if defined(ZEND_MAX_EXECUTION_TIMERS) || !defined(ZTS)
     // The request body is read (in Rust) as the handler runs, so the handler is
     // the execution phase: bound it by max_execution_time (the per-cycle capture
     // above), not max_input_time. Teardown unsets it, so time spent blocked on
@@ -212,9 +209,6 @@ static void rapira_request_init(void) {
         rapira_job_timeout = EG(timeout_seconds);
     }
     zend_set_timeout(rapira_job_timeout, 0);
-#else
-    zend_unset_timeout();
-#endif
 
     if (PG(expose_php)) {
         sapi_add_header(SAPI_PHP_VERSION_HEADER,
@@ -438,10 +432,8 @@ int rapira_request_teardown(void) {
     RAPIRA_GUARD(php_output_deactivate(), bailed, observed_base);
     RAPIRA_GUARD(sapi_deactivate(), bailed, observed_base);
 
-#if defined(ZEND_MAX_EXECUTION_TIMERS) || !defined(ZTS)
     zend_try { zend_unset_timeout(); }
     zend_end_try();
-#endif
 
     // _zend_bailout leaves gc_protect(1); reset unconditionally or the next
     // request runs with cycle GC disabled
@@ -491,7 +483,7 @@ void rapira_clear_last_error(void) {
 #endif
 }
 
-// once per process, before sapi_startup and after tsrm startup (on ZTS builds)
+// once per process, before sapi_startup
 void rapira_process_init(void) {
 #if defined(SIGPIPE) && defined(SIG_IGN)
     signal(SIGPIPE, SIG_IGN);
@@ -524,9 +516,7 @@ void rapira_release_temporary_streams(void) {
 // bailout the retry skips it and finishes the remaining teardown steps.
 int rapira_request_shutdown(void) {
     volatile int bailed = OK;
-#if defined(ZEND_MAX_EXECUTION_TIMERS) || !defined(ZTS)
     rapira_job_timeout = -1; // cycle over: next cycle re-captures its budget
-#endif
 #ifdef HAVE_PHP_SESSION
     // a bailout inside a user save handler skips the cleanup that clears
     // PS(in_save_handler); the module RSHUTDOWN's recursion guard then refuses

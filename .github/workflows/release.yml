@@ -68,8 +68,6 @@ jobs:
           - { name: linux-aarch64-php8.5, runner: ubuntu-24.04-arm, container: 'rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6', target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.5', provision: source-unix }
           - { name: macos-aarch64-php8.4, runner: macos-14,         target_os: macos,   arch: aarch64, php_branch: '8.4', provision: source-unix }
           - { name: macos-aarch64-php8.5, runner: macos-14,         target_os: macos,   arch: aarch64, php_branch: '8.5', provision: source-unix }
-          - { name: win-x86_64-php8.4,    runner: windows-2022,     target_os: windows, arch: x86_64,  php_branch: '8.4', provision: win-official }
-          - { name: win-x86_64-php8.5,    runner: windows-2022,     target_os: windows, arch: x86_64,  php_branch: '8.5', provision: win-official }
     env:
       PHP_PREFIX: ${{ github.workspace }}/.php-embed
       VERSION: ${{ needs.guard.outputs.version }}
@@ -156,33 +154,6 @@ jobs:
           path: ${{ env.PHP_PREFIX }}
           key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v2
 
-      # Windows x64: official devel pack (link) + official binary zip (runtime DLLs).
-      - name: Provision PHP (Windows official)
-        id: phpwin
-        if: matrix.provision == 'win-official'
-        shell: pwsh
-        run: |
-          $releases = Invoke-RestMethod -Uri 'https://downloads.php.net/~windows/releases/releases.json'
-          $branch   = $releases.'${{ matrix.php_branch }}'
-          $variant  = $branch.PSObject.Properties.Name | Where-Object { $_ -like 'ts-*-x64' } | Select-Object -First 1
-          if (-not $variant) { throw "no ts x64 build for PHP ${{ matrix.php_branch }}" }
-          # windows builds ship exactly one patch per branch; fail if an override
-          # asked for a different one, and record the real version for PHP_VERSION.txt
-          $actual = $branch.version
-          if ('${{ steps.php.outputs.overridden }}' -eq 'true' -and $actual -ne '${{ steps.php.outputs.full }}') {
-            throw "windows builds ship PHP $actual; requested override ${{ steps.php.outputs.full }} is unavailable"
-          }
-          "full=$actual" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.devel_pack.path)" -OutFile "$env:RUNNER_TEMP\devel.zip"
-          Invoke-WebRequest "https://downloads.php.net/~windows/releases/$($branch.$variant.zip.path)"        -OutFile "$env:RUNNER_TEMP\bin.zip"
-          Expand-Archive "$env:RUNNER_TEMP\devel.zip" -DestinationPath "$env:RUNNER_TEMP\devel"
-          Expand-Archive "$env:RUNNER_TEMP\bin.zip"   -DestinationPath "$env:RUNNER_TEMP\phpbin"
-          $devel = (Get-ChildItem "$env:RUNNER_TEMP\devel" -Directory | Select-Object -First 1).FullName
-          "PHP_DEVEL_DIR=$devel"                    | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "PHP_RUNTIME=$env:RUNNER_TEMP\phpbin"     | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "RUSTFLAGS=-L native=$devel\lib"          | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: Expose PHP + rpath (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -206,8 +177,7 @@ jobs:
       - name: Build rapira
         run: cargo build --release --locked --bin rapira
 
-      - name: Assemble layout (Unix)
-        if: runner.os != 'Windows'
+      - name: Assemble layout
         shell: bash
         run: |
           set -euo pipefail
@@ -244,41 +214,9 @@ jobs:
             codesign -v "$BIN"
           fi
 
-      - name: Assemble layout (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $root = "dist\$env:STEM"
-          New-Item -ItemType Directory -Force "$root","$root\ext" | Out-Null
-          Copy-Item target\release\rapira.exe "$root\"
-          Copy-Item README.md,LICENSE "$root\"
-          "${{ steps.phpwin.outputs.full }}" | Out-File "$root\PHP_VERSION.txt" -Encoding ascii
-          # php8ts.dll + all dependency DLLs sit at the official binary zip's root
-          Get-ChildItem "$env:PHP_RUNTIME\*.dll" | Copy-Item -Destination "$root\"
-          $exts = 'openssl','curl','mbstring','dom','xml','simplexml','xmlreader','xmlwriter',
-                  'pdo_sqlite','sqlite3','fileinfo','phar','tokenizer','ctype','session','filter','iconv'
-          foreach ($e in $exts) {
-            $p = "$env:PHP_RUNTIME\ext\php_$e.dll"
-            if (Test-Path $p) { Copy-Item $p "$root\ext\" }
-          }
-          # opcache: PHP <= 8.4 ships it as a DLL needing a zend_extension line;
-          # PHP >= 8.5 compiles it into core (make_opcache_required RFC)
-          $iniLines = @('extension_dir=ext')
-          $opcache = "$env:PHP_RUNTIME\ext\php_opcache.dll"
-          if (Test-Path $opcache) {
-            Copy-Item $opcache "$root\ext\"
-            $iniLines += 'zend_extension=opcache'
-          } elseif (-not (& "$env:PHP_RUNTIME\php.exe" -n -m | Select-String -Quiet 'Zend OPcache')) {
-            throw "OPcache neither shipped as php_opcache.dll nor built into php"
-          }
-          $ini = $iniLines +
-                 ($exts | Where-Object { Test-Path "$root\ext\php_$_.dll" } | ForEach-Object { "extension=$_" })
-          Set-Content "$root\php.ini" ($ini -join "`n") -Encoding ascii
-
       # Hard gate: rapira hard-links libphp, so `--help` forces the loader to
       # resolve the whole closure from the archive layout alone.
-      - name: Smoke test (Unix)
-        if: runner.os != 'Windows'
+      - name: Smoke test
         shell: bash
         run: |
           set -euo pipefail
@@ -308,23 +246,12 @@ jobs:
             echo "::warning::worker exited early (best-effort check, not gating)"
           fi
 
-      - name: Smoke test (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $root = "dist\$env:STEM"
-          # strip devel/runtime dirs from PATH so only the bundled DLLs can satisfy the loader
-          $env:PATH = "$env:SystemRoot;$env:SystemRoot\System32"
-          & "$root\rapira.exe" --help
-          if ($LASTEXITCODE -ne 0) { throw "rapira.exe --help failed rc=$LASTEXITCODE (DLL resolution?)" }
-
       - name: Archive
         shell: bash
         run: |
           set -euo pipefail
           cd dist
-          if [ "$RUNNER_OS" = "Windows" ]; then 7z a "$STEM.zip" "$STEM" >/dev/null
-          else tar czf "$STEM.tar.gz" "$STEM"; fi
+          tar czf "$STEM.tar.gz" "$STEM"
 
       - name: Stage pkgroot for nFPM (Linux)
         if: runner.os == 'Linux'
@@ -341,7 +268,6 @@ jobs:
           name: art-${{ matrix.name }}
           path: |
             dist/*.tar.gz
-            dist/*.zip
             dist/pkgroot-*
           if-no-files-found: error
           retention-days: 7
@@ -365,7 +291,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp incoming/*.tar.gz incoming/*.zip dist/
+          cp incoming/*.tar.gz dist/
           cp -r incoming/pkgroot-* dist/
           curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
           sudo dpkg -i /tmp/nfpm.deb
@@ -409,7 +335,6 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
-            dist/*.zip
             dist/*.deb
             dist/*.rpm
             dist/*SHA256SUMS.txt

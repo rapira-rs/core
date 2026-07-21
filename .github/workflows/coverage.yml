@@ -21,18 +21,23 @@ jobs:
           # keep in sync with ci/php-configure-flags.txt
           extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, openssl, pdo_sqlite, phar, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
-          phpts: ts # thread-safe (ZTS)
+          phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning
 
       - name: Build deps for bindgen/cc
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
 
-      - name: Expose the ZTS embed lib
+      # setup-php's cached NTS tarball ships the embed SAPI as a versioned
+      # /usr/lib/libphpX.Y.so; `-lphp` needs the plain name, so pin the exact
+      # version and symlink it into a private dir to link against.
+      - name: Expose the PHP embed lib
         run: |
-          LIBPHP=$(find "$(php-config --prefix)" /usr/lib -name 'libphp*.so' 2>/dev/null | head -1)
-          test -n "$LIBPHP" || { echo "no ZTS libphp.so from setup-php"; exit 1; }
-          echo "LD_LIBRARY_PATH=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-L native=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
+          LIBPHP=/usr/lib/libphp8.5.so
+          test -e "$LIBPHP" || { echo "missing $LIBPHP"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/phplib"
+          ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with: { components: llvm-tools-preview }

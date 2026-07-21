@@ -662,7 +662,7 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
 }
 
 // A post-loop warning left in PG(last_error_message) trips the core_globals_dtor assertion
-// at thread free (main.c:2102).
+// at php_module_shutdown (main.c:2102).
 #[test]
 fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -671,7 +671,7 @@ fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
     let (status, body) = drain(h.handle_blocking(req("/", "warn-after-loop-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "ok"));
     drop(h);
-    r.shutdown(); // drop(r) joins the worker; the post-loop warning must be cleared before ts_free_thread
+    r.shutdown(); // drop(r) joins the worker; the post-loop warning must be cleared before module shutdown
     Ok(())
 }
 
