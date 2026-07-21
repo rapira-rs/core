@@ -483,9 +483,10 @@ mod tests {
             "process_idle_timeout_secs",
             "request_terminate_timeout_secs",
         ] {
-            let file =
-                load_str(&format!("[pool]\nentrypoint = \"a.php\"\n[pm]\n{key} = 100000\n"))
-                    .unwrap();
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\n[pm]\n{key} = 100000\n"
+            ))
+            .unwrap();
             let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
             assert!(err.to_string().contains("too large"), "{key}: {err}");
         }
