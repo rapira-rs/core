@@ -12,7 +12,7 @@ section: "net"
 priority: "optional"
 maintainer: "Valery Piashchynski <piashchynski.valery@gmail.com>"
 vendor: "rapira"
-homepage: "https://github.com/rustatian/rapira-rs"
+homepage: "https://github.com/rapira-rs/rapira"
 license: "MIT"
 description: |
   Rapira — PHP application server.

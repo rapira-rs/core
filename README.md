@@ -1,8 +1,8 @@
 # core
 
-[![codecov](https://codecov.io/gh/rustatian/rapira-rs/graph/badge.svg)](https://app.codecov.io/gh/rustatian/rapira-rs)
+[![codecov](https://codecov.io/gh/rapira-rs/rapira/graph/badge.svg)](https://app.codecov.io/gh/rapira-rs/rapira)
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/rapira-rs/rapira?utm_source=badge)
-![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rustatian/rapira-rs?utm_source=oss&utm_medium=github&utm_campaign=rustatian%2Frapira-rs&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rapira-rs/rapira?utm_source=oss&utm_medium=github&utm_campaign=rapira-rs%2Frapira&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 
 Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HTTP through the bundled `rapira_pingora` plugin (`crates/plugins/pingora`). This repo contains the SAPI core (`php_sys`), the extension host runtime, and the `rapira` binary. Linux and macOS only.
