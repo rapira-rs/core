@@ -1,6 +1,6 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use extension_host::ExtensionHost;
-use log::info;
+use log::{info, warn};
 use php_sys::{Mode, Rapira};
 use rapira_config::{Listen, Overrides, Settings};
 use rapira_pingora::{Config as HttpConfig, HttpServer, Listen as HttpListen};
@@ -32,9 +32,10 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// PHP worker threads. Rapira runs one PHP thread; values > 1 are ignored with a warning.
+    /// Worker processes. Until the fork-based pool lands, rapira runs a single
+    /// process; values > 1 log a warning. Defaults to the CPU count.
     #[arg(long)]
-    threads: Option<usize>,
+    processes: Option<usize>,
 
     /// Re-include the script for every request instead of keeping it resident.
     #[arg(long)]
@@ -72,7 +73,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         args.config.as_deref(),
         Overrides {
             listen: args.listen,
-            threads: args.threads,
+            processes: args.processes,
             classic: args.classic,
             entrypoint: args.script,
         },
@@ -116,7 +117,14 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     } else {
         Mode::Worker(script.clone())
     };
-    let rapira = Rapira::start(mode, settings.pool.threads)?;
+    if settings.pool.processes > 1 {
+        warn!(
+            target: "rapira",
+            "pool.processes={} configured, but the fork-based process pool is not implemented yet; running a single process",
+            settings.pool.processes
+        );
+    }
+    let rapira = Rapira::start(mode)?;
 
     let outcomes = host.run(rapira.handle()?, script).serve();
     drop(rapira);

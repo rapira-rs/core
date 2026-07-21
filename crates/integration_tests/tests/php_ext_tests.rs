@@ -6,7 +6,7 @@ use php_sys::{Mode, Rapira};
 // uncaught extension throw leaves the worker serving.
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(name)), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture(name)))?;
     let h = r.handle()?;
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {

@@ -7,7 +7,7 @@ use std::{
 };
 
 thread_local! {
-    pub static SB: RefCell<Option<(usize, Arc<Scoreboard>)>> = const { RefCell::new(None) };
+    pub static SB: RefCell<Option<Arc<Scoreboard>>> = const { RefCell::new(None) };
 }
 
 pub enum Event {
@@ -18,16 +18,16 @@ pub enum Event {
     Healthy,
 }
 
-pub fn sb_set(id: usize, board: Arc<Scoreboard>) {
-    SB.with_borrow_mut(|sb: &mut Option<(usize, Arc<Scoreboard>)>| {
-        *sb = Some((id, board));
+pub fn sb_set(board: Arc<Scoreboard>) {
+    SB.with_borrow_mut(|sb: &mut Option<Arc<Scoreboard>>| {
+        *sb = Some(board);
     });
 }
 
 pub fn sb_update(event: Event) {
-    SB.with_borrow(|sb: &Option<(usize, Arc<Scoreboard>)>| {
-        if let Some((id, board)) = sb.as_ref() {
-            board.update(*id, event);
+    SB.with_borrow(|sb: &Option<Arc<Scoreboard>>| {
+        if let Some(board) = sb.as_ref() {
+            board.update(event);
         }
     });
 }
@@ -41,9 +41,11 @@ pub struct WorkerStat {
     unhealthy: AtomicBool,
 }
 
+/// One stat slot: this process runs a single PHP interpreter. The fork-based
+/// pool later maps one of these per worker process into shared memory.
+#[derive(Debug, Default)]
 pub struct Scoreboard {
-    // sized at runtime by worker count (Scoreboard::new), so a boxed slice, not a fixed array
-    pub workers: Box<[WorkerStat]>,
+    worker: WorkerStat,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -67,16 +69,8 @@ pub struct ScoreboardSnapshot {
 }
 
 impl Scoreboard {
-    pub fn new(workers: usize) -> Arc<Self> {
-        Arc::new(Self {
-            workers: (0..workers).map(|_| WorkerStat::default()).collect(),
-        })
-    }
-
-    fn update(&self, worker: usize, event: Event) {
-        let Some(w) = self.workers.get(worker) else {
-            return;
-        };
+    fn update(&self, event: Event) {
+        let w = &self.worker;
         match event {
             Event::Handled(errored) => {
                 w.handled.fetch_add(1, Ordering::Relaxed);
@@ -96,33 +90,22 @@ impl Scoreboard {
     }
 
     pub fn snapshot(&self) -> ScoreboardSnapshot {
-        let workers: Vec<WorkerStatSnapshot> = self
-            .workers
-            .iter()
-            .enumerate()
-            .map(|(id, w)| WorkerStatSnapshot {
-                id,
-                handled: w.handled.load(Ordering::Relaxed),
-                errors: w.errors.load(Ordering::Relaxed),
-                recycles: w.recycles.load(Ordering::Relaxed),
-                restarts: w.restarts.load(Ordering::Relaxed),
-                unhealthy: w.unhealthy.load(Ordering::Relaxed),
-            })
-            .collect();
+        let w = WorkerStatSnapshot {
+            id: 0,
+            handled: self.worker.handled.load(Ordering::Relaxed),
+            errors: self.worker.errors.load(Ordering::Relaxed),
+            recycles: self.worker.recycles.load(Ordering::Relaxed),
+            restarts: self.worker.restarts.load(Ordering::Relaxed),
+            unhealthy: self.worker.unhealthy.load(Ordering::Relaxed),
+        };
 
         ScoreboardSnapshot {
-            handled: workers.iter().map(|w: &WorkerStatSnapshot| w.handled).sum(),
-            errors: workers.iter().map(|w: &WorkerStatSnapshot| w.errors).sum(),
-            recycles: workers
-                .iter()
-                .map(|w: &WorkerStatSnapshot| w.recycles)
-                .sum(),
-            restarts: workers
-                .iter()
-                .map(|w: &WorkerStatSnapshot| w.restarts)
-                .sum(),
-            unhealthy: workers.iter().filter(|w| w.unhealthy).count(),
-            workers,
+            handled: w.handled,
+            errors: w.errors,
+            recycles: w.recycles,
+            restarts: w.restarts,
+            unhealthy: w.unhealthy as usize,
+            workers: vec![w],
         }
     }
 }

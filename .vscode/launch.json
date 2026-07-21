@@ -21,8 +21,6 @@
       },
       "args": [
         "serve",
-        "--threads",
-        "1",
         "${workspaceFolder}/crates/integration_tests/fixtures/worker.php"
       ],
       "cwd": "${workspaceFolder}",

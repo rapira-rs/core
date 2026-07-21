@@ -7,7 +7,7 @@ use php_sys::{Mode, Rapira};
 #[test]
 fn hello_world_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, 1)?; // 1 thread => same interpreter both reqs
+    let r = Rapira::start(Mode::Classic)?; // single interpreter => same one for both reqs
     let h = r.handle()?;
     let (_, body1) = drain(h.handle_blocking(req("/?x=1", "hello.php"))?);
     assert!(
@@ -22,7 +22,7 @@ fn hello_world_classic() -> anyhow::Result<()> {
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, 1)?;
+    let r = Rapira::start(Mode::Classic)?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "fibers.php"))?);
     drop(h);
@@ -42,7 +42,7 @@ fn fibers_stress_classic() -> anyhow::Result<()> {
 #[test]
 fn hello_world_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("worker.php")), 1)?; // 1 thread => same interpreter both reqs
+    let r = Rapira::start(Mode::Worker(fixture("worker.php")))?; // single interpreter => same one for both reqs
     let h = r.handle()?;
     let (_, body1) = drain(h.handle_blocking(req("/?x=1", "worker.php"))?);
     assert!(
@@ -57,7 +57,7 @@ fn hello_world_worker() -> anyhow::Result<()> {
 #[test]
 fn worker_request_isolation() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("leak-worker.php")), 1)?; // 1 thread => same interpreter both reqs
+    let r = Rapira::start(Mode::Worker(fixture("leak-worker.php")))?; // single interpreter => same one for both reqs
     let h = r.handle()?;
     let (_, body1) = drain(h.handle_blocking(req("/?x=1", "leak-worker.php"))?);
     let (_, body2) = drain(h.handle_blocking(req("/?x=2", "leak-worker.php"))?);
@@ -82,7 +82,7 @@ fn worker_request_isolation() -> anyhow::Result<()> {
 fn worker_survives_exit() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Worker(fixture("bailout-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("bailout-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain(h.handle_blocking(req("/?boom=0", "bailout-worker.php"))?); // normal
     let (s2, b2) = drain(h.handle_blocking(req("/?boom=1", "bailout-worker.php"))?); // exit(1) -> unwind-exit
@@ -116,7 +116,7 @@ fn worker_survives_exit() -> anyhow::Result<()> {
 fn fibers_stress_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Worker(fixture("fibers-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("fibers-worker.php")))?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "fibers-worker.php"))?);
     drop(h);
@@ -137,7 +137,7 @@ fn fibers_stress_worker() -> anyhow::Result<()> {
 fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Worker(fixture("teardown-bailout-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("teardown-bailout-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain(h.handle_blocking(req("/?boom=0", "teardown-bailout-worker.php"))?); // normal
     let (s2, b2) = drain(h.handle_blocking(req("/?boom=1", "teardown-bailout-worker.php"))?); // bail in teardown
@@ -176,7 +176,7 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
 fn many_producers_test() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Worker(fixture("worker.php")), 10)?;
+    let r = Rapira::start(Mode::Worker(fixture("worker.php")))?;
 
     let producers: Vec<_> = (0..24)
         .map(|t| {
@@ -213,7 +213,7 @@ fn many_producers_test() -> anyhow::Result<()> {
 fn worker_basic_auth() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Worker(fixture("auth-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("auth-worker.php")))?;
     let h = r.handle()?;
 
     // Authorization: Basic base64("user:pass")
@@ -249,7 +249,7 @@ fn worker_basic_auth() -> anyhow::Result<()> {
 fn server_variables() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r: Rapira = Rapira::start(Mode::Worker(fixture("server-variables.php")), 1)?;
+    let r: Rapira = Rapira::start(Mode::Worker(fixture("server-variables.php")))?;
     let h: php_sys::RapiraHandle = r.handle()?;
 
     let mut request: php_sys::Request =
@@ -294,7 +294,7 @@ fn server_variables() -> anyhow::Result<()> {
 fn worker_finish_request() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Worker(fixture("finish-request-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("finish-request-worker.php")))?;
     let h = r.handle()?;
 
     let (s1, b1) = drain(h.handle_blocking(req("/", "finish-request-worker.php"))?);
@@ -335,7 +335,7 @@ fn getenv_classic() -> anyhow::Result<()> {
     unsafe {
         std::env::set_var("FOO", "BAR");
     }
-    let r = Rapira::start(Mode::Classic, 1)?;
+    let r = Rapira::start(Mode::Classic)?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "env.php"))?);
     drop(h);
@@ -351,7 +351,7 @@ fn getenv_worker() -> anyhow::Result<()> {
     unsafe {
         std::env::set_var("FOO", "BAR");
     }
-    let r = Rapira::start(Mode::Worker(fixture("env-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("env-worker.php")))?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "env-worker.php"))?);
     drop(h);
@@ -364,7 +364,7 @@ fn getenv_worker() -> anyhow::Result<()> {
 #[test]
 fn failboot_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, 1)?;
+    let r = Rapira::start(Mode::Classic)?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "failboot.php"))?);
     drop(h);
@@ -380,7 +380,7 @@ fn failboot_classic() -> anyhow::Result<()> {
 #[test]
 fn scoreboard_counts_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("throw-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("throw-worker.php")))?;
     let h = r.handle()?;
     let _ = drain(h.handle_blocking(req("/?boom=0", "throw-worker.php"))?); // ok
     let _ = drain(h.handle_blocking(req("/?boom=0", "throw-worker.php"))?); // ok
@@ -400,7 +400,7 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
 #[test]
 fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("shutdown-fatal-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("shutdown-fatal-worker.php")))?;
     let h = r.handle()?;
     // the shutdown-fn fatal bails in php_call_shutdown_functions -> recycle
     let _ = drain(h.handle_blocking(req("/?boom=1", "shutdown-fatal-worker.php"))?);
@@ -427,9 +427,11 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
 #[test]
 fn scoreboard_aggregates_across_workers() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("worker.php")), 3)?; // 3 threads => 3 WorkerStats
+    // Single scoreboard slot until the fork-based pool + shm scoreboard land;
+    // revived/rewritten with the E2E harness batch.
+    let r = Rapira::start(Mode::Worker(fixture("worker.php")))?;
     if r.scoreboard().workers.len() < 3 {
-        // NTS build: forced to a single worker, nothing to aggregate
+        // single worker slot, nothing to aggregate
         r.shutdown();
         return Ok(());
     }
@@ -450,7 +452,7 @@ fn scoreboard_aggregates_across_workers() -> anyhow::Result<()> {
 #[test]
 fn scoreboard_counts_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, 1)?;
+    let r = Rapira::start(Mode::Classic)?;
     let h = r.handle()?;
     let _ = drain(h.handle_blocking(req("/", "hello.php"))?); // ok
     let _ = drain(h.handle_blocking(req("/", "hello.php"))?); // ok
@@ -473,7 +475,7 @@ fn scoreboard_counts_classic() -> anyhow::Result<()> {
 #[test]
 fn worker_session_isolation() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("session-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("session-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain(h.handle_blocking(req("/", "session-worker.php"))?);
     let (s2, b2) = drain(h.handle_blocking(req("/", "session-worker.php"))?);
@@ -506,7 +508,7 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
     init_log_capture();
     LOG_CAPTURE.lock().unwrap().clear(); // drop anything captured by earlier tests
 
-    let r = Rapira::start(Mode::Worker(fixture("boot-output-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("boot-output-worker.php")))?;
     let h = r.handle()?;
     let (status, _) = drain(h.handle_blocking(req("/", "boot-output-worker.php"))?);
     drop(h);
@@ -524,7 +526,7 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
 #[test]
 fn sapi_ini_entries_applied() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, 1)?;
+    let r = Rapira::start(Mode::Classic)?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "ini.php"))?);
     drop(h);
@@ -541,7 +543,7 @@ fn sapi_ini_entries_applied() -> anyhow::Result<()> {
 #[test]
 fn status_code_does_not_leak_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("status-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("status-worker.php")))?;
     let h = r.handle()?;
     let (s1, _) = drain(h.handle_blocking(req("/?code=404", "status-worker.php"))?);
     let (s2, b2) = drain(h.handle_blocking(req("/", "status-worker.php"))?);
@@ -559,7 +561,7 @@ fn status_code_does_not_leak_worker() -> anyhow::Result<()> {
 #[test]
 fn status_code_does_not_leak_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, 1)?;
+    let r = Rapira::start(Mode::Classic)?;
     let h = r.handle()?;
     let (s1, _) = drain(h.handle_blocking(req("/", "status-404.php"))?);
     let (s2, _) = drain(h.handle_blocking(req("/", "hello.php"))?);
@@ -577,10 +579,7 @@ fn status_code_does_not_leak_classic() -> anyhow::Result<()> {
 #[test]
 fn worker_finish_request_header_only() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(
-        Mode::Worker(fixture("finish-request-headers-worker.php")),
-        1,
-    )?;
+    let r = Rapira::start(Mode::Worker(fixture("finish-request-headers-worker.php")))?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "finish-request-headers-worker.php"))?);
     drop(h);
@@ -593,7 +592,7 @@ fn worker_finish_request_header_only() -> anyhow::Result<()> {
 #[test]
 fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("gc-protect-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("gc-protect-worker.php")))?;
     let h = r.handle()?;
     let (_, b1) = drain(h.handle_blocking(req("/?seed=1", "gc-protect-worker.php"))?);
     assert!(
@@ -616,7 +615,7 @@ fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
 #[test]
 fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("last-error-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("last-error-worker.php")))?;
     let h = r.handle()?;
     // req1 raises a non-fatal warning (does NOT bail, so no recycle masks the reset)
     let (_, b1) = drain(h.handle_blocking(req("/?step=warn", "last-error-worker.php"))?);
@@ -643,7 +642,7 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
     let _ = std::fs::remove_file(&sentinel);
     let _ = std::fs::remove_file(&boot);
 
-    let r = Rapira::start(Mode::Worker(fixture("h2-boot-bail-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("h2-boot-bail-worker.php")))?;
     let h = r.handle()?;
     // The bootstrap's session save handler fatals on the first-call teardown flush.
     // Before the fix that bailout was swallowed and the job served in cycle 1 (count
@@ -666,7 +665,7 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
 #[test]
 fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("warn-after-loop-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("warn-after-loop-worker.php")))?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "warn-after-loop-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "ok"));
@@ -678,7 +677,7 @@ fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
 #[test]
 fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("filter-leak-worker.php")), 1)?;
+    let r = Rapira::start(Mode::Worker(fixture("filter-leak-worker.php")))?;
     let h = r.handle()?;
     let mem = |b: String| -> i64 {
         b.trim()
@@ -713,10 +712,7 @@ fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
 #[test]
 fn worker_finish_request_flush_bailout_recycles() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(
-        Mode::Worker(fixture("finish-request-bailout-worker.php")),
-        1,
-    )?;
+    let r = Rapira::start(Mode::Worker(fixture("finish-request-bailout-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain(h.handle_blocking(req("/?boom=0", "finish-request-bailout-worker.php"))?);
     let (s2, b2) = drain(h.handle_blocking(req("/?boom=1", "finish-request-bailout-worker.php"))?);

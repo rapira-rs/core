@@ -5,7 +5,7 @@ use crate::{
     context::{bind_server_context, populate_request_context, unbind_server_context},
     executor::run_script,
     scoreboard::{Event, sb_update},
-    start::{JobRx, pull_job},
+    start::pull_job,
     types::Job,
     *,
 };
@@ -19,8 +19,8 @@ fn status_for_open_error(kind: ErrorKind) -> u16 {
     }
 }
 
-pub(crate) fn classic_worker(rx: JobRx) {
-    while let Some(mut job) = pull_job(&rx) {
+pub(crate) fn classic_worker() {
+    while let Some(mut job) = pull_job() {
         let (event, truncated) = classic_executor(&mut job);
         sb_update(event);
         job.ctx.finish(truncated);
