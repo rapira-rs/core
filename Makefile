@@ -8,7 +8,11 @@ LOCATE_PHP = PREFIX=$$($(PHP_CONFIG) --prefix 2>/dev/null); test -n "$$PREFIX" |
 
 .PHONY: test test_nts test_e2e coverage
 
-test: test_nts test_e2e
+# Sequential recipe (not prerequisites) so `make -j` cannot run the suites
+# concurrently; the e2e servers must not overlap the in-process PHP tests.
+test:
+	@$(MAKE) test_nts
+	@$(MAKE) test_e2e
 
 # In-process unit + integration suites. The e2e target is feature-gated off, so
 # `cargo test --workspace` skips it here.
@@ -38,7 +42,7 @@ test_e2e:
 	LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
 	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
 	RUSTFLAGS="-L native=$$PHPLIB" \
-	cargo test -p integration_tests --test e2e --features e2e
+	cargo test -p integration_tests --test e2e --features e2e -- --test-threads=1
 
 # Requires: cargo install cargo-llvm-cov && rustup component add llvm-tools-preview
 coverage:

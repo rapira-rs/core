@@ -3,7 +3,7 @@
 //! thresholds, spawn-rate doubling) plus the ondemand suppression state we hold
 //! in place of an edge-triggered event backend.
 
-/// Default `pm.max_spawn_rate`: the geometric cap on burst spawning.
+/// Ceiling on the doubling spawn-burst counter; not configurable.
 pub(crate) const MAX_SPAWN_RATE: u32 = 32;
 
 /// Snapshot fed to `dynamic_tick`, derived from the scoreboard + proc table.
@@ -52,8 +52,7 @@ pub(crate) fn dynamic_tick(inp: &DynInput, spawn_rate: &mut u32) -> DynAction {
     DynAction::Steady
 }
 
-/// `start_servers` formula for the dynamic initial cohort, clamped to
-/// max_children.
+/// Dynamic initial cohort: midpoint of the spare band, clamped to max_children.
 pub(crate) fn dynamic_start_count(
     min_spare: usize,
     max_spare: usize,

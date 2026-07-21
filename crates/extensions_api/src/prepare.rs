@@ -47,6 +47,7 @@ impl ListenAddr {
 /// inside its extension for the master's whole life — respawned workers must
 /// inherit it again. In a WORKER, `run` transfers the child's copy to the
 /// adopter via `into_raw_fd` (pingora closes it at teardown).
+#[derive(Debug)]
 pub struct PreparedListener {
     fd: OwnedFd,
     addr: ListenAddr,
@@ -79,7 +80,7 @@ impl IntoRawFd for PreparedListener {
 pub struct PrepareCtx {
     backlog: i32,
     bound: Vec<ListenAddr>,
-    fds: Vec<RawFd>,
+    fds: Vec<OwnedFd>,
 }
 
 impl Default for PrepareCtx {
@@ -90,12 +91,8 @@ impl Default for PrepareCtx {
 
 impl PrepareCtx {
     pub fn new() -> Self {
-        Self::with_backlog(LISTEN_BACKLOG)
-    }
-
-    pub fn with_backlog(backlog: i32) -> Self {
         Self {
-            backlog,
+            backlog: LISTEN_BACKLOG,
             bound: Vec::new(),
             fds: Vec::new(),
         }
@@ -106,11 +103,11 @@ impl PrepareCtx {
         &self.bound
     }
 
-    /// Raw fds of every listener bound so far — NON-owning copies for the
-    /// master's ondemand poll set. The owning fds live inside the extensions
-    /// (and stay open for the master's whole life for re-inheritance).
-    pub fn listener_fds(&self) -> &[RawFd] {
-        &self.fds
+    /// Raw fds of every listener bound so far, for the master's ondemand poll
+    /// set. Backed by dups owned by this context, so they stay valid for the
+    /// context's lifetime even if an extension drops its `PreparedListener`.
+    pub fn listener_fds(&self) -> Vec<RawFd> {
+        self.fds.iter().map(|fd| fd.as_raw_fd()).collect()
     }
 
     /// socket(STREAM|CLOEXEC) → SO_REUSEADDR → bind → listen → O_NONBLOCK.
@@ -133,17 +130,39 @@ impl PrepareCtx {
             .as_socket()
             .expect("inet socket has an inet local addr");
         let addr = ListenAddr::Tcp(resolved);
-        self.record(addr.clone(), socket.as_raw_fd())?;
+        let dup = socket.try_clone().context("dup listener fd")?;
+        self.record(addr.clone(), dup.into())?;
         Ok(PreparedListener {
             fd: socket.into(),
             addr,
         })
     }
 
-    /// unlink-before-bind → bind → listen → chmod 0o666 → O_NONBLOCK.
+    /// probe → unlink-stale → bind → listen → chmod 0o666 → O_NONBLOCK.
     /// 0o666 matches pingora's fresh-bind default and its adopt-branch
     /// re-chmod, so permissions are stable across bind and adoption.
     pub fn bind_unix(&mut self, path: &Path) -> anyhow::Result<PreparedListener> {
+        // Never unlink a live socket: another instance may be serving on it.
+        // A nonblocking connect distinguishes live (success, or WouldBlock on
+        // a full backlog) from stale (ConnectionRefused) or absent (NotFound).
+        let probe = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+        probe.set_nonblocking(true)?;
+        match probe.connect(&SockAddr::unix(path)?) {
+            Ok(()) => {
+                anyhow::bail!("another server is already listening on {}", path.display())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                anyhow::bail!("another server is already listening on {}", path.display())
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("probing {}", path.display()));
+            }
+        }
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -159,14 +178,15 @@ impl PrepareCtx {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
         socket.set_nonblocking(true)?;
         let addr = ListenAddr::Unix(path.to_owned());
-        self.record(addr.clone(), socket.as_raw_fd())?;
+        let dup = socket.try_clone().context("dup listener fd")?;
+        self.record(addr.clone(), dup.into())?;
         Ok(PreparedListener {
             fd: socket.into(),
             addr,
         })
     }
 
-    fn record(&mut self, addr: ListenAddr, fd: RawFd) -> anyhow::Result<()> {
+    fn record(&mut self, addr: ListenAddr, fd: OwnedFd) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.bound.contains(&addr),
             "duplicate listener: {addr:?} already prepared"
@@ -225,6 +245,20 @@ mod tests {
             assert_eq!(mode & 0o777, 0o666);
             drop(l);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unix_bind_refuses_live_socket() {
+        let dir = std::env::temp_dir().join(format!("rapira-prep-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live.sock");
+
+        let mut ctx = PrepareCtx::new();
+        let _live = ctx.bind_unix(&path).unwrap();
+        let mut second = PrepareCtx::new();
+        let err = second.bind_unix(&path).unwrap_err();
+        assert!(err.to_string().contains("already listening"), "{err:#}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

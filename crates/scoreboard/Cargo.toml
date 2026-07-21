@@ -9,4 +9,3 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 libc = "0.2"
-zerocopy = { version = "0.8", features = ["derive"] }

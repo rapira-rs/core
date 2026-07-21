@@ -49,7 +49,7 @@ pub(crate) fn install(
     });
 }
 
-/// One fully-finished request. Call right after `sb_update(Event::Handled(_))`.
+/// One fully-finished request; called from `sb_update(Event::Handled(_))`.
 pub(crate) fn tick() {
     Q.with_borrow_mut(|q| {
         if q.max == 0 {

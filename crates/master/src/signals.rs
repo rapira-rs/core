@@ -1,7 +1,7 @@
 //! Master self-pipe: an async-signal-safe handler translates signals into
 //! bytes on a nonblocking `AF_UNIX` socketpair that the poll loop drains. The
 //! design uses a socketpair self-pipe with a `sigfillset` mask on the handler,
-//! unblock-all after install, and a `getpid` last-resort guard (#76601).
+//! unblock-all after install, and a `getpid` last-resort guard.
 
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -13,7 +13,7 @@ use libc::c_int;
 /// until install. Set once, before handlers are armed.
 static SELF_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 /// Master pid captured at install; the handler refuses to write from any other
-/// process (a child that took a signal inside the fork window, #76601).
+/// process (a child that took a signal inside the fork window).
 static MASTER_PID: AtomicI32 = AtomicI32::new(0);
 
 /// Control bytes emitted by the handler, consumed by the poll loop.
@@ -42,6 +42,14 @@ pub(crate) struct SelfPipe {
     pub wr: OwnedFd,
 }
 
+impl Drop for SelfPipe {
+    /// Disarm the handler before the fds close: a signal after `run` returns
+    /// must not write into whatever reused the write end's fd number.
+    fn drop(&mut self) {
+        SELF_PIPE_WR.store(-1, Ordering::Relaxed);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn errno_location() -> *mut c_int {
     // SAFETY: libc provides the thread-local errno slot address.
@@ -65,8 +73,8 @@ fn errno_set(v: c_int) {
 
 /// Async-signal-safe: `getpid`, `write`, and errno save/restore only.
 extern "C" fn master_sig_handler(signo: c_int) {
-    // #76601: a child that caught a signal between fork() and its disposition
-    // reset must never write into the master's pipe.
+    // A child that caught a signal between fork() and its disposition reset
+    // must never write into the master's pipe.
     // SAFETY: getpid is async-signal-safe.
     if unsafe { libc::getpid() } != MASTER_PID.load(Ordering::Relaxed) {
         return;
@@ -84,8 +92,11 @@ extern "C" fn master_sig_handler(signo: c_int) {
     let saved = errno_get();
     let fd = SELF_PIPE_WR.load(Ordering::Relaxed);
     if fd >= 0 {
-        // Nonblocking stream socket: EAGAIN on a full buffer drops the byte,
-        // which is harmless — every byte is level-idempotent for the loop.
+        // Nonblocking stream socket: EAGAIN on a full buffer drops the byte.
+        // The loop drains fully on every wake, so the buffer can only fill
+        // under a mass-exit storm of 'C' bytes; 'C' loss is harmless (any
+        // surviving byte drives a full reap), and a control byte dropped in
+        // that window is accepted as lost.
         // SAFETY: write to a valid fd from a 1-byte stack buffer.
         unsafe { libc::write(fd, (&raw const byte).cast(), 1) };
     }
@@ -138,8 +149,8 @@ fn sigprocmask(how: c_int, set: &libc::sigset_t) {
 }
 
 /// Block {USR1, USR2, CHLD, HUP} very early — before any handlers exist — so a
-/// stray reload signal (USR1/USR2/HUP all map to Reload; default disposition:
-/// terminate) cannot kill the process during boot.
+/// stray USR1/USR2/HUP (default disposition: terminate) cannot kill the process
+/// during boot.
 pub fn block_early_signals() {
     let set = sigset(&[libc::SIGUSR1, libc::SIGUSR2, libc::SIGCHLD, libc::SIGHUP]);
     sigprocmask(libc::SIG_BLOCK, &set);
@@ -197,7 +208,9 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
     })
 }
 
-/// Master pid recorded at install; children compare `getppid` against it.
+/// Master pid recorded at install; children compare `getppid` against it
+/// inside the Linux-only PDEATHSIG window check.
+#[cfg(target_os = "linux")]
 pub(crate) fn master_pid() -> c_int {
     MASTER_PID.load(Ordering::Relaxed)
 }

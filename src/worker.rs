@@ -1,5 +1,7 @@
-//! Post-fork worker body: signal setup, quota hooks, extension host + the
-//! single PHP interpreter, and the exit-code protocol the master consumes.
+//! Post-fork worker body: quota hooks, extension host + the single PHP
+//! interpreter, and the exit-code protocol the master consumes. Signal
+//! dispositions and the {QUIT, INT} mask were already set by the master's
+//! fork bracket before this runs.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
@@ -9,15 +11,19 @@ use extension_host::{ExtensionHost, Stopper};
 use php_sys::{Mode, Rapira, WorkerHooks};
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
 
-/// First writer wins; -1 = unset (drained → 0).
+/// First writer wins, except unhealthy upgrades a pending recycle;
+/// -1 = unset (drained → 0).
 static WORKER_EXIT: AtomicI32 = AtomicI32::new(-1);
 
 fn request_worker_exit(code: i32, stopper: &OnceLock<Stopper>) {
-    if WORKER_EXIT
+    let decided = WORKER_EXIT
         .compare_exchange(-1, code, SeqCst, SeqCst)
         .is_ok()
-        && let Some(s) = stopper.get()
-    {
+        || (code == WORKER_EXIT_UNHEALTHY
+            && WORKER_EXIT
+                .compare_exchange(WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, SeqCst, SeqCst)
+                .is_ok());
+    if decided && let Some(s) = stopper.get() {
         s.stop();
     }
     // If this raced ahead of the stopper registration, the boot path re-checks
@@ -42,7 +48,7 @@ fn effective_quota(max_requests: u64) -> u64 {
             .map(|d| d.as_nanos())
             .unwrap_or(0),
     );
-    max_requests + 1 + (h.finish() % grace)
+    max_requests.saturating_add(1 + (h.finish() % grace))
 }
 
 /// The entire post-fork worker body; returns the process exit code for the
@@ -56,8 +62,6 @@ pub fn worker_body(
     script: PathBuf,
     max_requests: u64,
 ) -> i32 {
-    extension_host::arm_worker_signals();
-
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks = WorkerHooks {
         max_requests: effective_quota(max_requests),
@@ -72,11 +76,13 @@ pub fn worker_body(
         slot: Some(env.slot_view),
     };
 
+    // Boot failure before serving anything is the unhealthy contract: a
+    // never-serviceable gen-0 pool must failboot, not respawn forever.
     let Ok(rapira) = Rapira::start_worker(mode, hooks) else {
-        return 1;
+        return WORKER_EXIT_UNHEALTHY;
     };
     let Ok(handle) = rapira.handle() else {
-        return 1;
+        return WORKER_EXIT_UNHEALTHY;
     };
 
     extension_host::spawn_lifeline_watch(env.lifeline);

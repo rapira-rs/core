@@ -1,6 +1,6 @@
-//! Registers native rapira extensions and drives each on a shared runtime. `serve`
-//! runs until every extension finishes or a terminate/interrupt signal arrives; on a
-//! signal it stops and drains them all — this is how rapira_core shuts down and exits.
+//! Registers native rapira extensions and drives each on a shared runtime. The
+//! master runs `prepare_all` before forking; each forked worker then drives its
+//! extensions with `serve_worker` until they finish or a drain signal arrives.
 
 // Signal handling below calls POSIX APIs unconditionally; fail fast with a clear
 // message instead of scattered libc symbol errors.
@@ -249,23 +249,6 @@ async fn drive<E: Extension>(
     }
 }
 
-/// Own process shutdown. Blocks SIGINT/SIGTERM in the calling thread so every thread
-/// spawned afterwards (the PHP workers, the extension runtime) inherits the block; rapira
-/// then reaps the signal with `sigwait` on a dedicated thread rather than a `sigaction`
-/// handler, so it never replaces a disposition Zend re-installs per request. Call once, in
-/// `main`, before booting PHP.
-///
-/// https://man7.org/linux/man-pages/man3/sigwait.3.html
-/// https://man7.org/linux/man-pages/man2/sigaction.2.html
-pub fn arm_shutdown_signals() {
-    // SAFETY: operates on a stack-owned, freshly-initialized signal set.
-    // https://man7.org/linux/man-pages/man3/pthread_sigmask.3.html
-    unsafe {
-        let set = shutdown_sigset();
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-    }
-}
-
 /// Build a sigset from a signal list.
 fn sigset(signals: &[libc::c_int]) -> libc::sigset_t {
     // SAFETY: operates on a stack-owned, freshly-initialized signal set.
@@ -277,11 +260,6 @@ fn sigset(signals: &[libc::c_int]) -> libc::sigset_t {
         }
         set
     }
-}
-
-/// The {SIGINT, SIGTERM} set the fused single-process path blocks and waits on.
-unsafe fn shutdown_sigset() -> libc::sigset_t {
-    sigset(&[libc::SIGINT, libc::SIGTERM])
 }
 
 /// Block until one of `signals` (already blocked) is delivered; return its
@@ -297,67 +275,6 @@ fn wait_signal(signals: &[libc::c_int]) -> libc::c_int {
         let mut sig: libc::c_int = 0;
         libc::sigwait(&set, &mut sig);
         sig
-    }
-}
-
-fn wait_shutdown_signal() -> libc::c_int {
-    wait_signal(&[libc::SIGINT, libc::SIGTERM])
-}
-
-/// Spawn the shutdown watcher for this platform. It flips `stop_tx` — the same watch channel
-/// every `drive` future selects on — so an external terminate/interrupt becomes a graceful
-/// drain. The returned guard tears the watcher down on drop.
-fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
-    // Detached: block on the first signal to drain, on the second to force exit. If the
-    // extensions finish on their own the thread stays parked in `sigwait` and is reclaimed
-    // at process exit.
-    std::thread::Builder::new()
-        .name("rapira-signal".into())
-        .spawn(move || {
-            let _ = wait_shutdown_signal();
-            log::info!(target: "rapira", "shutdown signal received; draining extensions");
-            let _ = stop_tx.send(true);
-            let _ = wait_shutdown_signal();
-            log::warn!(target: "rapira", "second shutdown signal; forcing exit");
-            std::process::exit(130);
-        })
-        .expect("spawn signal thread");
-    ShutdownWatcher
-}
-
-struct ShutdownWatcher; // detached thread — nothing to unwind
-
-/// Forked-worker signal setup. Call FIRST in the child, before any thread
-/// spawns (the master's fork bracket keeps signals blocked across fork, so
-/// there is no delivery gap):
-/// - dispositions inherited from the master are reset to SIG_DFL so its
-///   handlers never fire in the child against a closed self-pipe;
-/// - USR1/USR2 are ignored (a stray operator signal must not kill a worker);
-/// - the mask becomes exactly {QUIT, INT}: both are drained gracefully by the
-///   `serve_worker` sigwait watcher, while TERM stays at SIG_DFL — the master's
-///   QUIT→TERM→KILL escalation kills fast.
-pub fn arm_worker_signals() {
-    unsafe {
-        let mut dfl: libc::sigaction = std::mem::zeroed();
-        dfl.sa_sigaction = libc::SIG_DFL;
-        for sig in [
-            libc::SIGTERM,
-            libc::SIGINT,
-            libc::SIGQUIT,
-            libc::SIGUSR1,
-            libc::SIGUSR2,
-            libc::SIGCHLD,
-            libc::SIGHUP,
-        ] {
-            libc::sigaction(sig, &dfl, std::ptr::null_mut());
-        }
-        let mut ign: libc::sigaction = std::mem::zeroed();
-        ign.sa_sigaction = libc::SIG_IGN;
-        for sig in [libc::SIGUSR1, libc::SIGUSR2] {
-            libc::sigaction(sig, &ign, std::ptr::null_mut());
-        }
-        let set = sigset(&[libc::SIGQUIT, libc::SIGINT]);
-        libc::pthread_sigmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
     }
 }
 
@@ -407,8 +324,8 @@ impl Stopper {
     }
 }
 
-/// Drives the extension tasks. `serve` also stops them on a signal; `join` only waits;
-/// `drop` is the safety net.
+/// Drives the extension tasks. `serve_worker` stops them on a worker signal;
+/// `join` only waits; `drop` is the safety net.
 pub struct Running {
     rt: Runtime,
     tasks: JoinSet<Outcome>,
@@ -416,15 +333,6 @@ pub struct Running {
 }
 
 impl Running {
-    /// rapira_core's entry: run until every extension finishes on its own OR a
-    /// terminate/interrupt arrives; on shutdown, ask every extension to stop and
-    /// drain, then return their outcomes so `main` can exit.
-    pub fn serve(mut self) -> Vec<Outcome> {
-        let _watcher = spawn_shutdown_watcher(self.stop_tx.clone());
-        self.drain_all()
-        // `_watcher` drops here; the detached reaper thread is reclaimed at process exit.
-    }
-
     /// Wait for every extension to finish on its own (no signal handling). For tests
     /// and run-to-completion extensions.
     pub fn join(mut self) -> Vec<Outcome> {
@@ -443,10 +351,11 @@ impl Running {
         Stopper(self.stop_tx.clone())
     }
 
-    /// Forked-worker entry: run until done OR a QUIT/INT arrives (blocked by
-    /// `arm_worker_signals`, reaped here) — first signal drains, a second one
-    /// force-exits 131. TERM never reaches this path: it stays at SIG_DFL and
-    /// kills the process directly.
+    /// Forked-worker entry: run until done OR a QUIT/INT arrives — first signal
+    /// drains, a second one force-exits 131. The master's fork bracket owns
+    /// child signal hygiene: dispositions reset to SIG_DFL, USR1/USR2 ignored,
+    /// mask exactly {QUIT, INT} for the watcher here, TERM left at SIG_DFL so
+    /// the master's escalation kills fast.
     pub fn serve_worker(mut self) -> Vec<Outcome> {
         let stop_tx = self.stop_tx.clone();
         std::thread::Builder::new()
@@ -505,10 +414,13 @@ mod tests {
     /// run the default (terminate) action — the basis of graceful shutdown.
     #[test]
     fn sigwait_reaps_a_blocked_signal() {
-        arm_shutdown_signals();
-        // SAFETY: SIGTERM is blocked in this thread, so `raise` leaves it pending here for
-        // `sigwait` to dequeue; it never reaches the default (terminate) handler.
-        unsafe { libc::raise(libc::SIGTERM) };
-        assert_eq!(wait_shutdown_signal(), libc::SIGTERM);
+        let set = sigset(&[libc::SIGTERM]);
+        // SAFETY: blocks SIGTERM in this thread, so `raise` leaves it pending here
+        // for `sigwait` to dequeue; it never reaches the default (terminate) action.
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            libc::raise(libc::SIGTERM);
+        }
+        assert_eq!(wait_signal(&[libc::SIGTERM]), libc::SIGTERM);
     }
 }

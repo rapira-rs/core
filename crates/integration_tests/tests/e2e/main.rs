@@ -1,6 +1,5 @@
 //! End-to-end lifecycle suite: boots the real `rapira` binary and exercises the
-//! fork-based master over HTTP and Unix signals. Every test is `#[ignore]`d until
-//! the fork/master implementation lands; remove the ignores after wiring.
+//! fork-based master over HTTP and Unix signals.
 
 mod harness;
 mod lifecycle;

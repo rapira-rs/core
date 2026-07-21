@@ -15,22 +15,13 @@ use std::time::{Duration, Instant};
 /// Connect budget for a freshly spawned master (CI macOS worst case).
 pub const BOOT: Duration = Duration::from_secs(30);
 
-// Frozen lifecycle exit codes (master <-> worker contract). Only DRAINED/OK and
-// FAILBOOT are asserted by the current tests; the rest name codes in diagnostics.
-/// Worker drained cleanly (master QUIT or the job channel closed).
-pub const WORKER_EXIT_DRAINED: i32 = 0;
-/// Worker recycled itself after `max_requests`.
-pub const WORKER_EXIT_RECYCLE: i32 = 88;
-/// Worker could not boot PHP (UNHEALTHY_AFTER strikes).
-pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
+// Frozen master exit codes; OK and FAILBOOT are asserted, FORCED names diagnostics.
 /// Master could not bring up a serviceable gen-0 pool.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
 /// Master graceful stop completed.
 pub const MASTER_EXIT_OK: i32 = 0;
 /// Master forced stop (a second signal arrived while draining).
 pub const MASTER_EXIT_FORCED: i32 = 130;
-/// Worker received a second QUIT while draining.
-pub const WORKER_EXIT_SECOND_QUIT: i32 = 131;
 
 /// A running master and the scratch dir holding its config and log.
 pub struct Server {
@@ -70,9 +61,11 @@ impl Drop for Server {
     fn drop(&mut self) {
         // Only signal a live master: the pid of a reaped child may be reused.
         if self.child.try_wait().ok().flatten().is_none() {
-            let kids = worker_pids(self.child.id());
             signal(self.child.id(), libc::SIGTERM);
             if self.wait_exit(Duration::from_secs(5)).is_none() {
+                // Query workers only now: a snapshot from before the SIGTERM
+                // could name pids that exited (and were reused) meanwhile.
+                let kids = worker_pids(self.child.id());
                 signal(self.child.id(), libc::SIGKILL);
                 for k in kids {
                     signal(k, libc::SIGKILL);
@@ -162,7 +155,11 @@ fn wait_for_port(addr: &SocketAddr, child: &mut Child, timeout: Duration) -> boo
     let end = Instant::now() + timeout;
     while Instant::now() < end {
         if TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok() {
-            return true;
+            // The connect could have reached a free_port() collision winner, not
+            // our child. Give a bind failure a moment to surface, then require
+            // the child alive; false falls through to the caller's retry loop.
+            std::thread::sleep(Duration::from_millis(100));
+            return child.try_wait().ok().flatten().is_none();
         }
         if child.try_wait().ok().flatten().is_some() {
             return false;
@@ -370,12 +367,9 @@ pub fn assert_exit_code(status: Option<ExitStatus>, expected: i32, srv: &Server)
 
 fn code_name(code: i32) -> String {
     match code {
-        WORKER_EXIT_DRAINED => "DRAINED/OK".into(),
-        WORKER_EXIT_RECYCLE => "RECYCLE".into(),
-        WORKER_EXIT_UNHEALTHY => "UNHEALTHY".into(),
+        MASTER_EXIT_OK => "DRAINED/OK".into(),
         MASTER_EXIT_FAILBOOT => "MASTER_FAILBOOT".into(),
         MASTER_EXIT_FORCED => "MASTER_FORCED".into(),
-        WORKER_EXIT_SECOND_QUIT => "SECOND_QUIT".into(),
         other => format!("code {other}"),
     }
 }

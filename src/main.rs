@@ -35,8 +35,8 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Worker processes. Until the fork-based pool lands, rapira runs a single
-    /// process; values > 1 log a warning. Defaults to the CPU count.
+    /// Worker processes to fork (static count; max_children for dynamic/ondemand).
+    /// Defaults to the CPU count.
     #[arg(long)]
     processes: Option<usize>,
 
@@ -54,6 +54,10 @@ struct ServeArgs {
 }
 
 fn main() -> anyhow::Result<()> {
+    // First statement: USR1/USR2/HUP default to terminate, and no handler
+    // exists until the master installs its own. Harmless on non-serve paths.
+    rapira_master::block_early_signals();
+
     env_logger::init();
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
@@ -82,11 +86,6 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         },
     )?;
     let script: PathBuf = settings.pool.entrypoint.clone();
-
-    // Boot order: block the reload/child signals before anything else so a
-    // stray USR1/USR2 (default disposition: terminate) can't kill the master
-    // before its handlers exist.
-    rapira_master::block_early_signals();
 
     // rapira_config::Listen and rapira_pingora::Listen are distinct types on purpose: the
     // extension crate stays independent of core's config crate, and core owns the one
@@ -128,10 +127,16 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // here is shared with every forked worker). Workers never tear this down.
     let module = Rapira::boot_master()?;
 
-    // 2x headroom: reload generations overlap without slot-reuse races.
-    let scoreboard = rapira_scoreboard::Scoreboard::create(
-        (settings.pool.processes * 2).clamp(1, rapira_scoreboard::SB_MAX_SLOTS),
-    )?;
+    // Reload needs at most `processes + 1` slots (one overlap headroom worker);
+    // 2x is generous slack. Reject configs the board cannot hold instead of
+    // silently clamping below the configured worker count.
+    anyhow::ensure!(
+        settings.pool.processes <= rapira_scoreboard::SB_MAX_SLOTS / 2,
+        "pool.processes ({}) exceeds the supported maximum ({})",
+        settings.pool.processes,
+        rapira_scoreboard::SB_MAX_SLOTS / 2
+    );
+    let scoreboard = rapira_scoreboard::Scoreboard::create(settings.pool.processes * 2)?;
 
     let cfg = rapira_master::MasterConfig {
         processes: settings.pool.processes,

@@ -118,4 +118,4 @@ jobs:
       - run: cargo test --workspace
       # The spawn-the-binary e2e suite (feature-gated, in integration_tests) runs
       # separately so its forking servers do not oversubscribe the 130 PHP tests.
-      - run: cargo build -p rapira_core --bin rapira && cargo test -p integration_tests --test e2e --features e2e
+      - run: cargo build -p rapira_core --bin rapira && cargo test -p integration_tests --test e2e --features e2e -- --test-threads=1

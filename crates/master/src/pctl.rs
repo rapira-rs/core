@@ -1,8 +1,7 @@
 //! Process-control state machine: stop escalation and rolling reload. Pure
 //! decision logic — no syscalls. The executor (`events.rs`) turns the returned
 //! actions into kills and deadlines. Implements state override precedence and
-//! QUIT→TERM→KILL escalation, with the owner amendment that the first stop is
-//! graceful (QUIT), not TERM.
+//! QUIT→TERM→KILL escalation; the first stop is graceful (QUIT), not TERM.
 
 use libc::c_int;
 
@@ -36,10 +35,11 @@ impl KillPhase {
 /// fresh worker to start accepting and draining one old worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReloadPhase {
-    /// Overlap gate: a current-gen replacement was spawned into `slot` (`None`
-    /// for ondemand / no headroom) and must reach `SLOT_IDLE` before the next
-    /// old worker is drained. No escalation runs here — the executor treats the
-    /// pctl deadline as a re-check, capped by `process_control_timeout`.
+    /// Overlap gate: a current-gen replacement was spawned into `slot` and must
+    /// report `SLOT_IDLE` or `SLOT_ACTIVE` before the next old worker is
+    /// drained. `None` only as the `on_signal` placeholder until the executor
+    /// picks the real sub-state. No escalation runs here — the executor treats
+    /// the pctl deadline as a re-check, capped by `process_control_timeout`.
     Await { slot: Option<usize> },
     /// A QUIT was sent to `draining`; escalate QUIT→TERM→KILL on each deadline.
     Drain {
@@ -65,13 +65,13 @@ pub(crate) enum PctlState {
 pub(crate) enum SignalAction {
     /// Enter stopping: QUIT every worker, arm the control-timeout deadline.
     Stop,
-    /// Second stop signal or TERM while stopping: TERM all and exit forced.
+    /// TERM/INT while already stopping: TERM all and exit forced.
     Forced,
     /// Enter reloading: bump generation and drain the oldest old-gen worker.
     Reload,
     /// Emit a status log line (USR1).
     Status,
-    /// No-op (reload/USR2 while already stopping or reloading).
+    /// No-op (reload while stopping/reloading, or a retried graceful QUIT).
     Ignore,
 }
 
@@ -113,11 +113,13 @@ impl Pctl {
 
     /// Map a control byte to an action, applying the state transition. Override
     /// precedence: normal < reloading < stopping; nothing overrides stopping
-    /// except a second stop (→ forced).
+    /// except TERM/INT (→ forced). A retried QUIT stays graceful: it must never
+    /// abort the drain it asked for.
     pub fn on_signal(&mut self, byte: u8) -> SignalAction {
         use crate::signals::{SIG_HUP, SIG_INT, SIG_QUIT, SIG_TERM, SIG_USR1, SIG_USR2};
         match byte {
             SIG_TERM | SIG_INT | SIG_QUIT => match self.state {
+                PctlState::Stopping { .. } if byte == SIG_QUIT => SignalAction::Ignore,
                 PctlState::Stopping { .. } => SignalAction::Forced,
                 _ => {
                     self.state = PctlState::Stopping {
@@ -175,7 +177,6 @@ impl Pctl {
         });
     }
 
-    /// End a reload: back to normal.
     pub fn finish_reload(&mut self) {
         self.state = PctlState::Normal;
     }
@@ -206,7 +207,17 @@ mod tests {
         assert_eq!(p.on_signal(SIG_TERM), SignalAction::Stop);
         assert_eq!(p.on_signal(SIG_TERM), SignalAction::Forced);
         assert_eq!(p.on_signal(SIG_INT), SignalAction::Forced);
-        assert_eq!(p.on_signal(SIG_QUIT), SignalAction::Forced);
+    }
+
+    #[test]
+    fn retried_quit_stays_graceful() {
+        let mut p = Pctl::default();
+        assert_eq!(p.on_signal(SIG_QUIT), SignalAction::Stop);
+        // A repeated graceful stop must not abort the drain it asked for.
+        assert_eq!(p.on_signal(SIG_QUIT), SignalAction::Ignore);
+        assert!(p.is_stopping());
+        // TERM/INT still escalate a graceful stop to forced.
+        assert_eq!(p.on_signal(SIG_TERM), SignalAction::Forced);
     }
 
     #[test]

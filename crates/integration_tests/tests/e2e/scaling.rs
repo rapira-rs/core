@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn dynamic_scales_up_down() {
-    // `pool.processes` is the ceiling (max children); dynamic keeps min_spare..max_spare
-    // idle. The config has no `start`/`max_children` keys — see the resolution note.
+    // `pool.processes` is the ceiling (max children); dynamic keeps
+    // min_spare..max_spare idle.
     let srv = spawn_with_config(
         "sleep-worker.php",
         4,
@@ -34,8 +34,15 @@ fn ondemand_spawns_on_connect() {
         "[pm]\nmode = \"ondemand\"\nprocess_idle_timeout_secs = 2\n",
     );
     // The master binds the listener pre-fork, so the harness readiness probe
-    // connects — which is itself a demand event that forks one worker. Let it
-    // idle-retire first, then assert the pool sits at zero with no traffic.
+    // connects — which is itself a demand event that forks one worker. Wait for
+    // it to appear (the fork may lag the probe), let it idle-retire, then
+    // assert the pool sits at zero with no traffic.
+    wait_workers(
+        &srv,
+        Duration::from_secs(20),
+        "probe-spawned worker appears",
+        |p| !p.is_empty(),
+    );
     wait_workers(
         &srv,
         Duration::from_secs(30),

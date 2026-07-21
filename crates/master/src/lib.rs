@@ -69,8 +69,6 @@ pub struct MasterConfig {
 
 /// Handed to the worker closure IN THE CHILD, after post-fork hygiene.
 pub struct WorkerEnv {
-    pub slot: usize,
-    pub generation: u32,
     /// Read end of the master lifeline: EOF ⇒ master died ⇒ drain.
     pub lifeline: OwnedFd,
     /// This worker's scoreboard slot (shared mmap).
@@ -102,17 +100,12 @@ pub fn run(
     // around each fork so no handler runs in a child window.
     let self_pipe = signals::install_master_signals()?;
     let lifeline = Lifeline::create()?;
-    let pidfile = match &cfg.pidfile {
+    // Held to end of scope: Drop unlinks the pidfile on every exit path.
+    let _pidfile = match &cfg.pidfile {
         Some(p) => Some(pidfile::PidFile::write(p)?),
         None => None,
     };
 
     let mut master = events::Master::new(cfg, scoreboard, self_pipe, lifeline, worker);
-    let reason = master.run_loop();
-
-    // Explicit unlink on both stop paths; Drop backstops the `?` error paths.
-    if let Some(pf) = &pidfile {
-        pf.unlink();
-    }
-    reason
+    master.run_loop()
 }

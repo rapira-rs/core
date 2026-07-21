@@ -190,8 +190,7 @@ struct PmSection {
 }
 
 /// Default worker-process count: one per logical CPU. Falls back to 1 if the
-/// platform can't report it. Consumed by the fork-based pool; until it lands the
-/// server runs a single process and values > 1 log a warning at boot.
+/// platform can't report it.
 fn default_processes() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -304,6 +303,20 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
             }
         }
     };
+    // Cap the pm timeouts so the master's deadline arithmetic can't overflow.
+    let process_idle_timeout_secs = file.pm.process_idle_timeout_secs.unwrap_or(10);
+    let process_control_timeout_secs = file.pm.process_control_timeout_secs.unwrap_or(30);
+    for (key, secs) in [
+        ("pm.process_idle_timeout_secs", process_idle_timeout_secs),
+        (
+            "pm.process_control_timeout_secs",
+            process_control_timeout_secs,
+        ),
+    ] {
+        if secs > 86_400 {
+            bail!("{key} {secs} is too large (max 86400)");
+        }
+    }
     let pidfile = file
         .pm
         .pidfile
@@ -333,12 +346,8 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         pm: PmSettings {
             mode,
             max_requests: file.pm.max_requests.unwrap_or(0),
-            process_idle_timeout: std::time::Duration::from_secs(
-                file.pm.process_idle_timeout_secs.unwrap_or(10),
-            ),
-            process_control_timeout: std::time::Duration::from_secs(
-                file.pm.process_control_timeout_secs.unwrap_or(30),
-            ),
+            process_idle_timeout: std::time::Duration::from_secs(process_idle_timeout_secs),
+            process_control_timeout: std::time::Duration::from_secs(process_control_timeout_secs),
             pidfile,
         },
     })
@@ -456,14 +465,13 @@ mod tests {
     }
 
     #[test]
-    fn pm_defaults_are_static_unlimited() {
-        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
-        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.pm.mode, PmMode::Static);
-        assert_eq!(s.pm.max_requests, 0);
-        assert_eq!(s.pm.process_idle_timeout.as_secs(), 10);
-        assert_eq!(s.pm.process_control_timeout.as_secs(), 30);
-        assert!(s.pm.pidfile.is_none());
+    fn pm_timeout_cap_is_enforced() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[pm]\nprocess_control_timeout_secs = 100000\n",
+        )
+        .unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
+        assert!(err.to_string().contains("too large"));
     }
 
     #[test]

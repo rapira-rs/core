@@ -18,9 +18,9 @@ pub struct Lifeline {
 }
 
 impl Lifeline {
-    /// Create the pipe with both ends `CLOEXEC` (the master never execs it into
-    /// a child that should inherit it beyond the fork). Linux uses `pipe2` in a
-    /// single syscall; other platforms fall back to `pipe` + `fcntl`.
+    /// Create the pipe with both ends `CLOEXEC` (fork inherits fds regardless of
+    /// CLOEXEC; the flag only keeps them out of exec'd processes). Linux uses
+    /// `pipe2` in a single syscall; other platforms fall back to `pipe` + `fcntl`.
     pub fn create() -> anyhow::Result<Lifeline> {
         let mut fds = [0 as RawFd; 2];
         #[cfg(target_os = "linux")]

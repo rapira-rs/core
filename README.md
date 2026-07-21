@@ -69,9 +69,9 @@ entrypoint = "index.php"     # relative → resolved against this file's directo
 classic = false              # optional; default false
 
 [pm]                         # optional; process-manager policy
-mode = "static"              # static (default) | dynamic | ondemand
+mode = "dynamic"             # static (default) | dynamic | ondemand
 min_spare = 1                # dynamic only: keep at least this many idle workers
-max_spare = 3                # dynamic only: trim to at most this many idle workers
+max_spare = 3                # dynamic only: trim to at most this many idle workers (rejected under other modes)
 max_requests = 0             # recycle a worker after N requests (+jitter); 0 = unlimited
 process_idle_timeout_secs = 10   # ondemand: retire an idle worker after this long
 process_control_timeout_secs = 30 # graceful-stop budget before QUIT → TERM → KILL

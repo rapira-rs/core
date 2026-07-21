@@ -49,36 +49,51 @@ fn killed_worker_respawns() {
     }
 }
 
+// After the master exits its workers reparent away, so `worker_pids` can no
+// longer see them — poll the captured pids directly until every one is gone.
+fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
+    let end = Instant::now() + timeout;
+    loop {
+        // SAFETY: kill(pid, 0) only probes existence; ESRCH means gone.
+        let gone = pids
+            .iter()
+            .all(|&p| unsafe { libc::kill(p as libc::pid_t, 0) } == -1);
+        if gone {
+            return;
+        }
+        assert!(
+            Instant::now() < end,
+            "workers survived the master: {pids:?}\n{}",
+            diagnostics(srv)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+// Stop budget: past process_control_timeout (30s) the master escalates a stuck
+// worker QUIT → TERM → KILL and still exits 0, so the wait must outlast it.
+const STOP_BUDGET: Duration = Duration::from_secs(45);
+
 #[test]
 fn sigquit_master_graceful() {
     let mut srv = spawn_with_config("echo-worker.php", 2, "");
-    wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
+    let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     signal(srv.pid(), libc::SIGQUIT);
-    let status = srv.wait_exit(Duration::from_secs(30));
+    let status = srv.wait_exit(STOP_BUDGET);
     assert_exit_code(status, MASTER_EXIT_OK, &srv);
-    wait_workers(
-        &srv,
-        Duration::from_secs(10),
-        "no surviving workers",
-        <[u32]>::is_empty,
-    );
+    wait_pids_gone(&pids, Duration::from_secs(10), &srv);
 }
 
 #[test]
 fn sigterm_master_stops() {
     let mut srv = spawn_with_config("echo-worker.php", 2, "");
-    wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
+    let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
     signal(srv.pid(), libc::SIGTERM);
-    let status = srv.wait_exit(Duration::from_secs(30));
+    let status = srv.wait_exit(STOP_BUDGET);
     assert_exit_code(status, MASTER_EXIT_OK, &srv);
-    wait_workers(
-        &srv,
-        Duration::from_secs(10),
-        "no surviving workers",
-        <[u32]>::is_empty,
-    );
+    wait_pids_gone(&pids, Duration::from_secs(10), &srv);
 }
 
 #[test]
@@ -117,7 +132,9 @@ fn master_failboot_exits_70() {
         if Instant::now() >= end {
             panic!("master never exited\n{}", diagnostics(&srv));
         }
-        // 503s / connection errors are expected while the master gives up.
+        // Load-bearing: each request pumps one boot retry (strikes are demand-driven).
+        // 503s / connection errors are expected until the worker strikes out and the
+        // master exits.
         let _ = http_get(addr, "/", Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(100));
     };

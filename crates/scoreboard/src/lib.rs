@@ -5,10 +5,7 @@
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-pub const SB_MAGIC: u32 = u32::from_le_bytes(*b"RPSB");
-pub const SB_VERSION: u32 = 1;
 pub const SB_MAX_SLOTS: usize = 4096;
 
 pub const SLOT_FREE: u32 = 0; // no worker bound (master clears after reap)
@@ -16,25 +13,6 @@ pub const SLOT_STARTING: u32 = 1; // master forked; worker has not reported in y
 pub const SLOT_IDLE: u32 = 2; // parked waiting for a job — spare capacity
 pub const SLOT_ACTIVE: u32 = 3; // executing a request
 pub const SLOT_DRAINING: u32 = 4; // self-initiated exit pending (quota / unhealthy)
-
-/// Layout oracle for [`SharedSlot`]: same fields as plain ints. The atomics
-/// variant is layout-compatible (atomics have the same size/align as their
-/// underlying integers), but lacks zerocopy's `Immutable`, so the derives and
-/// const asserts live here.
-#[repr(C, align(64))]
-#[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
-pub struct SlotRaw {
-    pub state: u32,
-    pub pid: u32,
-    pub handled: u64,
-    pub errors: u64,
-    pub recycles: u64,
-    pub restarts: u64,
-    pub unhealthy: u32,
-    _pad: [u8; 4],
-    pub last_activity_ms: u64,
-    _tail: [u8; 8],
-}
 
 /// The live view over one mapped slot. Single-writer (its worker); the master
 /// only reads it, except for the STARTING/FREE ownership transitions.
@@ -52,25 +30,12 @@ pub struct SharedSlot {
     _tail: [u8; 8],
 }
 
-#[repr(C, align(64))]
-#[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
-struct ShmHeader {
-    magic: u32,
-    version: u32,
-    nslots: u32,
-    _pad: [u8; 52],
-}
-
-const _: () = assert!(size_of::<SlotRaw>() == 64 && align_of::<SlotRaw>() == 64);
-const _: () = assert!(size_of::<SharedSlot>() == size_of::<SlotRaw>());
-const _: () = assert!(align_of::<SharedSlot>() == align_of::<SlotRaw>());
-const _: () = assert!(size_of::<ShmHeader>() == 64);
+const _: () = assert!(size_of::<SharedSlot>() == 64 && align_of::<SharedSlot>() == 64);
 
 /// Copy view over the mapping; the addresses are identical in every forked
 /// child because the mmap happens once, pre-fork.
 #[derive(Clone, Copy)]
 pub struct Scoreboard {
-    header: &'static ShmHeader,
     slots: &'static [SharedSlot],
 }
 
@@ -102,15 +67,14 @@ impl Scoreboard {
             (1..=SB_MAX_SLOTS).contains(&nslots),
             "scoreboard slots out of range: {nslots}"
         );
-        let bytes = size_of::<ShmHeader>() + nslots * size_of::<SharedSlot>();
+        let bytes = nslots * size_of::<SharedSlot>();
         // SAFETY: the single mmap->&'static cast in the codebase.
         //  * MAP_SHARED|MAP_ANONYMOUS is page-aligned (>= 64) and zero-filled; zero
-        //    is a valid bit pattern for every field (FromBytes on the layout oracle).
-        //  * No implicit padding (IntoBytes derives + const size asserts above).
+        //    is a valid bit pattern for every field (atomic ints and u8 arrays).
+        //  * No implicit padding (field sizes sum to 64; const assert above).
         //  * The mapping is never munmap'd -> lives for the process and every
         //    fork -> 'static.
-        //  * All post-publication mutation goes through atomics; the plain-int
-        //    header is fully written below before any reference escapes.
+        //  * All post-publication mutation goes through atomics.
         unsafe {
             let ptr = libc::mmap(
                 std::ptr::null_mut(),
@@ -125,30 +89,13 @@ impl Scoreboard {
                 "scoreboard mmap failed: {}",
                 std::io::Error::last_os_error()
             );
-            let hdr = ptr.cast::<ShmHeader>();
-            (*hdr).magic = SB_MAGIC;
-            (*hdr).version = SB_VERSION;
-            (*hdr).nslots = nslots as u32;
-            let slots = std::slice::from_raw_parts(
-                ptr.cast::<u8>()
-                    .add(size_of::<ShmHeader>())
-                    .cast::<SharedSlot>(),
-                nslots,
-            );
-            Ok(Scoreboard {
-                header: &*hdr,
-                slots,
-            })
+            let slots = std::slice::from_raw_parts(ptr.cast::<SharedSlot>(), nslots);
+            Ok(Scoreboard { slots })
         }
     }
 
     pub fn nslots(&self) -> usize {
-        self.header.nslots as usize
-    }
-
-    /// Sanity check for a mapping inherited across fork.
-    pub fn header_valid(&self) -> bool {
-        self.header.magic == SB_MAGIC && self.header.version == SB_VERSION
+        self.slots.len()
     }
 
     pub fn slot(&self, i: usize) -> Option<&'static SharedSlot> {
@@ -175,13 +122,6 @@ impl Scoreboard {
             s.pid.store(0, Relaxed);
             s.state.store(SLOT_FREE, Relaxed);
         }
-    }
-
-    /// Find a FREE slot index (master-side; single-threaded, so no CAS races).
-    pub fn find_free(&self) -> Option<usize> {
-        self.slots
-            .iter()
-            .position(|s| s.state.load(Relaxed) == SLOT_FREE)
     }
 
     pub fn snapshot_slots(&self) -> Vec<SlotSnapshot> {
@@ -226,10 +166,11 @@ mod tests {
     fn create_bind_snapshot_roundtrip() {
         let sb = Scoreboard::create(3).unwrap();
         assert_eq!(sb.nslots(), 3);
-        assert_eq!(sb.find_free(), Some(0));
+        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_FREE);
 
         sb.set_starting(0);
-        assert_eq!(sb.find_free(), Some(1));
+        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_STARTING);
+        assert_eq!(sb.slot(1).unwrap().state.load(Relaxed), SLOT_FREE);
 
         let slot = sb.slot(0).unwrap();
         slot.bind(4242);
@@ -242,7 +183,7 @@ mod tests {
         assert_eq!(snap[0].state, SLOT_IDLE);
 
         sb.clear(0);
-        assert_eq!(sb.find_free(), Some(0));
+        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_FREE);
         assert!(sb.snapshot_slots().is_empty());
     }
 

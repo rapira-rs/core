@@ -1,7 +1,6 @@
-//! Pidfile guard. Written after listeners bind so it only exists once the
-//! master is ready to supervise, unlinked explicitly on clean/forced stop with
-//! a `Drop` backstop for error paths. Only the master ever holds one — children
-//! `_exit` without running drops, so a worker can never unlink it.
+//! Pidfile guard: written with the master pid, unlinked by `Drop` on every
+//! master exit path. Only the master ever holds one — children `_exit` without
+//! running drops, so a worker can never unlink it.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,15 +17,10 @@ impl PidFile {
             path: path.to_path_buf(),
         })
     }
-
-    /// Remove the pidfile now (idempotent).
-    pub fn unlink(&self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 impl Drop for PidFile {
     fn drop(&mut self) {
-        self.unlink();
+        let _ = std::fs::remove_file(&self.path);
     }
 }

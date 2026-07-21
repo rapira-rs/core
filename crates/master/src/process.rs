@@ -10,7 +10,9 @@ use libc::c_int;
 
 use crate::WorkerEnv;
 use crate::lifeline::Lifeline;
-use crate::signals::{MASTER_SIGNALS, SelfPipe, master_pid, sigset};
+#[cfg(target_os = "linux")]
+use crate::signals::master_pid;
+use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
 use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY};
 use rapira_scoreboard::Scoreboard;
 
@@ -19,8 +21,6 @@ use rapira_scoreboard::Scoreboard;
 pub(crate) const QUICK_CRASH: Duration = Duration::from_secs(10);
 /// First backoff delay; doubles per consecutive quick crash.
 pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
-/// Ceiling on the backoff delay.
-pub(crate) const RESPAWN_CAP: Duration = Duration::from_secs(30);
 
 /// A live worker tracked by the master.
 #[derive(Debug, Clone, Copy)]
@@ -29,8 +29,6 @@ pub(crate) struct WorkerProc {
     pub slot: usize,
     pub generation: u32,
     pub spawned_at: Instant,
-    /// `Some(sig)` once the master has signalled it (expected-death tracking).
-    pub kill_sent: Option<c_int>,
     /// pm idle-kill in progress: QUIT sent; a later pass may KILL.
     pub idle_kill: bool,
 }
@@ -65,15 +63,15 @@ impl SlotState {
     }
 }
 
-/// Backoff delay for a given consecutive-crash streak: 100ms, 200ms, … capped
-/// at [`RESPAWN_CAP`]. The streak exponent saturates at 8 (25.6s) before the cap.
+/// Backoff delay for a given consecutive-crash streak: 100ms doubling; the
+/// exponent saturates at 8, so the delay ceils at 25.6s.
 pub(crate) fn backoff_delay(streak: u32) -> Duration {
-    RESPAWN_BASE
-        .saturating_mul(2u32.saturating_pow(streak.min(8)))
-        .min(RESPAWN_CAP)
+    RESPAWN_BASE.saturating_mul(2u32.saturating_pow(streak.min(8)))
 }
 
 /// Verdict from reaping a worker. Drives respawn policy in the executor.
+/// Exits during a stop or reload drain are consumed by their own paths before
+/// the verdict is consulted, so no expected-kill tracking is needed here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExitVerdict {
     /// Exit 0: graceful drain (respawned like a recycle if unexpected).
@@ -82,8 +80,6 @@ pub(crate) enum ExitVerdict {
     Recycle,
     /// Unhealthy exit: respawn with backoff (and gen-0 failboot check).
     Unhealthy,
-    /// Killed by the master via stop/reload escalation (expected).
-    ExpectedKill,
     /// pm idle-kill (QUIT, or KILL after QUIT): trimmed, not respawned.
     IdleKill,
     /// Unknown exit code or unexpected signal: crash (respawn with backoff).
@@ -91,9 +87,8 @@ pub(crate) enum ExitVerdict {
 }
 
 /// Classify a raw `wait` status into a verdict. Pure: no syscalls, no state.
-/// `kill_sent` is the last signal the master sent this worker; `idle_kill` is
-/// set once the master began an idle-kill on it.
-pub(crate) fn classify(status: c_int, kill_sent: Option<c_int>, idle_kill: bool) -> ExitVerdict {
+/// `idle_kill` is set once the master began an idle-kill on the worker.
+pub(crate) fn classify(status: c_int, idle_kill: bool) -> ExitVerdict {
     if libc::WIFEXITED(status) {
         match libc::WEXITSTATUS(status) {
             WORKER_EXIT_DRAINED if idle_kill => ExitVerdict::IdleKill,
@@ -104,14 +99,10 @@ pub(crate) fn classify(status: c_int, kill_sent: Option<c_int>, idle_kill: bool)
         }
     } else if libc::WIFSIGNALED(status) {
         let sig = libc::WTERMSIG(status);
-        // Expected: the master's own kill, or an idle-kill QUIT.
-        let expected = kill_sent == Some(sig) || (idle_kill && sig == libc::SIGQUIT);
-        if !expected {
-            ExitVerdict::Crash
-        } else if idle_kill {
+        if idle_kill && (sig == libc::SIGQUIT || sig == libc::SIGKILL) {
             ExitVerdict::IdleKill
         } else {
-            ExitVerdict::ExpectedKill
+            ExitVerdict::Crash
         }
     } else {
         // Stopped/continued: never requested (no WUNTRACED) → treat as crash.
@@ -161,7 +152,7 @@ impl ProcTable {
             }
             match self.remove(pid) {
                 Some(w) => {
-                    let verdict = classify(status, w.kill_sent, w.idle_kill);
+                    let verdict = classify(status, w.idle_kill);
                     buried.push((w, verdict));
                 }
                 None => log::warn!(target: "master", "reaped unknown child {pid}"),
@@ -174,35 +165,28 @@ impl ProcTable {
 /// The fork bracket. Parent blocks the master signal set around `fork`, resets
 /// it after; the child neutralizes inherited dispositions, closes the master's
 /// control fds, runs the worker closure, and `_exit`s (no Rust drops ever run in
-/// a child — no PHP shutdown, no pidfile unlink). Amendment 2 signal contract:
+/// a child — no PHP shutdown, no pidfile unlink). Child signal contract:
 /// all master dispositions → SIG_DFL, USR1/USR2 → SIG_IGN, {QUIT, INT} left
 /// blocked (the worker's sigwait watcher owns them), everything else unblocked
 /// including TERM (SIG_DFL fast kill).
 pub(crate) fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
     slot: usize,
-    generation: u32,
     self_pipe: &SelfPipe,
     lifeline: &Lifeline,
     scoreboard: &Scoreboard,
     worker: &mut F,
 ) -> std::io::Result<libc::pid_t> {
-    // Block the full set (worker-relevant signals) around fork so no handler
-    // runs in the fork window in either process.
-    let block = sigset(&[
-        libc::SIGUSR1,
-        libc::SIGUSR2,
-        libc::SIGCHLD,
-        libc::SIGTERM,
-        libc::SIGQUIT,
-        libc::SIGINT,
-        libc::SIGHUP,
-    ]);
+    // Fail in the parent, before the bracket, where the error can be reported;
+    // the child inherits its own copy of the dup, the parent's drops on return.
+    let lifeline_rd = lifeline.dup_read_end()?;
+
+    // Block the master signal set around fork so no handler runs in the fork
+    // window in either process.
+    let block = sigset(&MASTER_SIGNALS);
     // SAFETY: zeroed sigset_t is fully overwritten by sigprocmask's out-param.
     let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
     // SAFETY: block/old are live sigset_ts.
     unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut old) };
-
-    let lifeline_rd = lifeline.dup_read_end();
 
     // SAFETY: fork in a single-threaded master; the child branch is
     // async-signal-safe until _exit.
@@ -267,17 +251,13 @@ pub(crate) fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
                 let slot_view = scoreboard
                     .slot(slot)
                     .expect("slot index within scoreboard bounds");
-                let lifeline = lifeline_rd?;
-                Ok::<i32, std::io::Error>(worker(WorkerEnv {
-                    slot,
-                    generation,
-                    lifeline,
+                worker(WorkerEnv {
+                    lifeline: lifeline_rd,
                     slot_view,
-                }))
+                })
             }));
             let code = match outcome {
-                Ok(Ok(code)) => code,
-                Ok(Err(_)) => 1, // lifeline dup failed pre-fork
+                Ok(code) => code,
                 Err(_) => {
                     // Panic already unwound inside the closure; the default hook
                     // printed it. Match Rust's own panic exit code (101).
@@ -318,69 +298,40 @@ mod tests {
 
     #[test]
     fn classify_exit_codes() {
-        assert_eq!(classify(exited(0), None, false), ExitVerdict::Drain);
-        assert_eq!(classify(exited(88), None, false), ExitVerdict::Recycle);
-        assert_eq!(classify(exited(89), None, false), ExitVerdict::Unhealthy);
-        assert_eq!(classify(exited(42), None, false), ExitVerdict::Crash);
-        assert_eq!(classify(exited(1), None, false), ExitVerdict::Crash);
+        assert_eq!(classify(exited(0), false), ExitVerdict::Drain);
+        assert_eq!(classify(exited(88), false), ExitVerdict::Recycle);
+        assert_eq!(classify(exited(89), false), ExitVerdict::Unhealthy);
+        assert_eq!(classify(exited(42), false), ExitVerdict::Crash);
+        assert_eq!(classify(exited(1), false), ExitVerdict::Crash);
     }
 
     #[test]
     fn classify_exit_zero_under_idle_kill_is_idle_kill() {
         // A worker QUIT-drained by an idle-kill exits 0 → IdleKill, not respawn.
-        assert_eq!(classify(exited(0), None, true), ExitVerdict::IdleKill);
+        assert_eq!(classify(exited(0), true), ExitVerdict::IdleKill);
         // Recycle/unhealthy codes ignore idle_kill (explicit protocol codes).
-        assert_eq!(classify(exited(88), None, true), ExitVerdict::Recycle);
-        assert_eq!(classify(exited(89), None, true), ExitVerdict::Unhealthy);
-    }
-
-    #[test]
-    fn classify_expected_signals() {
-        // Escalation TERM/KILL are expected via kill_sent.
-        assert_eq!(
-            classify(signaled(libc::SIGTERM), Some(libc::SIGTERM), false),
-            ExitVerdict::ExpectedKill
-        );
-        assert_eq!(
-            classify(signaled(libc::SIGKILL), Some(libc::SIGKILL), false),
-            ExitVerdict::ExpectedKill
-        );
-        assert_eq!(
-            classify(signaled(libc::SIGQUIT), Some(libc::SIGQUIT), false),
-            ExitVerdict::ExpectedKill
-        );
+        assert_eq!(classify(exited(88), true), ExitVerdict::Recycle);
+        assert_eq!(classify(exited(89), true), ExitVerdict::Unhealthy);
     }
 
     #[test]
     fn classify_idle_kill_signals() {
-        // Idle-kill QUIT with no kill_sent recorded is still expected.
+        // Idle-kill QUIT, and its KILL escalation, are expected deaths.
         assert_eq!(
-            classify(signaled(libc::SIGQUIT), None, true),
+            classify(signaled(libc::SIGQUIT), true),
             ExitVerdict::IdleKill
         );
-        // Idle-kill escalated to KILL (kill_sent = KILL) stays IdleKill.
         assert_eq!(
-            classify(signaled(libc::SIGKILL), Some(libc::SIGKILL), true),
+            classify(signaled(libc::SIGKILL), true),
             ExitVerdict::IdleKill
         );
     }
 
     #[test]
     fn classify_unexpected_signals_are_crashes() {
-        // SEGV/BUS/external kill with no matching kill_sent = crash.
-        assert_eq!(
-            classify(signaled(libc::SIGSEGV), None, false),
-            ExitVerdict::Crash
-        );
-        assert_eq!(
-            classify(signaled(libc::SIGKILL), None, false),
-            ExitVerdict::Crash
-        );
-        // Mismatched kill_sent (we sent QUIT, it died of SEGV) = crash.
-        assert_eq!(
-            classify(signaled(libc::SIGSEGV), Some(libc::SIGQUIT), false),
-            ExitVerdict::Crash
-        );
+        assert_eq!(classify(signaled(libc::SIGSEGV), false), ExitVerdict::Crash);
+        assert_eq!(classify(signaled(libc::SIGKILL), false), ExitVerdict::Crash);
+        assert_eq!(classify(signaled(libc::SIGSEGV), true), ExitVerdict::Crash);
     }
 
     #[test]
@@ -388,12 +339,10 @@ mod tests {
         assert_eq!(backoff_delay(0), Duration::from_millis(100));
         assert_eq!(backoff_delay(1), Duration::from_millis(200));
         assert_eq!(backoff_delay(2), Duration::from_millis(400));
+        // The exponent saturates at 8: higher streaks stay pinned at 25.6s.
         assert_eq!(backoff_delay(8), Duration::from_millis(25_600));
-        // The exponent saturates at 8 (25.6s), which stays under the 30s cap, so
-        // higher streaks stay pinned at 25.6s.
         assert_eq!(backoff_delay(9), Duration::from_millis(25_600));
         assert_eq!(backoff_delay(100), Duration::from_millis(25_600));
-        assert!(backoff_delay(100) <= RESPAWN_CAP);
     }
 
     #[test]
@@ -419,17 +368,5 @@ mod tests {
         // Lived past the quick-crash window → streak reset, then bumped to 1.
         assert_eq!(s.crash_streak, 1);
         assert_eq!(s.respawn_at, Some(now + Duration::from_millis(100)));
-    }
-
-    #[test]
-    fn schedule_immediate_clears_streak() {
-        let now = Instant::now();
-        let mut s = SlotState {
-            crash_streak: 4,
-            respawn_at: None,
-        };
-        s.schedule_immediate(now);
-        assert_eq!(s.crash_streak, 0);
-        assert_eq!(s.respawn_at, Some(now));
     }
 }

@@ -1,15 +1,15 @@
 //! Master event loop: a single `poll(2)` over the self-pipe (and, in ondemand,
 //! the listeners) plus deadline bookkeeping. Drains the self-pipe fully, defers
-//! the batched reap until after the drain so a dead child's event and its signal
-//! byte in the same wake never race a use-after-free, then fires due timers. All
+//! the batched reap until after the drain so control bytes in the same wake
+//! update pctl state before corpses are classified, then fires due timers. All
 //! policy lives in the pure modules; this file is the executor.
 
 use std::os::fd::{AsRawFd, RawFd};
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::time::{Duration, Instant};
 
 use libc::c_int;
-use rapira_scoreboard::{SLOT_FREE, SLOT_IDLE, SLOT_STARTING, Scoreboard, now_millis};
+use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, SLOT_STARTING, Scoreboard, now_millis};
 
 use crate::lifeline::Lifeline;
 use crate::pctl::{KillTarget, Pctl, PctlState, ReloadPhase, SignalAction};
@@ -18,9 +18,9 @@ use crate::scaling::{DynAction, DynInput, dynamic_start_count, dynamic_tick, ond
 use crate::signals::{SIG_CHLD, SelfPipe, errno_get};
 use crate::{MasterConfig, PmMode, StopReason, WorkerEnv};
 
-/// While an overlap reload waits for a replacement to reach `SLOT_IDLE`, the
-/// scoreboard is re-checked on this short cadence. The total wait is bounded by
-/// `process_control_timeout` so a broken replacement cannot stall the reload.
+/// While an overlap reload waits for a replacement to report IDLE or ACTIVE,
+/// the scoreboard is re-checked on this short cadence. The total wait is bounded
+/// by `process_control_timeout` so a broken replacement cannot stall the reload.
 const RELOAD_GATE_POLL: Duration = Duration::from_millis(50);
 
 /// Deadline sources merged into one poll timeout: the always-armed 1s tick, the
@@ -49,8 +49,7 @@ impl Deadlines {
             next = next.min(d);
         }
         let d = next.saturating_duration_since(now);
-        let ms = u128::from(d.as_millis() as u64)
-            + u128::from(!d.subsec_nanos().is_multiple_of(1_000_000));
+        let ms = d.as_nanos().div_ceil(1_000_000);
         ms.min(i32::MAX as u128) as c_int
     }
 }
@@ -94,9 +93,10 @@ pub(crate) struct Master<F: FnMut(WorkerEnv) -> i32> {
     deadlines: Deadlines,
     table: ProcTable,
     spawn_rate: u32,
-    ondemand_armed: bool,
+    /// Ceiling warning latch: warn once per saturation episode, not every tick.
+    warned_max_children: bool,
     /// Absolute deadline for the current reload Await gate: once reached, drain
-    /// the next old worker even if the replacement never became IDLE.
+    /// the next old worker even if the replacement never started serving.
     reload_await_until: Option<Instant>,
     /// Latched once the pool has ever served a successful request. Guards the
     /// failboot check: only a pool that never managed to serve is an
@@ -125,7 +125,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             deadlines: Deadlines::new(now),
             table,
             spawn_rate: 1,
-            ondemand_armed: false,
+            warned_max_children: false,
             reload_await_until: None,
             ever_served: false,
         }
@@ -157,7 +157,10 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             .slots()
             .iter()
             .map(|s| {
-                let handled = s.handled.load(Relaxed);
+                // Acquire pairs with the worker's Release on `handled` (stored
+                // after `errors`): an observed handled implies its error is too,
+                // so a shed can never be counted as a success.
+                let handled = s.handled.load(Acquire);
                 let errors = s.errors.load(Relaxed);
                 handled.saturating_sub(errors)
             })
@@ -187,6 +190,19 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             .unwrap_or(false)
     }
 
+    /// The slot's worker is serving: bound and parked (IDLE) or on a request
+    /// (ACTIVE). Under load a replacement may never be observed IDLE between
+    /// requests, so the reload gate must accept ACTIVE as proof of service.
+    fn slot_is_serving(&self, i: usize) -> bool {
+        self.scoreboard
+            .slot(i)
+            .map(|s| {
+                let state = s.state.load(Relaxed);
+                state == SLOT_IDLE || state == SLOT_ACTIVE
+            })
+            .unwrap_or(false)
+    }
+
     /// A slot free in the scoreboard, with no live proc and no pending respawn
     /// (so we never race the respawn-deadline path).
     fn find_spawn_slot(&self) -> Option<usize> {
@@ -213,7 +229,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         let generation = self.table.generation;
         match spawn_worker(
             slot,
-            generation,
             &self.self_pipe,
             &self.lifeline,
             &self.scoreboard,
@@ -224,11 +239,10 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 slot,
                 generation,
                 spawned_at: now,
-                kill_sent: None,
                 idle_kill: false,
             }),
             Err(e) => {
-                log::error!(target: "master", "fork failed for slot {slot}: {e}");
+                log::error!(target: "master", "spawn failed for slot {slot}: {e}");
                 self.scoreboard.clear(slot);
                 // Back off so a readable ondemand listener does not spin.
                 self.table.slots[slot].schedule_backoff(Duration::ZERO, now);
@@ -252,7 +266,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 None => break,
             }
         }
-        self.ondemand_armed = self.compute_armed();
         self.recompute_respawn_deadline();
     }
 
@@ -280,16 +293,14 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     }
 
     fn begin_stop(&mut self, now: Instant) -> Option<StopReason> {
-        for p in &mut self.table.procs {
+        for p in &self.table.procs {
             kill(p.pid, libc::SIGQUIT);
-            p.kill_sent = Some(libc::SIGQUIT);
         }
         for s in &mut self.table.slots {
             s.cancel_respawn();
         }
         self.deadlines.pctl = Some(now + self.cfg.process_control_timeout);
         self.reload_await_until = None; // stop overrides any in-flight reload gate
-        self.ondemand_armed = false;
         if self.table.procs.is_empty() {
             return Some(StopReason::Drained);
         }
@@ -303,38 +314,41 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     }
 
     /// Overlap reload: bump the generation and spawn one current-gen worker as
-    /// headroom, then wait for it to accept before any old worker is drained, so
-    /// accept capacity never dips below the pool.
+    /// headroom, then wait for it to report IDLE or ACTIVE before any old worker
+    /// is drained, so serving capacity never dips below the pool. With no live
+    /// old-gen worker there is nothing to overlap — no headroom is spawned.
     fn begin_reload(&mut self, now: Instant) {
         self.table.generation += 1;
-        let slot = self.find_spawn_slot();
+        let slot = if self.has_old_gen() {
+            self.find_spawn_slot()
+        } else {
+            None
+        };
         self.reload_enter_await(slot, now);
     }
 
     /// Enter the overlap gate: for non-ondemand spawn a current-gen replacement
-    /// into `slot` and wait for it to reach `SLOT_IDLE`; ondemand spawns nothing
-    /// (the gate is vacuous — replacements come from demand). Arms the short
-    /// re-check plus the `process_control_timeout` safety cap, then probes once
-    /// (advances immediately when the gate is already open, e.g. ondemand).
+    /// into `slot`, arm the short re-check plus the `process_control_timeout`
+    /// safety cap, and wait for it to start serving. Ondemand (or no free slot)
+    /// spawns nothing and drains the next old worker directly — replacements
+    /// come from demand.
     fn reload_enter_await(&mut self, slot: Option<usize>, now: Instant) {
-        let pending = match slot {
+        match slot {
             Some(s) if !matches!(self.cfg.pm, PmMode::Ondemand) => {
                 self.spawn_into(s, now);
-                Some(s)
+                self.pctl.set_reload_await(Some(s));
+                self.reload_await_until = Some(now + self.cfg.process_control_timeout);
+                self.deadlines.pctl = Some(now + RELOAD_GATE_POLL);
             }
-            _ => None,
-        };
-        self.pctl.set_reload_await(pending);
-        self.reload_await_until = Some(now + self.cfg.process_control_timeout);
-        self.deadlines.pctl = Some(now + RELOAD_GATE_POLL);
-        self.reload_try_advance(now);
+            _ => self.reload_quit_next(now),
+        }
     }
 
-    /// Overlap-gate probe: once the pending replacement is `SLOT_IDLE` (or there
-    /// is none), QUIT the next old worker. A no-op while still waiting.
+    /// Overlap-gate probe: once the pending replacement is serving (IDLE or
+    /// ACTIVE), QUIT the next old worker. A no-op while still waiting.
     fn reload_try_advance(&mut self, now: Instant) {
         if let PctlState::Reloading(ReloadPhase::Await { slot }) = self.pctl.state {
-            let ready = slot.is_none_or(|s| self.slot_is_idle(s));
+            let ready = slot.is_none_or(|s| self.slot_is_serving(s));
             if ready {
                 self.reload_quit_next(now);
             }
@@ -355,10 +369,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             .map(|p| p.pid);
         match target {
             Some(pid) => {
-                if let Some(p) = self.table.procs.iter_mut().find(|p| p.pid == pid) {
-                    kill(pid, libc::SIGQUIT);
-                    p.kill_sent = Some(libc::SIGQUIT);
-                }
+                kill(pid, libc::SIGQUIT);
                 self.pctl.set_reload_drain(pid);
                 self.deadlines.pctl = Some(now + self.cfg.process_control_timeout);
             }
@@ -429,35 +440,37 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
 
         match verdict {
-            ExitVerdict::IdleKill | ExitVerdict::ExpectedKill => {
-                // Trimmed or master-killed: do not respawn.
+            ExitVerdict::IdleKill => {
+                // Trimmed: do not respawn.
             }
             ExitVerdict::Recycle | ExitVerdict::Drain => {
                 self.table.slots[slot].schedule_immediate(now);
                 self.apply_pm_respawn_gate(slot);
             }
             ExitVerdict::Unhealthy => {
-                // Failboot only if the pool NEVER served a successful request:
-                // an unrecoverable boot failure. Once it has ever served, an
-                // unhealthy death is recoverable — respawn with backoff forever.
-                if !self.ever_served {
+                // Failboot only for a generation-0 worker in a pool that NEVER
+                // served a successful request: an unrecoverable boot failure. A
+                // reload replacement (gen > 0) dying unhealthy must never take
+                // down the running pool — respawn with backoff instead.
+                if w.generation == 0 && !self.ever_served {
                     anyhow::bail!(
                         "worker {} exited unhealthy before the pool served any request",
                         w.pid
                     );
                 }
                 self.table.slots[slot].schedule_backoff(lived, now);
-                self.apply_pm_respawn_gate(slot);
             }
             ExitVerdict::Crash => {
                 self.table.slots[slot].schedule_backoff(lived, now);
-                self.apply_pm_respawn_gate(slot);
             }
         }
         Ok(())
     }
 
-    /// Ondemand never proactively respawns; demand re-forks.
+    /// Ondemand never proactively respawns a cleanly-exited worker; demand
+    /// re-forks. Crash/unhealthy backoff deadlines are kept even under ondemand:
+    /// they suppress forking into the slot until they expire (see
+    /// `fire_due_deadlines`), throttling a fork-crash loop.
     fn apply_pm_respawn_gate(&mut self, slot: usize) {
         if matches!(self.cfg.pm, PmMode::Ondemand) {
             self.table.slots[slot].cancel_respawn();
@@ -470,7 +483,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         if let Some(p) = self.table.procs.iter_mut().find(|p| p.pid == pid) {
             if p.idle_kill {
                 kill(pid, libc::SIGKILL);
-                p.kill_sent = Some(libc::SIGKILL);
             } else {
                 kill(pid, libc::SIGQUIT);
                 p.idle_kill = true;
@@ -530,31 +542,40 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                         None => break,
                     }
                 }
+                self.warned_max_children = false;
             }
             DynAction::ReachedMaxChildren => {
-                log::warn!(
-                    target: "master",
-                    "reached pm.processes ceiling ({}), consider raising it",
-                    self.cfg.processes
-                );
+                if !self.warned_max_children {
+                    self.warned_max_children = true;
+                    log::warn!(
+                        target: "master",
+                        "reached pool.processes ceiling ({}), consider raising it",
+                        self.cfg.processes
+                    );
+                }
             }
             DynAction::Steady => {}
         }
     }
 
     fn ondemand_maintenance(&mut self, _now: Instant) {
-        let Some(pid) = self.oldest_idle_pid() else {
+        // Victim = the idle worker with the stalest activity. Selecting by
+        // process age instead would let a busy-at-tick older worker shield a
+        // long-expired younger one indefinitely.
+        let target = self
+            .table
+            .procs
+            .iter()
+            .filter(|p| self.slot_is_idle(p.slot))
+            .filter_map(|p| {
+                self.scoreboard
+                    .slot(p.slot)
+                    .map(|s| (p.pid, s.last_activity_ms.load(Relaxed)))
+            })
+            .min_by_key(|&(_, last)| last);
+        let Some((pid, last)) = target else {
             return;
         };
-        let slot = match self.table.procs.iter().find(|p| p.pid == pid) {
-            Some(p) => p.slot,
-            None => return,
-        };
-        let last = self
-            .scoreboard
-            .slot(slot)
-            .map(|s| s.last_activity_ms.load(Relaxed))
-            .unwrap_or(0);
         let age_ms = u128::from(now_millis().saturating_sub(last));
         if age_ms >= self.cfg.process_idle_timeout.as_millis() {
             self.idle_kill_pid(pid);
@@ -567,15 +588,13 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         if let Some(step) = self.pctl.escalate() {
             match step.target {
                 KillTarget::All => {
-                    for p in &mut self.table.procs {
+                    for p in &self.table.procs {
                         kill(p.pid, step.sig);
-                        p.kill_sent = Some(step.sig);
                     }
                 }
                 KillTarget::One(pid) => {
-                    if let Some(p) = self.table.procs.iter_mut().find(|p| p.pid == pid) {
+                    if self.table.procs.iter().any(|p| p.pid == pid) {
                         kill(pid, step.sig);
-                        p.kill_sent = Some(step.sig);
                     }
                 }
             }
@@ -598,7 +617,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 if let Some(s) = slot {
                     log::warn!(
                         target: "master",
-                        "reload: replacement slot {s} not idle within control timeout; proceeding"
+                        "reload: replacement slot {s} not serving within control timeout; proceeding"
                     );
                 }
                 self.reload_quit_next(now);
@@ -620,7 +639,11 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 && !self.table.has_proc(slot)
             {
                 self.table.slots[slot].cancel_respawn();
-                self.spawn_into(slot, now);
+                // Ondemand: the expired backoff only lifts the fork suppression;
+                // the next connection forks, never the timer.
+                if !matches!(self.cfg.pm, PmMode::Ondemand) {
+                    self.spawn_into(slot, now);
+                }
             }
         }
         if now >= self.deadlines.next_tick {
@@ -639,13 +662,16 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         if !matches!(self.cfg.pm, PmMode::Ondemand) {
             return false;
         }
+        // Arm only when a fork could actually land: with every free slot in
+        // crash backoff, a readable level-triggered listener would otherwise
+        // busy-spin poll for the whole backoff window.
         ondemand_armed(
             self.pctl.is_normal(),
             self.table.running(),
             self.cfg.processes,
             self.idle_count(),
             self.starting_count(),
-        )
+        ) && self.find_spawn_slot().is_some()
     }
 
     fn ondemand_fork_one(&mut self, now: Instant) {
@@ -661,7 +687,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         loop {
             let mut fds: Vec<libc::pollfd> = Vec::with_capacity(1 + self.cfg.listeners.len());
             fds.push(pollfd(self.self_pipe.rd.as_raw_fd()));
-            if self.ondemand_armed {
+            if self.compute_armed() {
                 for &fd in &self.cfg.listeners {
                     fds.push(pollfd(fd));
                 }
@@ -702,7 +728,8 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             }
 
             // 3. Ondemand: a readable listener while armed forks exactly one.
-            if self.ondemand_armed && n > 0 && fds.len() > 1 {
+            //    Re-check arming — a control byte above may have changed state.
+            if n > 0 && fds.len() > 1 && self.compute_armed() {
                 let readable = fds[1..].iter().any(|p| (p.revents & libc::POLLIN) != 0);
                 if readable {
                     self.ondemand_fork_one(now);
@@ -712,8 +739,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             // 4. Due timers.
             self.fire_due_deadlines(now);
 
-            // 5. Recompute derived state for the next iteration.
-            self.ondemand_armed = self.compute_armed();
+            // 5. Recompute the earliest respawn for the next poll timeout.
             self.recompute_respawn_deadline();
         }
     }
@@ -746,44 +772,22 @@ mod tests {
     }
 
     #[test]
-    fn poll_timeout_rounds_up_sub_millisecond() {
+    fn poll_timeout_rounds_up_never_to_zero_before_deadline() {
         let base = Instant::now();
-        let d = Deadlines {
-            next_tick: base + Duration::from_micros(1500), // 1.5ms
+        let at = |next_tick| Deadlines {
+            next_tick,
             pctl: None,
             respawn: None,
         };
-        // Must round up to 2ms, never truncate to 1 and risk a busy 0-spin.
-        assert_eq!(d.poll_timeout_ms(base), 2);
-
-        let d = Deadlines {
-            next_tick: base + Duration::from_nanos(1), // 0.000001ms
-            pctl: None,
-            respawn: None,
-        };
-        assert_eq!(d.poll_timeout_ms(base), 1);
-    }
-
-    #[test]
-    fn poll_timeout_zero_when_deadline_passed() {
-        let base = Instant::now();
-        let d = Deadlines {
-            next_tick: base, // already due
-            pctl: None,
-            respawn: None,
-        };
-        assert_eq!(d.poll_timeout_ms(base + Duration::from_millis(5)), 0);
-    }
-
-    #[test]
-    fn poll_timeout_exact_millisecond_not_rounded() {
-        let base = Instant::now();
-        let d = Deadlines {
-            next_tick: base + Duration::from_millis(3),
-            pctl: None,
-            respawn: None,
-        };
-        assert_eq!(d.poll_timeout_ms(base), 3);
+        // Sub-millisecond remainders round up (a 0 timeout would busy-spin).
+        assert_eq!(
+            at(base + Duration::from_micros(1500)).poll_timeout_ms(base),
+            2
+        );
+        assert_eq!(at(base + Duration::from_nanos(1)).poll_timeout_ms(base), 1);
+        // Exact milliseconds are not rounded; a past deadline yields 0.
+        assert_eq!(at(base + Duration::from_millis(3)).poll_timeout_ms(base), 3);
+        assert_eq!(at(base).poll_timeout_ms(base + Duration::from_millis(5)), 0);
     }
 
     // ---- overlap reload gate ------------------------------------------
@@ -841,7 +845,6 @@ mod tests {
             slot,
             generation,
             spawned_at: at,
-            kill_sent: None,
             idle_kill: false,
         });
     }
@@ -863,19 +866,18 @@ mod tests {
             push_proc(&mut m, pid, i, 0, t0 + Duration::from_millis(i as u64));
             set_slot(&m, i, SLOT_IDLE);
         }
-        // Current-gen replacement in slot 3, not accepting yet.
+        // Current-gen replacement in slot 3, not serving yet.
         push_proc(&mut m, P_NEW, 3, 1, t0 + Duration::from_millis(10));
         set_slot(&m, 3, SLOT_STARTING);
         m.pctl.set_reload_await(Some(3));
         m.reload_await_until = Some(t0 + Duration::from_secs(30));
 
-        // Gate closed: replacement not IDLE ⇒ no old worker is QUIT.
+        // Gate closed: replacement still STARTING ⇒ no old worker is drained.
         m.reload_try_advance(t0);
         assert!(matches!(
             m.pctl.state,
             PctlState::Reloading(ReloadPhase::Await { slot: Some(3) })
         ));
-        assert!(m.table.procs.iter().all(|p| p.kill_sent.is_none()));
 
         // Replacement reaches IDLE ⇒ gate opens, oldest old worker drained.
         set_slot(&m, 3, SLOT_IDLE);
@@ -884,24 +886,27 @@ mod tests {
             m.pctl.state,
             PctlState::Reloading(ReloadPhase::Drain { draining, .. }) if draining == P_OLD0
         ));
-        assert_eq!(
-            m.table
-                .procs
-                .iter()
-                .find(|p| p.pid == P_OLD0)
-                .unwrap()
-                .kill_sent,
-            Some(libc::SIGQUIT)
-        );
-        // Exactly one worker signalled — the overlap keeps the rest accepting.
-        assert_eq!(
-            m.table
-                .procs
-                .iter()
-                .filter(|p| p.kill_sent.is_some())
-                .count(),
-            1
-        );
+    }
+
+    #[test]
+    fn reload_gate_opens_on_active_replacement() {
+        // Under load a replacement can be ACTIVE at every probe; the gate must
+        // accept that as serving rather than stall to the control timeout.
+        let mut m = test_master(6, PmMode::Static);
+        let t0 = Instant::now();
+        m.table.generation = 1;
+        push_proc(&mut m, P_OLD0, 0, 0, t0);
+        set_slot(&m, 0, SLOT_IDLE);
+        push_proc(&mut m, P_NEW, 3, 1, t0);
+        set_slot(&m, 3, SLOT_ACTIVE);
+        m.pctl.set_reload_await(Some(3));
+        m.reload_await_until = Some(t0 + Duration::from_secs(30));
+
+        m.reload_try_advance(t0);
+        assert!(matches!(
+            m.pctl.state,
+            PctlState::Reloading(ReloadPhase::Drain { draining, .. }) if draining == P_OLD0
+        ));
     }
 
     #[test]
@@ -960,14 +965,12 @@ mod tests {
             slot: 1,
             generation: 0,
             spawned_at: t0,
-            kill_sent: Some(libc::SIGQUIT),
             idle_kill: false,
         };
         m.pctl.set_reload_drain(P_OLD0);
         m.deadlines.pctl = Some(t0 + Duration::from_secs(30));
 
-        m.on_child_exit(drained, ExitVerdict::ExpectedKill, t0)
-            .unwrap();
+        m.on_child_exit(drained, ExitVerdict::Drain, t0).unwrap();
         assert!(m.pctl.is_normal());
         assert_eq!(m.deadlines.pctl, None);
         assert_eq!(m.reload_await_until, None);
@@ -999,7 +1002,7 @@ mod tests {
         // First old worker reaped ⇒ next oldest QUIT, still no spawn.
         let i = m.table.procs.iter().position(|p| p.pid == P_OLD0).unwrap();
         let w0 = m.table.procs.swap_remove(i);
-        m.on_child_exit(w0, ExitVerdict::ExpectedKill, t0).unwrap();
+        m.on_child_exit(w0, ExitVerdict::Drain, t0).unwrap();
         assert_eq!(m.table.procs.len(), 1);
         assert!(matches!(
             m.pctl.state,
@@ -1009,7 +1012,7 @@ mod tests {
         // Last old worker reaped ⇒ reload complete.
         let i = m.table.procs.iter().position(|p| p.pid == P_OLD1).unwrap();
         let w1 = m.table.procs.swap_remove(i);
-        m.on_child_exit(w1, ExitVerdict::ExpectedKill, t0).unwrap();
+        m.on_child_exit(w1, ExitVerdict::Drain, t0).unwrap();
         assert!(m.pctl.is_normal());
         assert_eq!(m.table.procs.len(), 0);
     }
@@ -1022,7 +1025,6 @@ mod tests {
             slot,
             generation,
             spawned_at: at,
-            kill_sent: None,
             idle_kill: false,
         }
     }
@@ -1048,5 +1050,38 @@ mod tests {
         let w = dead_worker(4243, 0, 0, t0);
         let r = m.on_child_exit(w, ExitVerdict::Unhealthy, t0);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn gen1_unhealthy_never_served_respawns_not_failboot() {
+        // A reload replacement dying unhealthy before the pool served anything
+        // must back off and respawn, never kill the healthy old generation.
+        let mut m = test_master(3, PmMode::Static);
+        let t0 = Instant::now();
+        m.table.generation = 1;
+        assert!(!m.ever_served);
+        let w = dead_worker(4244, 0, 1, t0);
+        let r = m.on_child_exit(w, ExitVerdict::Unhealthy, t0);
+        assert!(r.is_ok());
+        assert!(m.table.slots[0].respawn_at.is_some());
+    }
+
+    #[test]
+    fn ondemand_crash_backoff_suppresses_without_respawn() {
+        // A crash under ondemand keeps its backoff deadline as fork suppression:
+        // the slot is not spawnable (loop stays disarmed) until the deadline,
+        // whose expiry only lifts the suppression — it never forks.
+        let mut m = test_master(2, PmMode::Ondemand);
+        let t0 = Instant::now();
+        let w = dead_worker(4245, 0, 0, t0);
+        m.on_child_exit(w, ExitVerdict::Crash, t0 + Duration::from_secs(1))
+            .unwrap();
+        let due = m.table.slots[0]
+            .respawn_at
+            .expect("backoff kept as suppression");
+
+        m.fire_due_deadlines(due + Duration::from_millis(1));
+        assert_eq!(m.table.slots[0].respawn_at, None, "suppression lifted");
+        assert!(m.table.procs.is_empty(), "expiry must not fork");
     }
 }
