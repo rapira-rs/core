@@ -424,30 +424,8 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test]
-fn scoreboard_aggregates_across_workers() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    // Single scoreboard slot until the fork-based pool + shm scoreboard land;
-    // revived/rewritten with the E2E harness batch.
-    let r = Rapira::start(Mode::Worker(fixture("worker.php")))?;
-    if r.scoreboard().workers.len() < 3 {
-        // single worker slot, nothing to aggregate
-        r.shutdown();
-        return Ok(());
-    }
-    let h = r.handle()?;
-    for i in 0..9 {
-        let (s, _) = drain(h.handle_blocking(req(&format!("/?i={i}"), "worker.php"))?);
-        assert_eq!(s, 200, "request {i}");
-    }
-    drop(h);
-    let snap = r.scoreboard();
-    r.shutdown();
-
-    assert_eq!(snap.workers.len(), 3, "one WorkerStat per thread");
-    assert_eq!(snap.handled, 9, "aggregate handled == total requests");
-    Ok(())
-}
+// Multi-worker scoreboard aggregation returns as a multi-process test once the
+// fork-based pool and the shared-memory scoreboard land (E2E harness batch).
 
 #[test]
 fn scoreboard_counts_classic() -> anyhow::Result<()> {
