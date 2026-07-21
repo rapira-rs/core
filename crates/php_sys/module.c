@@ -482,6 +482,16 @@ void rapira_process_init(void) {
     zend_signal_startup();
 }
 
+/* Once per forked worker, before any PHP runs in the child. The Zend MM heap
+   was created by the master's MINIT; 8.5+ requires the child to re-key it
+   (debug builds assert getpid() == heap->pid in zend_mm_shutdown) and re-arm
+   the per-process execution timer, which fork does not inherit. */
+void rapira_child_init(void) {
+#if PHP_VERSION_ID >= 80500
+    php_child_init();
+#endif
+}
+
 /* Temp streams (POST request_body) are only NULLed by sapi_deactivate_module();
   nothing reclaims the resource in a resident request, so sweep dead ones
   before serving the next job. Safe here: the previous request is finished. */

@@ -62,6 +62,10 @@ pub fn worker_body(
     script: PathBuf,
     max_requests: u64,
 ) -> i32 {
+    // The engine heap and execution timer were set up by the master's MINIT;
+    // the child must re-key/re-arm them before any PHP runs.
+    // SAFETY: single-threaded here, before the PHP worker thread exists.
+    unsafe { php_sys::rapira_child_init() };
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks = WorkerHooks {
         max_requests: effective_quota(max_requests),

@@ -36,6 +36,7 @@ unsafe extern "C" {
     pub fn rapira_clear_last_error();
     pub fn rapira_request_teardown() -> c_int;
     pub fn rapira_process_init();
+    pub fn rapira_child_init();
     pub fn rapira_release_temporary_streams();
     pub fn rapira_request_activate() -> c_int;
     pub fn rapira_request_shutdown() -> c_int;

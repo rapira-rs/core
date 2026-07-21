@@ -478,12 +478,17 @@ mod tests {
 
     #[test]
     fn pm_timeout_cap_is_enforced() {
-        let file = load_str(
-            "[pool]\nentrypoint = \"a.php\"\n[pm]\nprocess_control_timeout_secs = 100000\n",
-        )
-        .unwrap();
-        let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
-        assert!(err.to_string().contains("too large"));
+        for key in [
+            "process_control_timeout_secs",
+            "process_idle_timeout_secs",
+            "request_terminate_timeout_secs",
+        ] {
+            let file =
+                load_str(&format!("[pool]\nentrypoint = \"a.php\"\n[pm]\n{key} = 100000\n"))
+                    .unwrap();
+            let err = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap_err();
+            assert!(err.to_string().contains("too large"), "{key}: {err}");
+        }
     }
 
     #[test]

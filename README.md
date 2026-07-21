@@ -3,7 +3,6 @@
 [![codecov](https://codecov.io/gh/rapira-rs/rapira/graph/badge.svg)](https://app.codecov.io/gh/rapira-rs/rapira)
 ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rapira-rs/rapira?utm_source=oss&utm_medium=github&utm_campaign=rapira-rs%2Frapira&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
-
 Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HTTP through the bundled `rapira_pingora` plugin (`crates/plugins/pingora`). This repo contains the SAPI core (`php_sys`), the extension host runtime, and the `rapira` binary. Linux and macOS only.
 
 ## Build requirements
@@ -13,7 +12,18 @@ Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HT
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, NTS, built with the embed SAPI (`--enable-embed=shared`, provides `libphp.so`; `libphp.dylib` on macOS). ZTS builds are rejected at compile time. `ci/php-configure-flags.txt` has the full configure line used for release builds.
 
-Distro embed packages: Debian/Ubuntu `libphpX.Y-embed` (deb.sury.org / ppa:ondrej for 8.4+), Fedora/RHEL `php-embedded`, Arch `php-embed`, Alpine `phpXX-embed`. Homebrew's `php` formula does not build the embed SAPI — on macOS build PHP from source with the flags file. Debian/Ubuntu ship only a versioned `libphpX.Y.so`; the linker needs a plain `libphp.so` name, which `make test` (and CI) provide via a symlink — a direct `cargo build` there needs the same symlink on the linker path.
+Install PHP with the embed SAPI from your package manager:
+
+```sh
+sudo apt install php8.4-dev libphp8.4-embed   # Debian/Ubuntu (deb.sury.org / ppa:ondrej)
+sudo dnf install php-devel php-embedded       # Fedora/RHEL
+sudo pacman -S php php-embed                  # Arch
+sudo apk add php84-dev php84-embed            # Alpine
+```
+
+macOS: Homebrew's `php` has no embed SAPI — build from source with the flags file.
+Debian/Ubuntu ship only a versioned `libphpX.Y.so`; `make test` and CI symlink it to the
+plain `libphp.so` the linker wants, a direct `cargo build` needs the same symlink.
 
 PHP is discovered through `php-config`. If it is not the one on `PATH`, point to it explicitly:
 
@@ -166,5 +176,4 @@ make test   # PHP from php-config on PATH; override with PHP_CONFIG=/path/to/php
 ```
 
 The embed library is located under the `php-config` prefix automatically (`lib`, `lib64`,
-`lib/phpXX`; plain or versioned `libphp*.so`, `libphp.dylib` on macOS); install your
-distro's PHP embed package if it is missing.
+`lib/phpXX`; plain or versioned `libphp*.so`, `libphp.dylib` on macOS).
