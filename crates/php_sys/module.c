@@ -533,10 +533,10 @@ int rapira_request_shutdown(void) {
     // to run the handler's close() and whatever it holds leaks (mod_user.c:29)
     PS(in_save_handler) = 0;
 #endif
-    zend_try { php_request_shutdown((void *)0); }
+    zend_try { php_request_shutdown(NULL); }
     zend_catch {
         bailed = BAILOUT;
-        zend_try { php_request_shutdown((void *)0); }
+        zend_try { php_request_shutdown(NULL); }
         zend_end_try();
     }
     zend_end_try();
