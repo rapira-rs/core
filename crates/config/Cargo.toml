@@ -1,0 +1,13 @@
+[package]
+name = "rapira_config"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"

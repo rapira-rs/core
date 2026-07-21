@@ -126,7 +126,8 @@ static const char *RELOAD_MODULES[] = {"filter", NULL};
 
 // Run the per-request startup (startup=true) or shutdown hook of each RELOAD_MODULE.
 static void rapira_modules_request(bool startup) {
-    zend_module_entry *module;
+    zend_module_entry *module = NULL;
+    #pragma unroll 2
     for (const char **name = RELOAD_MODULES; *name; name++) {
         module = zend_hash_str_find_ptr(&module_registry, *name, strlen(*name));
         if (!module) {
@@ -156,6 +157,7 @@ static void rapira_observer_end_to(zend_execute_data *base) {
         return;
     }
     zend_execute_data *orig = EG(current_execute_data);
+    #pragma unroll
     while (EG(current_observed_frame) && EG(current_observed_frame) != base) {
         EG(current_execute_data) = EG(current_observed_frame);
         zend_observer_fcall_end_prechecked(EG(current_observed_frame), NULL);
@@ -222,6 +224,7 @@ static void rapira_request_init(void) {
     /* main/main.c php_request_startup(): honor the output INIs per request */
     if (PG(output_handler) && PG(output_handler)[0]) {
         zval oh;
+        #pragma unroll
         ZVAL_STRING(&oh, PG(output_handler));
         php_output_start_user(&oh, 0, PHP_OUTPUT_HANDLER_STDFLAGS);
         zval_ptr_dtor(&oh);
@@ -238,13 +241,13 @@ static void rapira_request_init(void) {
 // Zend/zend_compile.h). sapi_activate would re-arm + rebuild them per request;
 // worker mode skips it, so do it here.
 static void rapira_activate_auto_globals(void) {
-    zend_auto_global *auto_global;
+    zend_auto_global *auto_global = NULL;
     zend_string *_env = ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV);
 
     // Re-arm every superglobal so a later access rebuilds it.
     ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
         auto_global->armed =
-            auto_global->jit || auto_global->auto_global_callback;
+            ((auto_global->jit || auto_global->auto_global_callback) != 0);
     }
     ZEND_HASH_FOREACH_END();
 
@@ -280,6 +283,7 @@ static void rapira_reset_session(void) {
     }
     if (!Z_ISUNDEF(PS(http_session_vars))) {
         zval_ptr_dtor(&PS(http_session_vars));
+        #pragma unroll
         ZVAL_UNDEF(&PS(http_session_vars));
     }
     if (PS(mod_data) || PS(mod_user_implemented)) {
@@ -314,6 +318,7 @@ static void rapira_reset_session(void) {}
 static void rapira_reset_super_global(void) {
     zval *files = &PG(http_globals)[TRACK_VARS_FILES];
     zval_ptr_dtor(files);
+    #pragma unroll
     ZVAL_UNDEF(files);
     // A top-level $_SESSION is an IS_INDIRECT symbol-table entry aliasing the main frame's CV slot;
     // plain zend_hash_str_del rips the bucket out without decref'ing through the indirection,
@@ -327,6 +332,7 @@ static void rapira_reset_super_global(void) {
 int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     int outcome = OK;
     zval retval;
+    #pragma unroll
     ZVAL_UNDEF(&retval);
     fci->size = sizeof *fci;
     fci->retval = &retval;
@@ -338,7 +344,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     // (zend_compile.c:461) - a 0->1 flip during this run proves a bailout.
     // Read BEFORE the handler/shutdown-fn/destructor calls: a swallowed bailout
     // has already set it by the time control reaches the tail.
-    bool clean_at_entry = !CG(unclean_shutdown);
+    bool clean_at_entry = (!CG(unclean_shutdown)) != 0;
 
     zend_execute_data *observed_base = EG(current_observed_frame);
     RAPIRA_GUARD(
@@ -359,6 +365,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
             } else {
                 // run the userland set_exception_handler; the zend_try guards
                 // against a bailout thrown inside that handler.
+                #pragma unroll
                 zend_try_exception_handler();
                 if (EG(exception)) {
                     outcome = THROW;
@@ -473,9 +480,13 @@ void rapira_clear_last_error(void) {
     // field.
     zend_try {
         zval_ptr_dtor(&EG(last_fatal_error_backtrace));
+        #pragma unroll
         ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
     }
-    zend_catch { ZVAL_UNDEF(&EG(last_fatal_error_backtrace)); }
+    zend_catch { 
+        #pragma unroll
+        ZVAL_UNDEF(&EG(last_fatal_error_backtrace)); 
+    }
     zend_end_try();
 #endif
 }
@@ -494,9 +505,10 @@ void rapira_process_init(void) {
 void rapira_release_temporary_streams(void) {
     zend_resource *val;
     int stream_type = php_file_le_stream();
+    #pragma unroll
     ZEND_HASH_FOREACH_PTR(&EG(regular_list), val) {
         if (val->type == stream_type) {
-            php_stream *stream = (php_stream *)val->ptr;
+            php_stream *stream = val->ptr;
             if (stream != NULL && stream->ops == &php_stream_temp_ops &&
                 stream->__exposed == 0 && GC_REFCOUNT(val) == 1) {
                 zend_list_delete(val);
@@ -521,10 +533,10 @@ int rapira_request_shutdown(void) {
     // to run the handler's close() and whatever it holds leaks (mod_user.c:29)
     PS(in_save_handler) = 0;
 #endif
-    zend_try { php_request_shutdown((void *)0); }
+    zend_try { php_request_shutdown(NULL); }
     zend_catch {
         bailed = BAILOUT;
-        zend_try { php_request_shutdown((void *)0); }
+        zend_try { php_request_shutdown(NULL); }
         zend_end_try();
     }
     zend_end_try();

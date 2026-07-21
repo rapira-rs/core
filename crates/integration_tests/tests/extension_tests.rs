@@ -32,7 +32,9 @@ struct Driver {
 }
 
 impl Extension for Driver {
-    fn init() -> Self {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
         Driver {
             id: format!("ext{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)),
         }
@@ -72,7 +74,7 @@ fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     // so the two join!ed execs can run in parallel.
     let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")), 2)?;
     let mut host = ExtensionHost::new();
-    host.register::<Driver>()?;
+    host.register::<Driver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("ext-driver-worker.php"))
         .join();
@@ -86,10 +88,10 @@ fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
 fn classic_mode_serves_exec() -> anyhow::Result<()> {
     let _guard = php_lock();
     // Classic mode runs the front controller per exec, with the URI in $_GET, so it
-    // echoes "ok:<from>" — exec works with a real front controller (why main takes --script).
+    // echoes "ok:<from>" — exec works with a real front controller (why serve takes a SCRIPT).
     let rapira = Rapira::start(Mode::Classic, 1)?;
     let mut host = ExtensionHost::new();
-    host.register::<Driver>()?;
+    host.register::<Driver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("ext-driver-classic.php"))
         .join();
@@ -111,7 +113,9 @@ fn classic_mode_serves_exec() -> anyhow::Result<()> {
 struct ErrorPathDriver;
 
 impl Extension for ErrorPathDriver {
-    fn init() -> Self {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
         ErrorPathDriver
     }
 
@@ -138,7 +142,7 @@ fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Worker(fixture("error-keeps-headers-worker.php")), 1)?;
     let mut host = ExtensionHost::new();
-    host.register::<ErrorPathDriver>()?;
+    host.register::<ErrorPathDriver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("error-keeps-headers-worker.php"))
         .join();
@@ -158,7 +162,9 @@ fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
 struct TruncatedDriver;
 
 impl Extension for TruncatedDriver {
-    fn init() -> Self {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
         TruncatedDriver
     }
 
@@ -188,7 +194,7 @@ fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Worker(fixture("output-then-throw-worker.php")), 1)?;
     let mut host = ExtensionHost::new();
-    host.register::<TruncatedDriver>()?;
+    host.register::<TruncatedDriver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("output-then-throw-worker.php"))
         .join();
@@ -207,7 +213,7 @@ fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic, 1)?;
     let mut host = ExtensionHost::new();
-    host.register::<ErrorPathDriver>()?;
+    host.register::<ErrorPathDriver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("error-keeps-headers.php"))
         .join();
@@ -228,7 +234,9 @@ struct Resident;
 static RESIDENT_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 impl Extension for Resident {
-    fn init() -> Self {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
         Resident
     }
 
@@ -252,7 +260,7 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
     RESIDENT_SHUTDOWN.store(false, Ordering::Relaxed);
     let rapira = Rapira::start(Mode::Classic, 1)?;
     let mut host = ExtensionHost::new();
-    host.register::<Resident>()?;
+    host.register::<Resident>(())?;
     let running = host.run(rapira.handle()?, fixture("ext-driver-classic.php"));
 
     // Dropping the guard fires the internal stop: `run` (which never returns) is
@@ -280,7 +288,7 @@ fn many_extensions_run() -> anyhow::Result<()> {
     let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")), 4)?;
     let mut host = ExtensionHost::new();
     for _ in 0..N {
-        host.register::<Driver>()?;
+        host.register::<Driver>(())?;
     }
     let outcomes = host
         .run(rapira.handle()?, fixture("ext-driver-worker.php"))
@@ -298,9 +306,12 @@ fn many_extensions_run() -> anyhow::Result<()> {
 struct Fixed;
 
 impl Extension for Fixed {
-    fn init() -> Self {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
         Fixed
     }
+
     fn name(&self) -> &str {
         "fixed"
     }
@@ -312,8 +323,8 @@ impl Extension for Fixed {
 #[test]
 fn duplicate_extension_name_is_rejected() {
     let mut host = ExtensionHost::new();
-    host.register::<Fixed>().unwrap();
-    let err = host.register::<Fixed>().unwrap_err();
+    host.register::<Fixed>(()).unwrap();
+    let err = host.register::<Fixed>(()).unwrap_err();
     assert!(
         err.to_string().contains("duplicate extension"),
         "expected a duplicate-name error, got: {err}"
@@ -321,11 +332,11 @@ fn duplicate_extension_name_is_rejected() {
 }
 
 /// Register one `E`, drive it to completion in classic mode, and return its outcomes.
-fn run_one<E: Extension>() -> anyhow::Result<Vec<Result<(), String>>> {
+fn run_one<E: Extension<Config = ()>>() -> anyhow::Result<Vec<Result<(), String>>> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic, 1)?;
     let mut host = ExtensionHost::new();
-    host.register::<E>()?;
+    host.register::<E>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("ext-driver-classic.php"))
         .join();
@@ -337,9 +348,12 @@ fn run_one<E: Extension>() -> anyhow::Result<Vec<Result<(), String>>> {
 struct Failing;
 
 impl Extension for Failing {
-    fn init() -> Self {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
         Failing
     }
+
     fn name(&self) -> &str {
         "failing"
     }
@@ -364,9 +378,12 @@ fn run_returning_err_is_reported() -> anyhow::Result<()> {
 struct Panicking;
 
 impl Extension for Panicking {
-    fn init() -> Self {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
         Panicking
     }
+
     fn name(&self) -> &str {
         "panicking"
     }
@@ -391,9 +408,12 @@ fn panic_in_run_is_reported() -> anyhow::Result<()> {
 struct SlowShutdown;
 
 impl Extension for SlowShutdown {
-    fn init() -> Self {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
         SlowShutdown
     }
+
     fn name(&self) -> &str {
         "slow-shutdown"
     }
@@ -412,7 +432,7 @@ fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic, 1)?;
     let mut host = ExtensionHost::new();
-    host.register::<SlowShutdown>()?;
+    host.register::<SlowShutdown>(())?;
     // A tiny grace so the timeout branch fires fast instead of after the 30s default.
     let running = host.run_with_grace(
         rapira.handle()?,

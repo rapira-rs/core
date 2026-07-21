@@ -34,10 +34,11 @@ impl ExtensionHost {
         Self::default()
     }
 
-    /// Construct `E` (via `init`) and stage it. A duplicate name is a hard error;
-    /// identity is captured for logging before `E` is moved into the launcher.
-    pub fn register<E: Extension>(&mut self) -> anyhow::Result<()> {
-        let ext = E::init();
+    /// Construct `E` (via `init`, injecting its config) and stage it. A duplicate name
+    /// is a hard error; identity is captured for logging before `E` is moved into the
+    /// launcher.
+    pub fn register<E: Extension>(&mut self, config: E::Config) -> anyhow::Result<()> {
+        let ext = E::init(config);
         let name = ext.name().to_string();
         if self.exts.iter().any(|e| e.name == name) {
             anyhow::bail!("duplicate extension {name:?}");
@@ -52,7 +53,7 @@ impl ExtensionHost {
         self.exts.is_empty()
     }
 
-    /// Spawn every extension on a shared runtime; one `Php` (the single `--script`) is
+    /// Spawn every extension on a shared runtime; one `Php` (the single entry script) is
     /// cloned to each. The returned guard drives them to completion / shutdown.
     pub fn run(self, rapira: RapiraHandle, script: PathBuf) -> Running {
         self.run_with_grace(rapira, script, Duration::from_secs(30))

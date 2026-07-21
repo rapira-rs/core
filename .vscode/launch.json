@@ -20,11 +20,9 @@
         }
       },
       "args": [
-        "--mode",
-        "worker",
+        "serve",
         "--threads",
         "1",
-        "--script",
         "${workspaceFolder}/crates/integration_tests/fixtures/worker.php"
       ],
       "cwd": "${workspaceFolder}",
@@ -56,9 +54,8 @@
         }
       },
       "args": [
-        "--mode",
-        "classic",
-        "--script",
+        "serve",
+        "--classic",
         "${workspaceFolder}/crates/integration_tests/fixtures/hello.php"
       ],
       "cwd": "${workspaceFolder}",
