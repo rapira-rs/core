@@ -24,19 +24,19 @@ jobs:
           phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning
 
-      # libphp8.5-embed: the PPA packages the embed SAPI separately from the CLI.
       - name: Build deps for bindgen/cc
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev libphp8.5-embed
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
 
-      # The PPA ships only a versioned libphpX.Y.so; `-lphp` needs the plain name,
-      # so symlink it into a private dir and link against that.
+      # setup-php's cached NTS tarball ships the embed SAPI as a versioned
+      # /usr/lib/libphpX.Y.so; `-lphp` needs the plain name, so pin the exact
+      # version and symlink it into a private dir to link against.
       - name: Expose the PHP embed lib
         run: |
-          LIBPHP=$(find "$(php-config --prefix)" /usr/lib -name 'libphp*.so' 2>/dev/null | head -1)
-          test -n "$LIBPHP" || { echo "no libphp.so found"; exit 1; }
+          LIBPHP=/usr/lib/libphp8.5.so
+          test -e "$LIBPHP" || { echo "missing $LIBPHP"; exit 1; }
           mkdir -p "$RUNNER_TEMP/phplib"
           ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
-          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
           echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable

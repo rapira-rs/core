@@ -11,7 +11,9 @@ Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HT
 - Rust 1.97.1+ (stable; `rust-toolchain.toml` pins the channel)
 - C compiler and `pkg-config` (the build compiles `wrapper.c`/`module.c` against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
-- PHP 8.4 or 8.5, NTS, built with the embed SAPI (`--enable-embed=shared`, provides `libphp.so`). ZTS builds are rejected at compile time. `ci/php-configure-flags.txt` has the full configure line used for release builds.
+- PHP 8.4 or 8.5, NTS, built with the embed SAPI (`--enable-embed=shared`, provides `libphp.so`; `libphp.dylib` on macOS). ZTS builds are rejected at compile time. `ci/php-configure-flags.txt` has the full configure line used for release builds.
+
+Distro embed packages: Debian/Ubuntu `libphpX.Y-embed` (deb.sury.org / ppa:ondrej for 8.4+), Fedora/RHEL `php-embedded`, Arch `php-embed`, Alpine `phpXX-embed`. Homebrew's `php` formula does not build the embed SAPI — on macOS build PHP from source with the flags file. Debian/Ubuntu ship only a versioned `libphpX.Y.so`; the linker needs a plain `libphp.so` name, which `make test` (and CI) provide via a symlink — a direct `cargo build` there needs the same symlink on the linker path.
 
 PHP is discovered through `php-config`. If it is not the one on `PATH`, point to it explicitly:
 
@@ -140,5 +142,6 @@ Levels: `error`, `warn`, `info`, `debug`, `trace`. `RUST_LOG_STYLE=never` disabl
 make test   # PHP from php-config on PATH; override with PHP_CONFIG=/path/to/php-config
 ```
 
-The embed library is located under the `php-config` prefix automatically (`lib`/`lib64`,
-plain or versioned `libphp*.so`); install your distro's PHP embed package if it is missing.
+The embed library is located under the `php-config` prefix automatically (`lib`, `lib64`,
+`lib/phpXX`; plain or versioned `libphp*.so`, `libphp.dylib` on macOS); install your
+distro's PHP embed package if it is missing.
