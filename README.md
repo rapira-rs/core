@@ -21,10 +21,11 @@ PHP is discovered through `php-config`. If it is not the one on `PATH`, point to
 PHP_CONFIG=$HOME/.local/php-nts/bin/php-config cargo build --release
 ```
 
-At runtime the binary links `libphp.so` dynamically; if it is not in a standard location, set `LD_LIBRARY_PATH`:
+At runtime the binary links `libphp.so` (`libphp.dylib` on macOS) dynamically; if it is not in a standard location, point the loader at it:
 
 ```sh
-LD_LIBRARY_PATH=$HOME/.local/php-nts/lib ./target/release/rapira serve worker.php
+LD_LIBRARY_PATH=$HOME/.local/php-nts/lib ./target/release/rapira serve worker.php     # Linux
+DYLD_LIBRARY_PATH=$HOME/.local/php-nts/lib ./target/release/rapira serve worker.php   # macOS
 ```
 
 ## Running
@@ -40,7 +41,7 @@ Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml`
 |---|---|---|
 | `--config <PATH>` | none | Load settings from a `rapira.toml`. |
 | `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected. |
-| `--threads <N>` | CPU count | Currently always 1; values > 1 log a warning. Multi-worker returns with the fork-based pool. |
+| `--threads <N>` | 1 | PHP worker threads; pinned to 1 (values > 1 log a warning). Multi-worker returns with the fork-based pool. |
 | `--classic` | off | Re-include the script for every request (front controller, like PHP-FPM) instead of keeping it resident. |
 | `SCRIPT` | required¹ | PHP entry script. Overrides `pool.entrypoint`. |
 

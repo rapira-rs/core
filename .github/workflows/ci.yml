@@ -75,10 +75,14 @@ jobs:
 
       - name: Build PHP embed from release tarball (macOS)
         if: runner.os == 'macOS' && steps.phpcache.outputs.cache-hit != 'true'
+        env:
+          # env, not inline ${{ }} in run: the php.net-derived value never hits the
+          # shell parser (same pattern as release.yml's override handling).
+          PHP_FULL: ${{ steps.php.outputs.full }}
         run: |
           set -euo pipefail
-          curl -fsSL "https://www.php.net/distributions/php-${{ steps.php.outputs.full }}.tar.gz" -o php.tar.gz
-          tar xf php.tar.gz && cd "php-${{ steps.php.outputs.full }}"
+          curl -fsSL "https://www.php.net/distributions/php-${PHP_FULL}.tar.gz" -o php.tar.gz
+          tar xf php.tar.gz && cd "php-${PHP_FULL}"
           export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
           # bare --with-iconv cannot locate libiconv on macOS; the DIR form appended
           # after the file flags wins (autoconf last-wins) — mirrors release.yml.

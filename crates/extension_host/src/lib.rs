@@ -2,6 +2,11 @@
 //! runs until every extension finishes or a terminate/interrupt signal arrives; on a
 //! signal it stops and drains them all — this is how rapira_core shuts down and exits.
 
+// Signal handling below calls POSIX APIs unconditionally; fail fast with a clear
+// message instead of scattered libc symbol errors.
+#[cfg(not(unix))]
+compile_error!("rapira supports Unix (Linux/macOS) only");
+
 use extension_api::{Extension, Php};
 use php_sys::RapiraHandle;
 use std::future::Future;
