@@ -14,9 +14,4 @@ php_sys = { workspace = true }
 extension_api = { workspace = true }
 # A shared multi-thread runtime drives all extension tasks.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
-
-[target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }

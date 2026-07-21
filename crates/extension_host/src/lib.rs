@@ -208,16 +208,14 @@ async fn drive<E: Extension>(
     }
 }
 
-/// Own process shutdown. On Unix this blocks SIGINT/SIGTERM in the calling thread so every
-/// thread spawned afterwards (the PHP workers, the extension runtime) inherits the block;
-/// rapira then reaps the signal with `sigwait` on a dedicated thread rather than a `sigaction`
+/// Own process shutdown. Blocks SIGINT/SIGTERM in the calling thread so every thread
+/// spawned afterwards (the PHP workers, the extension runtime) inherits the block; rapira
+/// then reaps the signal with `sigwait` on a dedicated thread rather than a `sigaction`
 /// handler, so it never replaces a disposition Zend re-installs per request. Call once, in
-/// `main`, before booting PHP. On Windows this is a no-op — the console control handler is
-/// installed later, in `serve`.
+/// `main`, before booting PHP.
 ///
 /// https://man7.org/linux/man-pages/man3/sigwait.3.html
 /// https://man7.org/linux/man-pages/man2/sigaction.2.html
-#[cfg(unix)]
 pub fn arm_shutdown_signals() {
     // SAFETY: operates on a stack-owned, freshly-initialized signal set.
     // https://man7.org/linux/man-pages/man3/pthread_sigmask.3.html
@@ -227,13 +225,7 @@ pub fn arm_shutdown_signals() {
     }
 }
 
-#[cfg(windows)]
-pub fn arm_shutdown_signals() {
-    // Windows has no POSIX signals; the console control handler is installed in `serve`.
-}
-
 /// The {SIGINT, SIGTERM} set rapira blocks and waits on.
-#[cfg(unix)]
 unsafe fn shutdown_sigset() -> libc::sigset_t {
     let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
     unsafe {
@@ -249,7 +241,6 @@ unsafe fn shutdown_sigset() -> libc::sigset_t {
 /// Linux, and BSD, unlike `sigtimedwait`, which Darwin lacks.
 ///
 /// https://man7.org/linux/man-pages/man2/sigwaitinfo.2.html
-#[cfg(unix)]
 fn wait_shutdown_signal() -> libc::c_int {
     // SAFETY: `set` and `sig` are stack values live for the whole call.
     unsafe {
@@ -263,7 +254,6 @@ fn wait_shutdown_signal() -> libc::c_int {
 /// Spawn the shutdown watcher for this platform. It flips `stop_tx` — the same watch channel
 /// every `drive` future selects on — so an external terminate/interrupt becomes a graceful
 /// drain. The returned guard tears the watcher down on drop.
-#[cfg(unix)]
 fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
     // Detached: block on the first signal to drain, on the second to force exit. If the
     // extensions finish on their own the thread stays parked in `sigwait` and is reclaimed
@@ -282,73 +272,7 @@ fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
     ShutdownWatcher
 }
 
-#[cfg(unix)]
 struct ShutdownWatcher; // detached thread — nothing to unwind
-
-#[cfg(windows)]
-fn spawn_shutdown_watcher(stop_tx: watch::Sender<bool>) -> ShutdownWatcher {
-    win_ctrl::install(stop_tx);
-    ShutdownWatcher
-}
-
-#[cfg(windows)]
-struct ShutdownWatcher;
-
-#[cfg(windows)]
-impl Drop for ShutdownWatcher {
-    fn drop(&mut self) {
-        win_ctrl::uninstall();
-    }
-}
-
-#[cfg(windows)]
-mod win_ctrl {
-    use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use tokio::sync::watch;
-    use windows_sys::Win32::Foundation::BOOL;
-    use windows_sys::Win32::System::Console::{
-        CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler,
-    };
-
-    static STOP_TX: OnceLock<watch::Sender<bool>> = OnceLock::new();
-    static ASKED: AtomicBool = AtomicBool::new(false);
-
-    // Runs on an OS-injected thread (not an async-signal context, so the watch/logger
-    // locks are fine) — it only flips the stop channel and returns, no PHP calls.
-    // Only Ctrl-C/Ctrl-Break are trappable for a graceful drain; CLOSE/LOGOFF/SHUTDOWN
-    // terminate on handler return, so they fall through to the default. A second event
-    // forces exit, like the Unix reaper's `exit(130)`.
-    // https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler
-    // https://learn.microsoft.com/en-us/windows/console/handlerroutine
-    unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
-        match ctrl_type {
-            CTRL_C_EVENT | CTRL_BREAK_EVENT => {
-                if ASKED.swap(true, Ordering::SeqCst) {
-                    std::process::exit(130);
-                }
-                log::info!(target: "rapira", "shutdown event received; draining extensions");
-                if let Some(tx) = STOP_TX.get() {
-                    let _ = tx.send(true);
-                }
-                1 // TRUE: handled — don't run the default (terminate) handler
-            }
-            _ => 0, // FALSE: not handled — let the default handler run
-        }
-    }
-
-    pub(super) fn install(stop_tx: watch::Sender<bool>) {
-        let _ = STOP_TX.set(stop_tx);
-        // SAFETY: `handler` is a valid routine for the process lifetime.
-        unsafe { SetConsoleCtrlHandler(Some(handler), 1) };
-    }
-
-    pub(super) fn uninstall() {
-        // SAFETY: removes the handler installed above.
-        unsafe { SetConsoleCtrlHandler(Some(handler), 0) };
-    }
-}
 
 /// Drives the extension tasks. `serve` also stops them on a signal; `join` only waits;
 /// `drop` is the safety net.
@@ -360,12 +284,12 @@ pub struct Running {
 
 impl Running {
     /// rapira_core's entry: run until every extension finishes on its own OR a
-    /// terminate/interrupt (Unix) or console control event (Windows) arrives; on shutdown,
-    /// ask every extension to stop and drain, then return their outcomes so `main` can exit.
+    /// terminate/interrupt arrives; on shutdown, ask every extension to stop and
+    /// drain, then return their outcomes so `main` can exit.
     pub fn serve(mut self) -> Vec<Outcome> {
         let _watcher = spawn_shutdown_watcher(self.stop_tx.clone());
         self.drain_all()
-        // `_watcher` drops here: Unix leaves the reaper detached, Windows removes the handler.
+        // `_watcher` drops here; the detached reaper thread is reclaimed at process exit.
     }
 
     /// Wait for every extension to finish on its own (no signal handling). For tests
@@ -421,7 +345,6 @@ mod tests {
 
     /// The reaper dequeues a blocked, pending signal via `sigwait` instead of letting it
     /// run the default (terminate) action — the basis of graceful shutdown.
-    #[cfg(unix)]
     #[test]
     fn sigwait_reaps_a_blocked_signal() {
         arm_shutdown_signals();

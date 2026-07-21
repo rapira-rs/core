@@ -16,18 +16,15 @@
         "--enable=warning,style,performance,portability",
         "--inline-suppr"
     ],
-    "c-cpp-flylint.cppcheck.defines": [
-        "ZTS=1"
-    ],
     "c-cpp-flylint.cppcheck.includePaths": [
-        "${HOME}/.local/php-zts/include/php",
-        "${HOME}/.local/php-zts/include/php/main",
-        "${HOME}/.local/php-zts/include/php/TSRM",
-        "${HOME}/.local/php-zts/include/php/Zend",
-        "${HOME}/.local/php-zts/include/php/ext",
-        "${HOME}/.local/php-zts/include/php/ext/date/lib"
+        "/usr/include/php",
+        "/usr/include/php/main",
+        "/usr/include/php/TSRM",
+        "/usr/include/php/Zend",
+        "/usr/include/php/ext",
+        "/usr/include/php/ext/date/lib"
     ],
     "c-cpp-flylint.cppcheck.suppressions": [
-        "*:*php-zts/include*"
+        "*:/usr/include/php*"
     ]
 }

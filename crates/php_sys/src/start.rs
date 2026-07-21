@@ -1,4 +1,4 @@
-use log::{error, info, trace};
+use log::{error, info, trace, warn};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -6,41 +6,11 @@ use std::thread::JoinHandle;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use types::Job;
 
-#[cfg(not(php_zts))]
-use log::warn;
-
-#[cfg(php_zts)]
-use std::os::raw::c_int;
-#[cfg(php_zts)]
-use std::ptr::null_mut;
-
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Scoreboard, ScoreboardSnapshot, sb_set};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 pub(crate) type JobRx = Arc<Mutex<Receiver<Job>>>;
-
-struct PhpThread;
-
-impl PhpThread {
-    pub(crate) fn new() -> Self {
-        #[cfg(php_zts)]
-        unsafe {
-            ts_resource_ex(0, null_mut());
-            rapira_tsrmls_cache_update();
-        }
-        Self
-    }
-}
-
-impl Drop for PhpThread {
-    fn drop(&mut self) {
-        #[cfg(php_zts)]
-        unsafe {
-            ts_free_thread();
-        }
-    }
-}
 
 pub struct Rapira {
     pub(crate) intake: Option<Sender<Job>>,
@@ -52,26 +22,17 @@ pub struct Rapira {
 impl Rapira {
     pub fn start(mode: Mode, req_threads: usize) -> anyhow::Result<Self> {
         info!(target: "rapira", "booting with mode: {mode:?}, threads: {req_threads}");
-        // NTS: 1 thread only
-        #[cfg(not(php_zts))]
+        // NTS runs a single PHP interpreter; the fork-based pool scales with processes.
         let num_threads: usize = {
             if req_threads > 1 {
-                warn!(target: "rapira", "ZTS not enabled, only 1 thread will be used");
+                warn!(target: "rapira", "rapira runs a single PHP worker thread; threads={req_threads} ignored");
             }
             1
         };
-
-        #[cfg(php_zts)]
-        let num_threads: usize = req_threads.max(1);
         let scoreboard: Arc<Scoreboard> = Scoreboard::new(num_threads);
 
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
-            #[cfg(php_zts)]
-            {
-                php_tsrm_startup_ex(num_threads as c_int);
-                rapira_tsrmls_cache_update();
-            }
             rapira_process_init();
             sapi_startup(&mut module);
             module
@@ -84,8 +45,6 @@ impl Rapira {
             unsafe {
                 php_module_shutdown();
                 sapi_shutdown();
-                #[cfg(php_zts)]
-                tsrm_shutdown();
             }
 
             return Err(anyhow::anyhow!("php_module_startup failed"));
@@ -149,8 +108,6 @@ impl Drop for Rapira {
         unsafe {
             php_module_shutdown();
             sapi_shutdown();
-            #[cfg(php_zts)]
-            tsrm_shutdown();
         }
     }
 }
@@ -158,8 +115,6 @@ impl Drop for Rapira {
 fn worker_main(id: usize, board: Arc<Scoreboard>, mode: Mode, rx: JobRx) {
     sb_set(id, board);
     loop {
-        let php: PhpThread = PhpThread::new();
-        #[cfg(not(php_zts))]
         unsafe {
             // https://github.com/php/php-src/pull/9104
             // NTS inits module and request on different threads, so the call stack must be
@@ -173,12 +128,11 @@ fn worker_main(id: usize, board: Arc<Scoreboard>, mode: Mode, rx: JobRx) {
             }
             Mode::Worker(script) => rapira_worker(script.clone(), rx.clone()),
         };
-        drop(php); // ZTS: ts_free_thread — globals dtor'd, TLS cache cleared
         if matches!(exit, WorkerExit::Closed) {
             break;
         }
-        // Restart: the next PhpThread::new() re-runs ts_resource on this same
-        // OS thread — fresh per-thread globals, ctors incl. zend_call_stack_init
+        // Restart: loop back on this same OS thread — rapira_init_call_stack runs
+        // again and the worker re-bootstraps with a fresh request cycle.
     }
 }
 

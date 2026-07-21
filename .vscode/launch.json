@@ -16,7 +16,7 @@
           "kind": "bin"
         },
         "env": {
-          "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config"
+          "PHP_CONFIG": "/usr/bin/php-config"
         }
       },
       "args": [
@@ -29,11 +29,7 @@
       "terminal": "integrated",
       "sourceLanguages": [
         "rust"
-      ],
-      "env": {
-        "LD_LIBRARY_PATH": "${env:HOME}/.local/php-zts/lib",
-        "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config"
-      }
+      ]
     },
     {
       "type": "lldb",
@@ -50,7 +46,7 @@
           "kind": "bin"
         },
         "env": {
-          "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config"
+          "PHP_CONFIG": "/usr/bin/php-config"
         }
       },
       "args": [
@@ -62,55 +58,25 @@
       "terminal": "integrated",
       "sourceLanguages": [
         "rust"
-      ],
-      "env": {
-        "LD_LIBRARY_PATH": "${env:HOME}/.local/php-zts/lib",
-        "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config"
-      }
+      ]
     },
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug tests -- ZTS",
+      "name": "Debug tests",
       "cargo": {
         "args": [
           "test",
           "--no-run",
           "-p",
-          "integration-tests"
-        ],
-        "env": {
-          "PHP_CONFIG": "${env:HOME}/.local/php-zts/bin/php-config",
-          "CARGO_TARGET_DIR": "${workspaceFolder}/target/zts"
-        }
-      },
-      "args": [],
-      "env": {
-        "LD_LIBRARY_PATH": "${env:HOME}/.local/php-zts/lib"
-      },
-      "cwd": "${workspaceFolder}"
-    },
-    {
-      "type": "lldb",
-      "request": "launch",
-      "name": "Debug tests -- NTS",
-      "cargo": {
-        "args": [
-          "test",
-          "--no-run",
-          "-p",
-          "integration-tests"
+          "integration_tests"
         ],
         "env": {
           "PHP_CONFIG": "/usr/bin/php-config",
-          "CARGO_TARGET_DIR": "${workspaceFolder}/target/nts",
-          "RUSTFLAGS": "-L native=/usr/lib64"
+          "CARGO_TARGET_DIR": "${workspaceFolder}/target/nts"
         }
       },
       "args": [],
-      "env": {
-        "LD_LIBRARY_PATH": "/usr/lib64"
-      },
       "cwd": "${workspaceFolder}"
     }
   ]

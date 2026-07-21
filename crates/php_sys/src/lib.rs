@@ -31,7 +31,6 @@ unsafe extern "C" {
     pub fn rapira_pg() -> *mut php_core_globals;
     pub fn rapira_finish_output() -> c_int;
     pub fn rapira_init_call_stack();
-    pub fn rapira_tsrmls_cache_update();
     pub fn rapira_clear_last_error();
     pub fn rapira_request_teardown() -> c_int;
     pub fn rapira_process_init();

@@ -142,7 +142,7 @@ struct PoolSection {
 }
 
 /// Default worker count: one per logical CPU. Falls back to 1 if the platform can't
-/// report it. (On NTS this is clamped back to 1 inside `Rapira::start`.)
+/// report it. (Clamped to 1 inside `Rapira::start` until the fork-based pool lands.)
 fn default_threads() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())

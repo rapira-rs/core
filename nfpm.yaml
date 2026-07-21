@@ -16,7 +16,7 @@ homepage: "https://github.com/rustatian/rapira-rs"
 license: "MIT"
 description: |
   Rapira — PHP application server.
-  Bundles a thread-safe (ZTS) PHP ${PHP_MINOR} embed runtime (libphp.so,
+  Bundles an NTS PHP ${PHP_MINOR} embed runtime (libphp.so,
   common web extension set) under /usr/lib/rapira.
 # rapira-php8.4 and rapira-php8.5 install identical paths; the
 # provides/conflicts pair on the virtual "rapira" makes them mutually exclusive.

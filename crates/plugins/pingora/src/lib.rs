@@ -31,7 +31,6 @@ const DRAIN_GRACE: Duration = Duration::from_secs(25);
 #[derive(Clone, Debug)]
 pub enum Listen {
     Tcp(std::net::SocketAddr),
-    #[cfg(unix)]
     Unix(std::path::PathBuf),
 }
 
@@ -162,7 +161,6 @@ async fn serve(php: Php, config: Config, shutdown: watch::Receiver<bool>) -> Res
             service.add_tcp(&addr);
             log::info!("[rapira-pingora] listening on http://{addr}");
         }
-        #[cfg(unix)]
         Listen::Unix(path) => {
             // Reject rather than bind a lossy-converted (corrupted) path.
             let path = path
@@ -174,16 +172,8 @@ async fn serve(php: Php, config: Config, shutdown: watch::Receiver<bool>) -> Res
             log::info!("[rapira-pingora] listening on unix:{path}");
         }
     }
-    // (fds, shutdown, listeners_per_fd); the leading fds arg is Unix-only. Runs on this
-    // runtime via Handle::current().
-    service
-        .start_service(
-            #[cfg(unix)]
-            None,
-            shutdown,
-            1,
-        )
-        .await;
+    // (fds, shutdown, listeners_per_fd). Runs on this runtime via Handle::current().
+    service.start_service(None, shutdown, 1).await;
     // start_service only joined the accept loops; connection tasks are detached and die
     // with the runtime. Wait for the requests still in flight so their responses go out.
     let deadline = tokio::time::Instant::now() + DRAIN_GRACE;
