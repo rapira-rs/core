@@ -1,0 +1,37 @@
+name: CodSpeed
+
+on:
+    push: { branches: [main] }
+    pull_request:
+    # `workflow_dispatch` lets CodSpeed trigger a backtest to seed initial data.
+    workflow_dispatch:
+
+permissions:
+    contents: read
+    id-token: write # OpenID Connect authentication with CodSpeed
+
+jobs:
+    benchmarks:
+        name: Run benchmarks
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with: { persist-credentials: false }
+
+            - name: Setup rust toolchain, cache and cargo-codspeed binary
+              uses: moonrepo/setup-rust@v0
+              with:
+                  channel: stable
+                  cache-target: release
+                  bins: cargo-codspeed
+
+            # Only rapira_config is benchmarked: the rest of the workspace embeds
+            # PHP (php_sys/bindgen) and cannot build without the PHP toolchain.
+            - name: Build the benchmark target(s)
+              run: cargo codspeed build -p rapira_config
+
+            - name: Run the benchmarks
+              uses: CodSpeedHQ/action@v4
+              with:
+                  mode: simulation
+                  run: cargo codspeed run -p rapira_config
