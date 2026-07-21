@@ -1,7 +1,5 @@
 # rapira_pingora
 
-[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/rustatian/http?utm_source=badge)
-
 Rapira HTTP front — a [Pingora](https://github.com/cloudflare/pingora) server that
 terminates HTTP and answers every request from PHP through the `extension_api` `Php`
 bridge. It never proxies upstream.
@@ -29,23 +27,25 @@ bridge. It never proxies upstream.
 
 ## Configuration
 
-Config is currently hardcoded to `Config::default()` — `Extension::init()` takes no
-arguments, so there is no channel to inject config yet (planned).
+`Config` is injected at construction via `Extension::init(config)`: `rapira serve`
+resolves CLI flags, an optional `rapira.toml`, and defaults into one validated
+settings struct, builds this crate's `Config` from its `[http]` section, and
+registers the extension with it (`host.register::<HttpServer>(config)`).
 
 | Field | Default | Purpose |
 | --- | --- | --- |
-| `listen` | `0.0.0.0:8080` | TCP bind address |
+| `listen` | `127.0.0.1:8000` | Bind address: TCP (`host:port`) or unix domain socket (`unix:<path>`) |
 | `server_name` | `localhost` | `SERVER_NAME` reported to PHP |
-| `server_port` | `8080` | `SERVER_PORT` reported to PHP |
+| `server_port` | the listen port | `SERVER_PORT` reported to PHP |
 | `max_body_size` | 8 MiB | Max request body; larger is rejected with `413` |
 
 ## Build
 
 ```sh
-cargo build --release
-cargo clippy --all-targets
+cargo build -p rapira_pingora
+cargo clippy -p rapira_pingora --all-targets
 ```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see the repository root [LICENSE](../../../LICENSE).

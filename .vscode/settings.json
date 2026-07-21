@@ -1,6 +1,5 @@
 {
     "C_Cpp.codeAnalysis.clangTidy.enabled": true,
-    "C_Cpp.codeAnalysis.clangTidy.path": "/usr/bin/clang-tidy",
     "C_Cpp.codeAnalysis.runAutomatically": true,
     "c-cpp-flylint.language": "c",
     "c-cpp-flylint.run": "onSave",
@@ -10,12 +9,10 @@
     "c-cpp-flylint.flawfinder.enable": false,
     "c-cpp-flylint.pclintplus.enable": false,
     "c-cpp-flylint.cppcheck.enable": true,
-    "c-cpp-flylint.cppcheck.executable": "/usr/bin/cppcheck",
     "c-cpp-flylint.cppcheck.standard": [
         "c17"
     ],
     "c-cpp-flylint.cppcheck.extraArgs": [
-        "--std=c23",
         "--enable=warning,style,performance,portability",
         "--inline-suppr"
     ],
@@ -23,12 +20,12 @@
         "ZTS=1"
     ],
     "c-cpp-flylint.cppcheck.includePaths": [
-        "/home/valery/.local/php-zts/include/php",
-        "/home/valery/.local/php-zts/include/php/main",
-        "/home/valery/.local/php-zts/include/php/TSRM",
-        "/home/valery/.local/php-zts/include/php/Zend",
-        "/home/valery/.local/php-zts/include/php/ext",
-        "/home/valery/.local/php-zts/include/php/ext/date/lib"
+        "${HOME}/.local/php-zts/include/php",
+        "${HOME}/.local/php-zts/include/php/main",
+        "${HOME}/.local/php-zts/include/php/TSRM",
+        "${HOME}/.local/php-zts/include/php/Zend",
+        "${HOME}/.local/php-zts/include/php/ext",
+        "${HOME}/.local/php-zts/include/php/ext/date/lib"
     ],
     "c-cpp-flylint.cppcheck.suppressions": [
         "*:*php-zts/include*"
