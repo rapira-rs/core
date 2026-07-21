@@ -116,6 +116,9 @@ pub struct PmSettings {
     pub process_idle_timeout: std::time::Duration,
     /// Graceful-stop budget before the master escalates QUIT → TERM → KILL.
     pub process_control_timeout: std::time::Duration,
+    /// Wall-clock bound on a single request; a worker whose request runs longer
+    /// is killed and replaced. Zero = disabled.
+    pub request_terminate_timeout: std::time::Duration,
     /// Master pidfile; relative paths resolve against the config file's directory.
     pub pidfile: Option<PathBuf>,
 }
@@ -186,6 +189,7 @@ struct PmSection {
     max_requests: Option<u64>,
     process_idle_timeout_secs: Option<u64>,
     process_control_timeout_secs: Option<u64>,
+    request_terminate_timeout_secs: Option<u64>,
     pidfile: Option<String>,
 }
 
@@ -306,11 +310,16 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
     // Cap the pm timeouts so the master's deadline arithmetic can't overflow.
     let process_idle_timeout_secs = file.pm.process_idle_timeout_secs.unwrap_or(10);
     let process_control_timeout_secs = file.pm.process_control_timeout_secs.unwrap_or(30);
+    let request_terminate_timeout_secs = file.pm.request_terminate_timeout_secs.unwrap_or(0);
     for (key, secs) in [
         ("pm.process_idle_timeout_secs", process_idle_timeout_secs),
         (
             "pm.process_control_timeout_secs",
             process_control_timeout_secs,
+        ),
+        (
+            "pm.request_terminate_timeout_secs",
+            request_terminate_timeout_secs,
         ),
     ] {
         if secs > 86_400 {
@@ -348,6 +357,9 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
             max_requests: file.pm.max_requests.unwrap_or(0),
             process_idle_timeout: std::time::Duration::from_secs(process_idle_timeout_secs),
             process_control_timeout: std::time::Duration::from_secs(process_control_timeout_secs),
+            request_terminate_timeout: std::time::Duration::from_secs(
+                request_terminate_timeout_secs,
+            ),
             pidfile,
         },
     })

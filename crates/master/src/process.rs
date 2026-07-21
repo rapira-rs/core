@@ -22,6 +22,18 @@ pub(crate) const QUICK_CRASH: Duration = Duration::from_secs(10);
 /// First backoff delay; doubles per consecutive quick crash.
 pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
 
+/// A master-initiated kill in progress on a worker. Drives the escalation step
+/// (first pass signals, a later pass KILLs) and the exit verdict. The two kinds
+/// target disjoint states — idle trim hits IDLE slots, the request-timeout
+/// watchdog hits ACTIVE ones — so one field holds whichever is under way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KillIntent {
+    /// pm idle trim: QUIT sent.
+    Idle,
+    /// `request_terminate_timeout` breach: TERM sent.
+    Timeout,
+}
+
 /// A live worker tracked by the master.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkerProc {
@@ -29,8 +41,7 @@ pub(crate) struct WorkerProc {
     pub slot: usize,
     pub generation: u32,
     pub spawned_at: Instant,
-    /// pm idle-kill in progress: QUIT sent; a later pass may KILL.
-    pub idle_kill: bool,
+    pub kill_intent: Option<KillIntent>,
 }
 
 /// Per-slot respawn bookkeeping (backoff streak + pending deadline).
@@ -82,16 +93,20 @@ pub(crate) enum ExitVerdict {
     Unhealthy,
     /// pm idle-kill (QUIT, or KILL after QUIT): trimmed, not respawned.
     IdleKill,
+    /// `request_terminate_timeout` kill: replaced immediately, no backoff.
+    TimeoutKill,
     /// Unknown exit code or unexpected signal: crash (respawn with backoff).
     Crash,
 }
 
 /// Classify a raw `wait` status into a verdict. Pure: no syscalls, no state.
-/// `idle_kill` is set once the master began an idle-kill on the worker.
-pub(crate) fn classify(status: c_int, idle_kill: bool) -> ExitVerdict {
+/// `intent` is the master-initiated kill in progress on the worker, if any.
+pub(crate) fn classify(status: c_int, intent: Option<KillIntent>) -> ExitVerdict {
     if libc::WIFEXITED(status) {
         match libc::WEXITSTATUS(status) {
-            WORKER_EXIT_DRAINED if idle_kill => ExitVerdict::IdleKill,
+            WORKER_EXIT_DRAINED if intent == Some(KillIntent::Idle) => ExitVerdict::IdleKill,
+            // A Timeout race (worker finished just before TERM landed) exits 0:
+            // the request completed, so it drains and respawns like any drain.
             WORKER_EXIT_DRAINED => ExitVerdict::Drain,
             WORKER_EXIT_RECYCLE => ExitVerdict::Recycle,
             WORKER_EXIT_UNHEALTHY => ExitVerdict::Unhealthy,
@@ -99,10 +114,14 @@ pub(crate) fn classify(status: c_int, idle_kill: bool) -> ExitVerdict {
         }
     } else if libc::WIFSIGNALED(status) {
         let sig = libc::WTERMSIG(status);
-        if idle_kill && (sig == libc::SIGQUIT || sig == libc::SIGKILL) {
-            ExitVerdict::IdleKill
-        } else {
-            ExitVerdict::Crash
+        match intent {
+            Some(KillIntent::Idle) if sig == libc::SIGQUIT || sig == libc::SIGKILL => {
+                ExitVerdict::IdleKill
+            }
+            Some(KillIntent::Timeout) if sig == libc::SIGTERM || sig == libc::SIGKILL => {
+                ExitVerdict::TimeoutKill
+            }
+            _ => ExitVerdict::Crash,
         }
     } else {
         // Stopped/continued: never requested (no WUNTRACED) → treat as crash.
@@ -152,7 +171,7 @@ impl ProcTable {
             }
             match self.remove(pid) {
                 Some(w) => {
-                    let verdict = classify(status, w.idle_kill);
+                    let verdict = classify(status, w.kill_intent);
                     buried.push((w, verdict));
                 }
                 None => log::warn!(target: "master", "reaped unknown child {pid}"),
@@ -298,40 +317,76 @@ mod tests {
 
     #[test]
     fn classify_exit_codes() {
-        assert_eq!(classify(exited(0), false), ExitVerdict::Drain);
-        assert_eq!(classify(exited(88), false), ExitVerdict::Recycle);
-        assert_eq!(classify(exited(89), false), ExitVerdict::Unhealthy);
-        assert_eq!(classify(exited(42), false), ExitVerdict::Crash);
-        assert_eq!(classify(exited(1), false), ExitVerdict::Crash);
+        assert_eq!(classify(exited(0), None), ExitVerdict::Drain);
+        assert_eq!(classify(exited(88), None), ExitVerdict::Recycle);
+        assert_eq!(classify(exited(89), None), ExitVerdict::Unhealthy);
+        assert_eq!(classify(exited(42), None), ExitVerdict::Crash);
+        assert_eq!(classify(exited(1), None), ExitVerdict::Crash);
     }
 
     #[test]
-    fn classify_exit_zero_under_idle_kill_is_idle_kill() {
+    fn classify_exit_zero_under_kill_intent() {
         // A worker QUIT-drained by an idle-kill exits 0 → IdleKill, not respawn.
-        assert_eq!(classify(exited(0), true), ExitVerdict::IdleKill);
-        // Recycle/unhealthy codes ignore idle_kill (explicit protocol codes).
-        assert_eq!(classify(exited(88), true), ExitVerdict::Recycle);
-        assert_eq!(classify(exited(89), true), ExitVerdict::Unhealthy);
+        assert_eq!(
+            classify(exited(0), Some(KillIntent::Idle)),
+            ExitVerdict::IdleKill
+        );
+        // Timeout race: the request finished before TERM landed → plain drain.
+        assert_eq!(
+            classify(exited(0), Some(KillIntent::Timeout)),
+            ExitVerdict::Drain
+        );
+        // Recycle/unhealthy codes ignore intent (explicit protocol codes).
+        assert_eq!(
+            classify(exited(88), Some(KillIntent::Idle)),
+            ExitVerdict::Recycle
+        );
+        assert_eq!(
+            classify(exited(89), Some(KillIntent::Idle)),
+            ExitVerdict::Unhealthy
+        );
     }
 
     #[test]
     fn classify_idle_kill_signals() {
         // Idle-kill QUIT, and its KILL escalation, are expected deaths.
         assert_eq!(
-            classify(signaled(libc::SIGQUIT), true),
+            classify(signaled(libc::SIGQUIT), Some(KillIntent::Idle)),
             ExitVerdict::IdleKill
         );
         assert_eq!(
-            classify(signaled(libc::SIGKILL), true),
+            classify(signaled(libc::SIGKILL), Some(KillIntent::Idle)),
             ExitVerdict::IdleKill
         );
     }
 
     #[test]
+    fn classify_timeout_kill_signals() {
+        // Watchdog TERM, and its KILL escalation, map to TimeoutKill.
+        assert_eq!(
+            classify(signaled(libc::SIGTERM), Some(KillIntent::Timeout)),
+            ExitVerdict::TimeoutKill
+        );
+        assert_eq!(
+            classify(signaled(libc::SIGKILL), Some(KillIntent::Timeout)),
+            ExitVerdict::TimeoutKill
+        );
+        // A QUIT death does not match a Timeout intent.
+        assert_eq!(
+            classify(signaled(libc::SIGQUIT), Some(KillIntent::Timeout)),
+            ExitVerdict::Crash
+        );
+    }
+
+    #[test]
     fn classify_unexpected_signals_are_crashes() {
-        assert_eq!(classify(signaled(libc::SIGSEGV), false), ExitVerdict::Crash);
-        assert_eq!(classify(signaled(libc::SIGKILL), false), ExitVerdict::Crash);
-        assert_eq!(classify(signaled(libc::SIGSEGV), true), ExitVerdict::Crash);
+        assert_eq!(classify(signaled(libc::SIGSEGV), None), ExitVerdict::Crash);
+        assert_eq!(classify(signaled(libc::SIGKILL), None), ExitVerdict::Crash);
+        assert_eq!(classify(signaled(libc::SIGTERM), None), ExitVerdict::Crash);
+        assert_eq!(
+            classify(signaled(libc::SIGSEGV), Some(KillIntent::Idle)),
+            ExitVerdict::Crash
+        );
     }
 
     #[test]

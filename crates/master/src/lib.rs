@@ -61,6 +61,9 @@ pub struct MasterConfig {
     pub process_idle_timeout: Duration,
     /// Stop/reload QUIT→TERM escalation grace.
     pub process_control_timeout: Duration,
+    /// Wall-clock bound on a single request: an ACTIVE worker past it is
+    /// TERM-killed (then KILLed) and replaced immediately. Zero = disabled.
+    pub request_terminate_timeout: Duration,
     pub pidfile: Option<PathBuf>,
     /// Bound listener fds; watched by the poll loop only under `Ondemand` (the
     /// master never accepts on them).

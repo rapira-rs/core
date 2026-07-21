@@ -13,7 +13,7 @@ use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, SLOT_STARTING, Scoreb
 
 use crate::lifeline::Lifeline;
 use crate::pctl::{KillTarget, Pctl, PctlState, ReloadPhase, SignalAction};
-use crate::process::{ExitVerdict, ProcTable, WorkerProc, spawn_worker};
+use crate::process::{ExitVerdict, KillIntent, ProcTable, WorkerProc, spawn_worker};
 use crate::scaling::{DynAction, DynInput, dynamic_start_count, dynamic_tick, ondemand_armed};
 use crate::signals::{SIG_CHLD, SelfPipe, errno_get};
 use crate::{MasterConfig, PmMode, StopReason, WorkerEnv};
@@ -239,7 +239,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 slot,
                 generation,
                 spawned_at: now,
-                idle_kill: false,
+                kill_intent: None,
             }),
             Err(e) => {
                 log::error!(target: "master", "spawn failed for slot {slot}: {e}");
@@ -443,7 +443,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             ExitVerdict::IdleKill => {
                 // Trimmed: do not respawn.
             }
-            ExitVerdict::Recycle | ExitVerdict::Drain => {
+            ExitVerdict::Recycle | ExitVerdict::Drain | ExitVerdict::TimeoutKill => {
                 self.table.slots[slot].schedule_immediate(now);
                 self.apply_pm_respawn_gate(slot);
             }
@@ -477,15 +477,53 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    // ---- idle-kill (dynamic trim / ondemand timeout) -------------------
+    // ---- master-initiated kills (idle trim / request timeout) ----------
 
     fn idle_kill_pid(&mut self, pid: libc::pid_t) {
         if let Some(p) = self.table.procs.iter_mut().find(|p| p.pid == pid) {
-            if p.idle_kill {
+            if p.kill_intent == Some(KillIntent::Idle) {
                 kill(pid, libc::SIGKILL);
             } else {
                 kill(pid, libc::SIGQUIT);
-                p.idle_kill = true;
+                p.kill_intent = Some(KillIntent::Idle);
+            }
+        }
+    }
+
+    /// Wall-clock bound on a single request, run from the Normal-state
+    /// maintenance tick: an ACTIVE worker whose current request is older than
+    /// `request_terminate_timeout` gets TERM (SIG_DFL in the worker — dies
+    /// fast, its queued sockets close, clients retry against healthy workers).
+    /// Still ACTIVE a tick later means TERM could not land (uninterruptible
+    /// sleep): escalate to KILL.
+    fn watchdog_tick(&mut self) {
+        let limit = self.cfg.request_terminate_timeout;
+        if limit.is_zero() {
+            return;
+        }
+        let now_ms = now_millis();
+        for p in self.table.procs.iter_mut() {
+            let Some(s) = self.scoreboard.slot(p.slot) else {
+                continue;
+            };
+            if s.state.load(Relaxed) != SLOT_ACTIVE {
+                continue;
+            }
+            let age_ms = u128::from(now_ms.saturating_sub(s.last_activity_ms.load(Relaxed)));
+            if age_ms < limit.as_millis() {
+                continue;
+            }
+            if p.kill_intent == Some(KillIntent::Timeout) {
+                kill(p.pid, libc::SIGKILL);
+            } else {
+                log::warn!(
+                    target: "master",
+                    "worker {} exceeded request_terminate_timeout_secs ({}s); terminating",
+                    p.pid,
+                    limit.as_secs()
+                );
+                kill(p.pid, libc::SIGTERM);
+                p.kill_intent = Some(KillIntent::Timeout);
             }
         }
     }
@@ -496,6 +534,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         // Latch served history while workers are live and counters populated,
         // before any exit can clear a slot.
         self.latch_served();
+        self.watchdog_tick();
         match self.cfg.pm {
             PmMode::Static => self.static_refill(now),
             PmMode::Dynamic {
@@ -824,6 +863,7 @@ mod tests {
             pm,
             process_idle_timeout: Duration::from_secs(10),
             process_control_timeout: Duration::from_secs(30),
+            request_terminate_timeout: Duration::ZERO,
             pidfile: None,
             listeners: Vec::new(),
         };
@@ -845,7 +885,7 @@ mod tests {
             slot,
             generation,
             spawned_at: at,
-            idle_kill: false,
+            kill_intent: None,
         });
     }
 
@@ -965,7 +1005,7 @@ mod tests {
             slot: 1,
             generation: 0,
             spawned_at: t0,
-            idle_kill: false,
+            kill_intent: None,
         };
         m.pctl.set_reload_drain(P_OLD0);
         m.deadlines.pctl = Some(t0 + Duration::from_secs(30));
@@ -1025,7 +1065,7 @@ mod tests {
             slot,
             generation,
             spawned_at: at,
-            idle_kill: false,
+            kill_intent: None,
         }
     }
 
@@ -1064,6 +1104,69 @@ mod tests {
         let r = m.on_child_exit(w, ExitVerdict::Unhealthy, t0);
         assert!(r.is_ok());
         assert!(m.table.slots[0].respawn_at.is_some());
+    }
+
+    // ---- request-terminate watchdog ------------------------------------
+
+    #[test]
+    fn watchdog_terms_overdue_active_worker_then_escalates() {
+        let mut m = test_master(3, PmMode::Static);
+        m.cfg.request_terminate_timeout = Duration::from_secs(2);
+        let t0 = Instant::now();
+        push_proc(&mut m, P_OLD0, 0, 0, t0);
+        set_slot(&m, 0, SLOT_ACTIVE);
+        // Request started well past the limit.
+        m.scoreboard.slots()[0]
+            .last_activity_ms
+            .store(now_millis().saturating_sub(5_000), Relaxed);
+
+        m.watchdog_tick();
+        assert_eq!(
+            m.table.procs[0].kill_intent,
+            Some(KillIntent::Timeout),
+            "first pass must TERM and mark the intent"
+        );
+        // Still ACTIVE a tick later: the KILL escalation path must not clear
+        // or change the intent (the reap consumes it).
+        m.watchdog_tick();
+        assert_eq!(m.table.procs[0].kill_intent, Some(KillIntent::Timeout));
+    }
+
+    #[test]
+    fn watchdog_spares_fresh_active_and_idle_workers() {
+        let mut m = test_master(3, PmMode::Static);
+        m.cfg.request_terminate_timeout = Duration::from_secs(2);
+        let t0 = Instant::now();
+        // ACTIVE but fresh: within the limit.
+        push_proc(&mut m, P_OLD0, 0, 0, t0);
+        set_slot(&m, 0, SLOT_ACTIVE);
+        m.scoreboard.slots()[0]
+            .last_activity_ms
+            .store(now_millis(), Relaxed);
+        // IDLE and stale: not serving a request, never a watchdog target.
+        push_proc(&mut m, P_OLD1, 1, 0, t0);
+        set_slot(&m, 1, SLOT_IDLE);
+        m.scoreboard.slots()[1]
+            .last_activity_ms
+            .store(now_millis().saturating_sub(60_000), Relaxed);
+
+        m.watchdog_tick();
+        assert!(m.table.procs.iter().all(|p| p.kill_intent.is_none()));
+    }
+
+    #[test]
+    fn timeout_kill_respawns_immediately_without_failboot() {
+        let mut m = test_master(3, PmMode::Static);
+        let t0 = Instant::now();
+        assert!(!m.ever_served);
+        // A gen-0 timeout kill before any served request must respawn
+        // immediately — never bail (failboot is for Unhealthy only) and never
+        // back off (the master chose this kill).
+        let w = dead_worker(4246, 0, 0, t0);
+        let r = m.on_child_exit(w, ExitVerdict::TimeoutKill, t0);
+        assert!(r.is_ok());
+        assert_eq!(m.table.slots[0].respawn_at, Some(t0));
+        assert_eq!(m.table.slots[0].crash_streak, 0);
     }
 
     #[test]

@@ -4,7 +4,6 @@
 //! decisions and writes only STARTING (at fork) and FREE (after reap).
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const SB_MAX_SLOTS: usize = 4096;
 
@@ -52,11 +51,16 @@ pub struct SlotSnapshot {
     pub last_activity_ms: u64,
 }
 
+/// Milliseconds on `CLOCK_MONOTONIC`: cross-process comparable within one boot
+/// and immune to wall-clock steps that would fake request/idle ages.
 pub fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: ts is a live out-param; CLOCK_MONOTONIC always exists.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
 }
 
 impl Scoreboard {

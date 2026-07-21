@@ -153,6 +153,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         },
         process_idle_timeout: settings.pm.process_idle_timeout,
         process_control_timeout: settings.pm.process_control_timeout,
+        request_terminate_timeout: settings.pm.request_terminate_timeout,
         pidfile: settings.pm.pidfile.clone(),
         listeners,
     };

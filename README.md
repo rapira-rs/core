@@ -75,6 +75,7 @@ max_spare = 3                # dynamic only: trim to at most this many idle work
 max_requests = 0             # recycle a worker after N requests (+jitter); 0 = unlimited
 process_idle_timeout_secs = 10   # ondemand: retire an idle worker after this long
 process_control_timeout_secs = 30 # graceful-stop budget before QUIT → TERM → KILL
+request_terminate_timeout_secs = 0 # kill a worker whose single request runs longer (wall clock); 0 = off
 pidfile = "/run/rapira.pid"  # optional; relative paths resolve against this file's dir
 ```
 
@@ -88,7 +89,8 @@ rapira runs a **single-threaded master** that binds the listen socket(s), starts
 pre-fork process model. Each worker runs one NTS PHP interpreter behind its own async
 HTTP runtime and accepts on the inherited socket. The master itself never serves requests;
 it supervises: it reaps and respawns crashed workers (with backoff), recycles workers after
-`max_requests`, scales the pool for `pm = dynamic`/`ondemand`, and reloads on `SIGUSR2` by
+`max_requests`, kills workers whose request exceeds `request_terminate_timeout_secs`,
+scales the pool for `pm = dynamic`/`ondemand`, and reloads on `SIGUSR2` by
 rolling the pool one worker at a time with no dropped connections. `SIGINT`/`SIGTERM` drains
 gracefully (a second one forces exit). Send signals to the master pid (see `pidfile`).
 

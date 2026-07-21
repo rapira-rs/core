@@ -121,6 +121,36 @@ fn max_requests_recycles() {
 }
 
 #[test]
+fn request_timeout_kills_and_replaces_worker() {
+    let srv = spawn_with_config(
+        "hang-worker.php",
+        1,
+        "[pm]\nrequest_terminate_timeout_secs = 2\n",
+    );
+    let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    // Sanity: the worker serves before it is asked to hang.
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    // The hanging request pins the worker ACTIVE past the 2s limit; the
+    // watchdog TERMs it, so the client sees a reset/EOF, never a response.
+    let hung = http_get(srv.addr, "/?hang=1", Duration::from_secs(15));
+    assert!(
+        hung.is_err(),
+        "hung request must die with the worker, got {hung:?}\n{}",
+        diagnostics(&srv)
+    );
+    // The kill is a TimeoutKill: replaced immediately, no backoff.
+    wait_workers(
+        &srv,
+        Duration::from_secs(20),
+        "worker replaced after timeout kill",
+        |p| p.len() == 1 && p[0] != pids0[0],
+    );
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET / after kill");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+}
+
+#[test]
 fn master_failboot_exits_70() {
     let mut srv = spawn_with_config("fatal-worker.php", 1, "");
     let addr = srv.addr;
