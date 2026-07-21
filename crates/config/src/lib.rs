@@ -319,9 +319,11 @@ mod tests {
     fn file_entrypoint_is_config_dir_relative() {
         let file = load_str("[pool]\nentrypoint = \"public/index.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/srv/app"))).unwrap();
+        // Compare through the same absolute() rule: Windows prefixes the current
+        // drive (D:\srv\...), so the bare literal would not match there.
         assert_eq!(
             s.pool.entrypoint,
-            PathBuf::from("/srv/app/public/index.php")
+            std::path::absolute("/srv/app/public/index.php").unwrap()
         );
     }
 
