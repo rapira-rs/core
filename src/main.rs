@@ -3,7 +3,7 @@ use extension_host::ExtensionHost;
 use log::info;
 use php_sys::{Mode, Rapira};
 use rapira_config::{Listen, Overrides, Settings};
-use rapira_http::{Config as HttpConfig, HttpServer, Listen as HttpListen};
+use rapira_pingora::{Config as HttpConfig, HttpServer, Listen as HttpListen};
 use std::path::PathBuf;
 
 #[global_allocator]
@@ -85,7 +85,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // handler that would fight Zend's per-request one.
     extension_host::arm_shutdown_signals();
 
-    // rapira_config::Listen and rapira_http::Listen are distinct types on purpose: the
+    // rapira_config::Listen and rapira_pingora::Listen are distinct types on purpose: the
     // extension crate stays independent of core's config crate, and core owns the one
     // mapping between them (a From impl is barred by the orphan rule anyway).
     let http_cfg = HttpConfig {

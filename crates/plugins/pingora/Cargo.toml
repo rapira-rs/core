@@ -1,0 +1,18 @@
+[package]
+name = "rapira_pingora"
+version = "0.3.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+description = "Rapira HTTP front — a Pingora server plugin that streams requests through PHP"
+
+[lints]
+workspace = true
+
+[dependencies]
+extension_api = { workspace = true }
+pingora = { version = "0.8", features = ["proxy"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"] }
+async-trait = "0.1"
+anyhow = { workspace = true }
+log = { workspace = true }

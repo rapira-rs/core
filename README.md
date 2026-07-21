@@ -1,11 +1,10 @@
 # core
 
 [![codecov](https://codecov.io/gh/rustatian/rapira-rs/graph/badge.svg)](https://app.codecov.io/gh/rustatian/rapira-rs)
-[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/rapira-rs/core?utm_source=badge)
 ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rustatian/rapira-rs?utm_source=oss&utm_medium=github&utm_campaign=rustatian%2Frapira-rs&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 
-Rapira - PHP application server. Embeds PHP (ZTS or NTS) via the embed SAPI, runs requests on a pool of PHP worker threads, and serves HTTP through the [rustatian/http](https://github.com/rustatian/http) extension. This repo contains the SAPI core (`php_sys`), the extension host runtime, and the `rapira` binary.
+Rapira - PHP application server. Embeds PHP (ZTS or NTS) via the embed SAPI, runs requests on a pool of PHP worker threads, and serves HTTP through the bundled `rapira_pingora` plugin (`crates/plugins/pingora`). This repo contains the SAPI core (`php_sys`), the extension host runtime, and the `rapira` binary.
 
 ## Build requirements
 

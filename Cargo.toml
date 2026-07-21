@@ -10,7 +10,16 @@ path = "src/main.rs"
 
 
 [workspace]
-members = ["crates/*"]
+# crates/* cannot stay a glob: it would match the plugins parent dir, which is
+# not a package. Top-level crates are explicit; plugins keep the glob.
+members = [
+    "crates/config",
+    "crates/extension_host",
+    "crates/extensions_api",
+    "crates/integration_tests",
+    "crates/php_sys",
+    "crates/plugins/*",
+]
 
 [workspace.dependencies]
 anyhow = "1"
@@ -18,7 +27,8 @@ log = { version = "0.4", features = ["std"] }
 php_sys = { path = "crates/php_sys" }
 extension_host = { path = "crates/extension_host" }
 rapira_config = { path = "crates/config" }
-extension_api = { git = "https://github.com/rustatian/extensions_api.git", branch = "main" }
+extension_api = { path = "crates/extensions_api" }
+rapira_pingora = { path = "crates/plugins/pingora" }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 env_logger = "0.11"
@@ -42,7 +52,7 @@ clap = { version = "4", features = ["derive", "env"] }
 extension_host = { workspace = true }
 php_sys = { workspace = true }
 rapira_config = { workspace = true }
-rapira_http = { git = "https://github.com/rustatian/http.git", branch = "main" }
+rapira_pingora = { workspace = true }
 mimalloc = "0.1"
 log.workspace = true
 env_logger.workspace = true
