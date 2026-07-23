@@ -3,7 +3,7 @@ use php_sys::{Mode, Rapira};
 use std::sync::mpsc;
 use std::time::Duration;
 
-// A6: a worker script that fatals before its `rapira_handle_request` loop can
+// A6: a worker script that fatals before its `handleRequest` loop can
 // never read the intake channel from PHP. The Rust boot-failure drain must
 // (a) answer the queued job with 503 and (b) observe channel closure so
 // `Drop for Rapira` returns instead of joining a worker that retries the boot

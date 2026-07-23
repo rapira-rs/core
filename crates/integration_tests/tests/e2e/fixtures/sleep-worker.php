@@ -6,5 +6,6 @@ $handler = static function (): void {
     usleep(300000);
     echo 'ok:' . getmypid();
 };
-while (\rapira_handle_request($handler)) {
+$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
+while ($http->handleRequest($handler)) {
 }

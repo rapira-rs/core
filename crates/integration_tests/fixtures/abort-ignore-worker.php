@@ -16,6 +16,7 @@ $handler = static function (): void {
 	echo "payload\n"; // aborted write: the raised abort must NOT bail
 	TrackIgnore::$reached++; // ignore_user_abort=1: the handler keeps running
 };
-while (\rapira_handle_request($handler)) {
+$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
+while ($http->handleRequest($handler)) {
 	gc_collect_cycles();
 }

@@ -7,7 +7,8 @@ $handler = static function () use ($fileStream, $input): void {
 	echo fread($fileStream, 5);
 	stream_is_local($input); // a dangling pre-loop handle would warn into the body
 };
-while (\rapira_handle_request($handler)) {
+$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
+while ($http->handleRequest($handler)) {
 	gc_collect_cycles();
 }
 fclose($fileStream);

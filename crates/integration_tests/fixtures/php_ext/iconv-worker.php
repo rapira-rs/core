@@ -12,5 +12,6 @@ $handler = static function (): void {
 	}
 	echo 'iconv:' . iconv('UTF-8', 'UTF-8', 'iconv ok');
 };
-while (\rapira_handle_request($handler)) {
+$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
+while ($http->handleRequest($handler)) {
 }

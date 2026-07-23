@@ -34,5 +34,6 @@ $_SESSION['k'] = 'v'; // dirty the session so the flush actually writes
 $handler = static function () use ($boot): void {
     echo (int) file_get_contents($boot);
 };
-while (\rapira_handle_request($handler)) {
+$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
+while ($http->handleRequest($handler)) {
 }

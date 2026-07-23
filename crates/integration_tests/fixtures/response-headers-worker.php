@@ -7,6 +7,7 @@ $handler = static function (): void {
 	http_response_code(200 + (int)($_GET['i'] ?? 0));
 	echo implode("\n", headers_list());
 };
-while (\rapira_handle_request($handler)) {
+$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
+while ($http->handleRequest($handler)) {
 	gc_collect_cycles();
 }

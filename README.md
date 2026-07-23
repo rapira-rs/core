@@ -110,13 +110,17 @@ rapira serve --config /etc/rapira/rapira.toml
 
 ## Worker script
 
-The resident script calls `rapira_handle_request(callable): bool` in a loop. Each call blocks until a request arrives, runs the handler with the superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, …) populated for that request, and returns `false` when the server is shutting down. State created outside the handler (autoloader, DI container, connections) survives across requests.
+The resident script asks rapira for a plugin handler, then loops on it. `handleRequest()` blocks until a request arrives, runs the handler with the superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, …) populated for that request, and returns `false` when the server is shutting down. State created outside the handler (autoloader, DI container, connections) survives across requests.
 
 ```php
 <?php
 // worker.php
 require __DIR__ . '/vendor/autoload.php';
 
+use Rapira\Plugin\Http\HttpHandlerConfig;
+use function Rapira\create_plugin_handler;
+
+$http = create_plugin_handler(new HttpHandlerConfig());
 $app = new App(); // booted once, reused for every request
 
 $handler = static function () use ($app): void {
@@ -125,12 +129,20 @@ $handler = static function () use ($app): void {
     echo $app->handle($_SERVER['REQUEST_URI']);
 };
 
-while (rapira_handle_request($handler)) {
+while ($http->handleRequest($handler)) {
     gc_collect_cycles();
 }
 ```
 
+The config class picks the plugin; `create_plugin_handler()` throws a `Rapira\RapiraException` if that plugin is not running (including in classic mode, which has no resident loop). `$http->config->info` describes the plugin the config targets.
+
+`handleRequest()` blocks, so **one worker script drives one plugin**. A script that loops on two handlers would park in the first and never reach the second.
+
+`$http->getInfo()` returns this worker's live counters — `state`, `pid`, `queued`, `handled`, `errors`, `recycles`, `restarts` — read straight from its scoreboard slot.
+
 `rapira_finish_request(): bool` flushes the response to the client early; the handler can continue doing work after it (same contract as `fastcgi_finish_request`).
+
+Every class and function rapira exposes is declared in [`crates/php_sys/rapira.stub.php`](crates/php_sys/rapira.stub.php), which doubles as an IDE stub.
 
 ## Classic script
 

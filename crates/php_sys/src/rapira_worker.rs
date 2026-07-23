@@ -51,6 +51,12 @@ fn worker_recycle() -> bool {
     WORKER.with_borrow(|w| w.as_ref().is_some_and(|wc| wc.recycle))
 }
 
+/// Whether the resident worker loop owns this thread. `WORKER` is installed by
+/// `rapira_worker` only, so this is false under `classic_worker`.
+pub(crate) fn worker_mode_active() -> bool {
+    WORKER.with_borrow(|w| w.is_some())
+}
+
 fn set_worker_recycle() {
     WORKER.with_borrow_mut(|w| {
         if let Some(wc) = w.as_mut() {
