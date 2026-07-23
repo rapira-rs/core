@@ -23,7 +23,7 @@
 #   -misc-header-include-cycle,
 #   -misc-include-cleaner,
 #   -misc-use-internal-linkage
-Checks: '*'
+Checks: '*,-altera-*'
 WarningsAsErrors: 'bugprone-*,cert-*,clang-analyzer-*,concurrency-*'
 HeaderFilterRegex: 'crates/php_sys/.*\.h$'
 FormatStyle: file

@@ -1,4 +1,5 @@
 #include "wrapper.h"
+#include "grpc.h"
 
 extern int rapira_rs_handle_request(
     zend_fcall_info *fci,
@@ -101,7 +102,8 @@ PHP_FUNCTION(rapira_finish_request) {
 static const zend_function_entry rapira_functions[] = {
     PHP_FE(rapira_handle_request, arginfo_rapira_handle_request)
         PHP_FE(rapira_finish_request, arginfo_rapira_finish_request)
-            PHP_FE_END};
+            PHP_FE(rapira_handle_grpc_request, arginfo_rapira_handle_grpc_request)
+                PHP_FE_END};
 
 zend_module_entry rapira_module_entry = {
     STANDARD_MODULE_HEADER,
@@ -323,6 +325,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     zval retval;
     ZVAL_UNDEF(&retval);
     fci->size = sizeof *fci;
+    // cppcheck-suppress autoVariables
     fci->retval = &retval;
     fci->param_count = 0;
     fci->named_params = NULL;
@@ -477,7 +480,13 @@ void rapira_clear_last_error(void) {
 // once per process, before sapi_startup
 void rapira_process_init(void) {
 #if defined(SIGPIPE) && defined(SIG_IGN)
-    signal(SIGPIPE, SIG_IGN);
+    // Ignore SIGPIPE so a write to a hung-up client returns EPIPE instead of
+    // killing the worker. Failure is impossible for SIGPIPE/SIG_IGN (only EINVAL),
+    // but a worker a client can SIGPIPE-kill must not run - so treat it as fatal.
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("rapira: signal(SIGPIPE, SIG_IGN)");
+        abort();
+    }
 #endif
     zend_signal_startup();
 }
@@ -496,7 +505,7 @@ void rapira_child_init(void) {
   nothing reclaims the resource in a resident request, so sweep dead ones
   before serving the next job. Safe here: the previous request is finished. */
 void rapira_release_temporary_streams(void) {
-    zend_resource *val;
+    zend_resource *val = NULL;
     int stream_type = php_file_le_stream();
     ZEND_HASH_FOREACH_PTR(&EG(regular_list), val) {
         if (val->type == stream_type) {

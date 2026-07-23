@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut c = cc::Build::new();
-    c.file("wrapper.c").file("module.c");
+    c.file("wrapper.c").file("module.c").file("grpc.c");
     for d in &php.includes {
         c.include(d);
     }
@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
         .generate()?
         .write_to_file(PathBuf::from(env::var("OUT_DIR")?).join("bindings.rs"))?;
 
-    for f in ["wrapper.h", "module.c", "wrapper.c", "allowed_bindings.rs"] {
+    for f in ["wrapper.h", "module.c", "wrapper.c", "grpc.c", "grpc.h", "allowed_bindings.rs"] {
         println!("cargo:rerun-if-changed={f}");
     }
 

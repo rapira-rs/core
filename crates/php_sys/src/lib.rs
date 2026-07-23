@@ -5,6 +5,7 @@ pub mod callbacks;
 pub mod classic_worker;
 pub mod context;
 pub mod executor;
+pub mod grpc;
 pub mod handler;
 pub mod module;
 pub mod quota;
