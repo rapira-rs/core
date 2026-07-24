@@ -14,6 +14,7 @@ log = "0.4"
 
 [dev-dependencies]
 anyhow = "1"
+serde_json = "1"
 extension_api = { workspace = true }
 extension_host = { path = "../extension_host" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

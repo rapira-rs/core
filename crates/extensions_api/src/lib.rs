@@ -73,11 +73,9 @@ pub trait Backend: Send + Sync + 'static {
     /// [`Php::exec`].
     fn exec(&self, req: Request) -> Pin<Box<dyn Future<Output = Result<Response>> + Send + '_>>;
 
-    /// Opaque, plugin-defined config the worker script declared for its handler
-    /// (e.g. serialized JSON). `None` if none was declared. Default: none.
-    fn handler_config(&self) -> Option<Vec<u8>> {
-        None
-    }
+    /// Opaque, plugin-defined config the worker script declared for its handler.
+    /// `None` if none was declared.
+    fn handler_config(&self) -> Option<Vec<u8>>;
 }
 
 /// The PHP bridge handed to every extension. Cheap to clone; every clone shares the

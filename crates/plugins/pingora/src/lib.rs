@@ -233,15 +233,41 @@ async fn serve(
     Ok(())
 }
 
+/// The plugin a declared config targets. Mirrors `Rapira\PluginInfo` on the wire.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct PluginInfo {
+    name: String,
+}
+
 /// Per-request behavior the worker script declared through its `HttpHandlerConfig`,
 /// carried from PHP as an opaque JSON blob (see `Php::handler_config`). Deployment
 /// config (listen, port, body limit) stays in [`Config`]; this is the app-owned overlay.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct HttpRuntimeConfig {
-    /// Serve only paths under this prefix; others get 404 without invoking PHP.
+    /// Which plugin the worker declared this for. One cell carries one config, so a
+    /// script that declares a second handler overwrites the first.
+    info: PluginInfo,
+    /// Serve only this path and its subtree; others get 404 without invoking PHP.
     /// Empty = accept all.
     path_prefix: String,
+}
+
+impl HttpRuntimeConfig {
+    /// Whole-segment prefix test: `/api` covers `/api` and `/api/...`, not `/apidocs`.
+    /// The path is the raw request target — not percent-decoded, `..` not resolved —
+    /// so `/api/../x` passes. This routes requests; it does not gate access.
+    fn allows(&self, path: &str) -> bool {
+        let prefix = self.path_prefix.trim_end_matches('/');
+        if prefix.is_empty() {
+            return true;
+        }
+        match path.strip_prefix(prefix) {
+            Some(rest) => rest.is_empty() || rest.starts_with('/'),
+            None => false,
+        }
+    }
 }
 
 /// Terminates HTTP and answers every request from PHP; never proxies upstream.
@@ -250,26 +276,40 @@ struct PhpProxy {
     config: Config,
     /// Requests between `new_ctx` and `logging` — `serve` drains this on shutdown.
     inflight: Arc<AtomicUsize>,
-    /// The worker's declared runtime config, parsed once and cached for the front's
-    /// life. A worker declares this from static constructor args at bootstrap and
-    /// never changes it, so read-once is the right contract (and mirrors how
-    /// worker-mode servers fix their config at boot).
+    /// The worker's declared runtime config, parsed once and cached for the front's life.
     runtime: OnceLock<HttpRuntimeConfig>,
 }
 
 impl PhpProxy {
-    /// The worker's declared config, parsed once and then a lock-free read.
-    /// `None` until PHP declares it — its bootstrap races this thread's startup, so
-    /// nothing is cached before then.
+    /// The worker's declared config, parsed once and then a lock-free read. `None` until
+    /// PHP declares it: the worker's bootstrap races this thread's startup, so requests
+    /// arriving in that window are served with no prefix in force.
     fn runtime(&self) -> Option<&HttpRuntimeConfig> {
         if let Some(rt) = self.runtime.get() {
             return Some(rt);
         }
         let bytes = self.php.handler_config()?;
-        Some(
-            self.runtime
-                .get_or_init(|| serde_json::from_slice(&bytes).unwrap_or_default()),
-        )
+        Some(self.runtime.get_or_init(|| {
+            match serde_json::from_slice::<HttpRuntimeConfig>(&bytes) {
+                Ok(cfg) if cfg.info.name == "http" => cfg,
+                // Both arms mean rapira sent something this front cannot act on. Falling
+                // back to "no prefix" keeps serving rather than 404ing everything, so say
+                // so loudly - the OnceLock caches it, so this logs once per worker.
+                Ok(cfg) => {
+                    log::error!(
+                        "[rapira-pingora] worker declared a '{}' handler, not 'http'; serving all paths",
+                        cfg.info.name
+                    );
+                    HttpRuntimeConfig::default()
+                }
+                Err(e) => {
+                    log::error!(
+                        "[rapira-pingora] unreadable handler config, serving all paths: {e}"
+                    );
+                    HttpRuntimeConfig::default()
+                }
+            }
+        }))
     }
 }
 
@@ -294,10 +334,9 @@ impl ProxyHttp for PhpProxy {
         // Enforce the PHP-declared path prefix before reading the body, so a
         // misdirected request never wakes PHP and never streams its body in.
         if let Some(rt) = self.runtime()
-            && !rt.path_prefix.is_empty()
-            && !session.req_header().uri.path().starts_with(&rt.path_prefix)
+            && !rt.allows(session.req_header().uri.path())
         {
-            reject_not_found(session).await?;
+            reject(session, 404).await?;
             return Ok(true); // answered here; PHP never woken
         }
 
@@ -448,7 +487,7 @@ async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<
             .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"100-continue"));
 
     if declared_len.is_some_and(|len| len > config.max_body_size) {
-        reject_payload_too_large(session).await?;
+        reject(session, 413).await?;
         return Ok(None);
     }
     // The client holds the body back until the interim response acknowledges Expect.
@@ -468,7 +507,7 @@ async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<
     while let Some(chunk) = session.read_request_body().await? {
         // Counting covers chunked bodies that declared no length up front.
         if body.len() + chunk.len() > config.max_body_size {
-            reject_payload_too_large(session).await?;
+            reject(session, 413).await?;
             return Ok(None);
         }
         body.extend_from_slice(&chunk);
@@ -488,21 +527,10 @@ async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<
     }))
 }
 
-/// 413 + close: the unread body is still on the wire, so the connection can't be reused.
-async fn reject_payload_too_large(session: &mut Session) -> PingoraResult<()> {
-    let mut header = ResponseHeader::build(413, Some(1))?;
-    header.insert_header("Content-Length", "0")?;
-    session.set_keepalive(None);
-    session
-        .write_response_header(Box::new(header), true)
-        .await?;
-    Ok(())
-}
-
-/// 404 + close: the request targets a path outside the configured prefix. Rejected
-/// before the body is read, so — like the 413 path — the connection can't be reused.
-async fn reject_not_found(session: &mut Session) -> PingoraResult<()> {
-    let mut header = ResponseHeader::build(404, Some(1))?;
+/// Answer from here and close: the request never reaches PHP, and its body is still
+/// unread on the wire, so the connection can't be reused.
+async fn reject(session: &mut Session, status: u16) -> PingoraResult<()> {
+    let mut header = ResponseHeader::build(status, Some(1))?;
     header.insert_header("Content-Length", "0")?;
     session.set_keepalive(None);
     session

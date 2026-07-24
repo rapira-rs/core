@@ -35,8 +35,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut c = cc::Build::new();
     // Zend fixes the parameter list of every entry point it declares through a
-    // macro (INTERNAL_FUNCTION_PARAMETERS' `return_value`, ZEND_MODULE_STARTUP_N's
-    // `type`/`module_number`), so an unused one is never actionable here.
+    // macro (INTERNAL_FUNCTION_PARAMETERS' `return_value`, PHP_MINIT_FUNCTION's
+    // INIT_FUNC_ARGS `type`/`module_number`), so an unused one is never actionable here.
     c.flag_if_supported("-Wno-unused-parameter");
     c.file("wrapper.c").file("module.c").file("handle_config.c");
     for d in &php.includes {

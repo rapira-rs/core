@@ -134,7 +134,9 @@ while ($http->handleRequest($handler)) {
 }
 ```
 
-The config class picks the plugin; `create_plugin_handler()` throws a `Rapira\RapiraException` if that plugin is not running (including in classic mode, which has no resident loop). `$http->config->info` describes the plugin the config targets.
+The config class picks the plugin; `create_plugin_handler()` throws a `Rapira\RapiraException` if no handler matches the config class, or outside worker mode (classic mode has no resident loop). `$http->config->info` describes the plugin the config targets.
+
+`new HttpHandlerConfig(pathPrefix: '/api')` limits the worker to one path subtree: the HTTP front answers 404 for anything outside it without waking PHP. The prefix must start with `/`, and matching is on whole path segments (`/api` covers `/api` and `/api/...`, not `/apidocs`) against the raw request target — it is not percent-decoded and `..` is not resolved. It takes effect once the worker has run its bootstrap, so it routes requests; it does not gate access.
 
 `handleRequest()` blocks, so **one worker script drives one plugin**. A script that loops on two handlers would park in the first and never reach the second.
 

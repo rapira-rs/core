@@ -945,6 +945,7 @@ dependencies = [
  "libc",
  "log",
  "php_sys",
+ "serde_json",
  "tokio",
 ]
 

@@ -96,20 +96,57 @@ fn handler_config_blob_is_delivered() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("plugin-config-worker.php")))?;
     let h = r.handle()?;
 
-    // No config until the worker script has run its bootstrap.
-    assert!(
-        h.handler_config().is_none(),
-        "nothing declared before the first job"
-    );
-
     let (status, _) = drain(h.handle_blocking(req("/api/x", "plugin-config-worker.php"))?);
     assert_eq!(status, 200);
 
+    // A served request proves the bootstrap ran, so the config is declared by now.
+    // (Reading before this races the worker thread, which declares at thread start.)
     let blob = h.handler_config().expect("config declared at bootstrap");
-    let json = String::from_utf8_lossy(&blob);
+    let json: serde_json::Value = serde_json::from_slice(&blob)?;
+    assert_eq!(
+        json["pathPrefix"], "/api",
+        "the declared prefix reached Rust verbatim (got: {json})"
+    );
+    assert_eq!(
+        json["info"]["name"], "http",
+        "the plugin slot rides along (got: {json})"
+    );
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+// A config the factory cannot serialize, and one the front could never match, must
+// both be refused at declaration time — and neither may disturb the config already
+// declared. Without the encode check, the failed one ships a truncated JSON fragment
+// that the plugin can only read as "nothing declared", silently dropping the prefix.
+#[test]
+fn refused_configs_leave_the_declared_one_intact() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let script = "plugin-config-errors-worker.php";
+    let r = Rapira::start(Mode::Worker(fixture(script)))?;
+    let h = r.handle()?;
+
+    let (_, body) = drain(h.handle_blocking(req("/x?probe=utf8", script))?);
     assert!(
-        json.contains("pathPrefix") && json.contains("api"),
-        "the pathPrefix reached Rust as JSON (got: {json})"
+        body.contains("threw:cannot serialize"),
+        "an unencodable config is refused (got: {body:?})"
+    );
+
+    let (_, body) = drain(h.handle_blocking(req("/x?probe=prefix", script))?);
+    assert!(
+        body.contains("threw:pathPrefix must start with '/'"),
+        "a prefix the front cannot match is refused (got: {body:?})"
+    );
+
+    let blob = h
+        .handler_config()
+        .expect("the bootstrap config is still there");
+    let json: serde_json::Value = serde_json::from_slice(&blob)?;
+    assert_eq!(
+        json["pathPrefix"], "/api",
+        "a refused config never reached the plugin (got: {json})"
     );
 
     drop(h);

@@ -289,6 +289,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     zval retval;
     ZVAL_UNDEF(&retval);
     fci->size = sizeof *fci;
+    // fci does not outlive this frame, so pointing it at a local is fine.
     // cppcheck-suppress autoVariables
     fci->retval = &retval;
     fci->param_count = 0;

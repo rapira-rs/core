@@ -102,6 +102,15 @@ ZEND_METHOD(Rapira_Plugin_Http_HttpHandlerConfig, __construct) {
     Z_PARAM_STR(path_prefix)
     ZEND_PARSE_PARAMETERS_END();
 
+    // A prefix the front can never match would 404 every request with nothing to
+    // point at; reject it here, where the script can still see why.
+    if (path_prefix && ZSTR_LEN(path_prefix) > 0 && ZSTR_VAL(path_prefix)[0] != '/') {
+        zend_throw_exception_ex(rapira_exception_ce, 0,
+                                "pathPrefix must start with '/', got \"%s\"",
+                                ZSTR_VAL(path_prefix));
+        RETURN_THROWS();
+    }
+
     // The capability slot this config targets, not the extension serving it.
     zval info;
     object_init_ex(&info, rapira_plugin_info_ce);
@@ -189,16 +198,21 @@ ZEND_FUNCTION(Rapira_create_plugin_handler) {
     }
 
     // Hand the plugin its PHP-declared config as an opaque JSON blob; the plugin
-    // owns the schema. json is a core, always-available ext (>= 8.0), and a plain
-    // readonly data object never fails to encode, so a NULL result just leaves the
-    // plugin on its defaults. The inherited `info` rides along; the plugin ignores
-    // unknown fields, so no filtering is needed here.
+    // owns the schema. The inherited `info` rides along; the plugin ignores fields
+    // it does not know. A failed encode (a property holding invalid UTF-8) leaves
+    // the fragment written so far in `buf` - the object encoder has already emitted
+    // '{' and never emits the closing '}' - so shipping it would hand the plugin
+    // invalid JSON, which it can only read as "nothing declared". Refuse instead.
     smart_str buf = {0};
-    php_json_encode(&buf, config, 0);
-    if (buf.s) {
-        rapira_rs_set_handler_config((const uint8_t *)ZSTR_VAL(buf.s),
-                                     ZSTR_LEN(buf.s));
+    if (php_json_encode(&buf, config, 0) == FAILURE) {
+        smart_str_free(&buf);
+        zend_throw_exception_ex(rapira_exception_ce, 0,
+                                "cannot serialize %s (invalid UTF-8 in a property?)",
+                                ZSTR_VAL(Z_OBJCE_P(config)->name));
+        RETURN_THROWS();
     }
+    // The parameter is an object, so a successful encode wrote at least "{}".
+    rapira_rs_set_handler_config((const uint8_t *)ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
     smart_str_free(&buf);
 
     object_init_ex(return_value, rapira_http_handler_ce);

@@ -1,7 +1,7 @@
 //! Rust half of the PHP plugin-handler classes (crates/php_sys/handle_config.c).
 //!
-//! Everything here reads state the worker thread already maintains; it owns none
-//! of its own.
+//! Reads state the worker thread already maintains, plus the thread-local handle
+//! the C writer uses to reach the config cell.
 
 use std::cell::RefCell;
 use std::ffi::c_char;
@@ -17,7 +17,7 @@ use crate::start::intake_depth;
 /// Per-worker slot holding the JSON config blob PHP declared for its handler.
 /// Written by the PHP thread at `create_plugin_handler`, read (cloned out) by the
 /// extension thread through `RapiraHandle`. `None` until the script declares one.
-/// The `Arc` is the only one: writer and handle share this one cell across threads.
+/// Shared across threads by the PHP worker thread (writer) and every `RapiraHandle`.
 pub(crate) type ConfigCell = Arc<Mutex<Option<Vec<u8>>>>;
 
 thread_local! {
@@ -73,8 +73,6 @@ fn state_name(state: u32) -> *const c_char {
 }
 
 /// True when the resident worker loop owns this thread; false under classic mode.
-///
-/// # Safety
 /// Called from C (`Rapira\create_plugin_handler`) on the PHP worker thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_worker_mode() -> bool {

@@ -34,18 +34,18 @@ fn path_prefix_rejects_before_php() {
         diagnostics(&srv)
     );
 
-    let (miss, body) = http_get(srv.addr, "/nope", Duration::from_secs(10)).expect("GET /nope");
-    let body = String::from_utf8_lossy(&body);
-    assert_eq!(
-        miss,
-        404,
-        "pingora rejects the non-matching path\n{}",
-        diagnostics(&srv)
-    );
-    assert!(
-        !body.contains("served:"),
-        "PHP must not have run for the rejected path (got: {body:?})"
-    );
+    // "/apidocs" shares the prefix's bytes but not its first segment: the gate is a
+    // path test, not a string test, so it must be rejected like any other outsider.
+    for path in ["/nope", "/apidocs"] {
+        let (miss, body) = http_get(srv.addr, path, Duration::from_secs(10))
+            .unwrap_or_else(|e| panic!("GET {path}: {e}"));
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(miss, 404, "pingora rejects {path}\n{}", diagnostics(&srv));
+        assert!(
+            !body.contains("served:"),
+            "PHP must not have run for {path} (got: {body:?})"
+        );
+    }
 }
 
 #[test]

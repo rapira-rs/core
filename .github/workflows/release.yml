@@ -238,10 +238,11 @@ jobs:
           # timeout is absent on macOS).
           cat > "$RUNNER_TEMP/smoke.php" <<'PHP'
           <?php
+          $http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
           $handler = static function (): void {
               echo 'ok:' . getmypid();
           };
-          while (rapira_handle_request($handler)) {
+          while ($http->handleRequest($handler)) {
           }
           PHP
           PORT=18923

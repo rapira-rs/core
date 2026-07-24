@@ -10,15 +10,19 @@ LOCATE_PHP = PREFIX=$$($(PHP_CONFIG) --prefix 2>/dev/null); test -n "$$PREFIX" |
 # header is committed, so only maintainers editing the stub need this. gen_stub
 # unpacks PHP-Parser next to itself on first run (network) and the installed copy
 # sits in a root-owned tree, so run from a writable copy under target/.
+# gen_stub emits arginfo for the PHP it ships with, so run it with that same build
+# rather than whatever `php` PATH resolves to.
 GEN_STUB ?= $(shell $(PHP_CONFIG) --prefix)/lib/php/build/gen_stub.php
+PHP_BIN ?= $(shell $(PHP_CONFIG) --prefix)/bin/php
 
 .PHONY: test test_nts test_e2e coverage stubs
 
 stubs:
 	@test -f "$(GEN_STUB)" || { echo "gen_stub.php not found at $(GEN_STUB); set GEN_STUB=/path/to/gen_stub.php"; exit 1; }
+	@test -x "$(PHP_BIN)" || { echo "php not found at $(PHP_BIN); set PHP_BIN=/path/to/php"; exit 1; }
 	@mkdir -p target/stubgen
 	@cp "$(GEN_STUB)" target/stubgen/gen_stub.php
-	@php target/stubgen/gen_stub.php crates/php_sys/rapira.stub.php
+	@$(PHP_BIN) target/stubgen/gen_stub.php crates/php_sys/rapira.stub.php
 
 # Sequential recipe (not prerequisites) so `make -j` cannot run the suites
 # concurrently; the e2e servers must not overlap the in-process PHP tests.
