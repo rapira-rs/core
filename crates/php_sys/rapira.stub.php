@@ -43,9 +43,7 @@ namespace Rapira {
         public readonly PluginHandlerConfig $config;
     }
 
-    class RapiraException extends \Exception
-    {
-    }
+    class RapiraException extends \Exception {}
 
     /**
      * Create the handler for the plugin named by $config.
@@ -58,9 +56,14 @@ namespace Rapira {
 namespace Rapira\Plugin\Http {
     final readonly class HttpHandlerConfig extends \Rapira\PluginHandlerConfig
     {
-        public function __construct() {}
-    }
+        /** Serve only requests under this path; others get 404 without invoking PHP. Empty = all. */
+        public string $pathPrefix;
 
+        public function __construct(string $pathPrefix = '')
+        {
+            $this->pathPrefix = $pathPrefix;
+        }
+    }
     /**
      * Live worker counters. Obtain one from HttpHandler::getInfo().
      */

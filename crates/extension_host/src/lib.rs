@@ -221,6 +221,10 @@ impl extension_api::Backend for RapiraBackend {
             })
         })
     }
+
+    fn handler_config(&self) -> Option<Vec<u8>> {
+        self.rapira.handler_config()
+    }
 }
 
 /// Drive one extension: run until it finishes or the host asks it to stop. On stop the

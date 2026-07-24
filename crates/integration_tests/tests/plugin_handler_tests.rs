@@ -85,3 +85,34 @@ fn plugin_handler_refused_in_classic_mode() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// The in-process harness drives jobs straight through RapiraHandle, bypassing
+// pingora, so it can't observe the 404 — but it proves the config PHP declared at
+// create_plugin_handler is marshaled to the Rust side and readable off the handle.
+// (The pingora-side 404 behavior is the e2e test path_prefix_rejects_before_php.)
+#[test]
+fn handler_config_blob_is_delivered() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("plugin-config-worker.php")))?;
+    let h = r.handle()?;
+
+    // No config until the worker script has run its bootstrap.
+    assert!(
+        h.handler_config().is_none(),
+        "nothing declared before the first job"
+    );
+
+    let (status, _) = drain(h.handle_blocking(req("/api/x", "plugin-config-worker.php"))?);
+    assert_eq!(status, 200);
+
+    let blob = h.handler_config().expect("config declared at bootstrap");
+    let json = String::from_utf8_lossy(&blob);
+    assert!(
+        json.contains("pathPrefix") && json.contains("api"),
+        "the pathPrefix reached Rust as JSON (got: {json})"
+    );
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}

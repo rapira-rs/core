@@ -16,6 +16,38 @@ fn static_pool_forks_n_workers() {
     );
 }
 
+// A pathPrefix set on HttpHandlerConfig in PHP reaches the pingora front and is
+// enforced there: a matching path runs PHP, a non-matching path is 404'd without
+// ever waking PHP. Only the real binary exercises pingora, so this is e2e.
+#[test]
+fn path_prefix_rejects_before_php() {
+    let srv = spawn_with_config("plugin-config-worker.php", 1, "");
+    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+
+    let (ok, body) =
+        http_get(srv.addr, "/api/ping", Duration::from_secs(10)).expect("GET /api/ping");
+    let body = String::from_utf8_lossy(&body);
+    assert_eq!(ok, 200, "matching path is served\n{}", diagnostics(&srv));
+    assert!(
+        body.contains("served:/api/ping"),
+        "PHP ran for the matching path (got: {body:?})\n{}",
+        diagnostics(&srv)
+    );
+
+    let (miss, body) = http_get(srv.addr, "/nope", Duration::from_secs(10)).expect("GET /nope");
+    let body = String::from_utf8_lossy(&body);
+    assert_eq!(
+        miss,
+        404,
+        "pingora rejects the non-matching path\n{}",
+        diagnostics(&srv)
+    );
+    assert!(
+        !body.contains("served:"),
+        "PHP must not have run for the rejected path (got: {body:?})"
+    );
+}
+
 #[test]
 fn http_round_trip() {
     let srv = spawn_with_config("echo-worker.php", 1, "");

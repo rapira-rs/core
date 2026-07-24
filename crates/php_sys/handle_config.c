@@ -1,9 +1,13 @@
 #include "handle_config.h"
 #include "rapira_arginfo.h"
+#include "Zend/zend_smart_str.h"
+#include "ext/json/php_json.h"
 
 // Rust glue (crates/php_sys/src/handle_config.rs).
 extern bool rapira_rs_worker_mode(void);
 extern bool rapira_rs_runtime_info(rapira_runtime_info *out);
+// Hands the plugin its PHP-declared config as an opaque JSON blob (copied).
+extern void rapira_rs_set_handler_config(const uint8_t *ptr, size_t len);
 // Rust: one worker-loop turn (crates/php_sys/src/rapira_worker.rs).
 extern int rapira_rs_handle_request(zend_fcall_info *fci,
                                     zend_fcall_info_cache *fcc);
@@ -92,7 +96,11 @@ ZEND_METHOD(Rapira_PluginHandlerConfig, __construct) {
 }
 
 ZEND_METHOD(Rapira_Plugin_Http_HttpHandlerConfig, __construct) {
-    ZEND_PARSE_PARAMETERS_NONE();
+    zend_string *path_prefix = NULL;
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+    Z_PARAM_OPTIONAL
+    Z_PARAM_STR(path_prefix)
+    ZEND_PARSE_PARAMETERS_END();
 
     // The capability slot this config targets, not the extension serving it.
     zval info;
@@ -105,6 +113,10 @@ ZEND_METHOD(Rapira_Plugin_Http_HttpHandlerConfig, __construct) {
     zend_update_property(rapira_plugin_handler_config_ce, Z_OBJ_P(ZEND_THIS),
                          "info", sizeof("info") - 1, &info);
     zval_ptr_dtor(&info);
+
+    zend_update_property_str(rapira_http_handler_config_ce, Z_OBJ_P(ZEND_THIS),
+                             "pathPrefix", sizeof("pathPrefix") - 1,
+                             path_prefix ? path_prefix : ZSTR_EMPTY_ALLOC());
 }
 
 ZEND_METHOD(Rapira_Plugin_Http_HttpHandler, handleRequest) {
@@ -175,6 +187,19 @@ ZEND_FUNCTION(Rapira_create_plugin_handler) {
                              "plugin handlers require worker mode", 0);
         RETURN_THROWS();
     }
+
+    // Hand the plugin its PHP-declared config as an opaque JSON blob; the plugin
+    // owns the schema. json is a core, always-available ext (>= 8.0), and a plain
+    // readonly data object never fails to encode, so a NULL result just leaves the
+    // plugin on its defaults. The inherited `info` rides along; the plugin ignores
+    // unknown fields, so no filtering is needed here.
+    smart_str buf = {0};
+    php_json_encode(&buf, config, 0);
+    if (buf.s) {
+        rapira_rs_set_handler_config((const uint8_t *)ZSTR_VAL(buf.s),
+                                     ZSTR_LEN(buf.s));
+    }
+    smart_str_free(&buf);
 
     object_init_ex(return_value, rapira_http_handler_ce);
     zend_update_property(rapira_plugin_handler_ce, Z_OBJ_P(return_value),

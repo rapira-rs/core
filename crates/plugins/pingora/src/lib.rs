@@ -4,8 +4,8 @@
 //! The extension-host runtime does not enable IO, so the server runs on its own
 //! IO-enabled runtime on a dedicated thread; `shutdown` flips a watch channel to drain it.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -19,6 +19,7 @@ use pingora::server::{Fds, ListenFds};
 use pingora::services::Service as _; // brings start_service() into scope
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorType, Result as PingoraResult};
+use serde::Deserialize;
 use tokio::runtime::{self, Builder};
 use tokio::sync::{oneshot, watch};
 
@@ -178,6 +179,7 @@ async fn serve(
             php,
             config,
             inflight: inflight.clone(),
+            runtime: OnceLock::new(),
         },
     );
 
@@ -231,12 +233,44 @@ async fn serve(
     Ok(())
 }
 
+/// Per-request behavior the worker script declared through its `HttpHandlerConfig`,
+/// carried from PHP as an opaque JSON blob (see `Php::handler_config`). Deployment
+/// config (listen, port, body limit) stays in [`Config`]; this is the app-owned overlay.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct HttpRuntimeConfig {
+    /// Serve only paths under this prefix; others get 404 without invoking PHP.
+    /// Empty = accept all.
+    path_prefix: String,
+}
+
 /// Terminates HTTP and answers every request from PHP; never proxies upstream.
 struct PhpProxy {
     php: Php,
     config: Config,
     /// Requests between `new_ctx` and `logging` — `serve` drains this on shutdown.
     inflight: Arc<AtomicUsize>,
+    /// The worker's declared runtime config, parsed once and cached for the front's
+    /// life. A worker declares this from static constructor args at bootstrap and
+    /// never changes it, so read-once is the right contract (and mirrors how
+    /// worker-mode servers fix their config at boot).
+    runtime: OnceLock<HttpRuntimeConfig>,
+}
+
+impl PhpProxy {
+    /// The worker's declared config, parsed once and then a lock-free read.
+    /// `None` until PHP declares it — its bootstrap races this thread's startup, so
+    /// nothing is cached before then.
+    fn runtime(&self) -> Option<&HttpRuntimeConfig> {
+        if let Some(rt) = self.runtime.get() {
+            return Some(rt);
+        }
+        let bytes = self.php.handler_config()?;
+        Some(
+            self.runtime
+                .get_or_init(|| serde_json::from_slice(&bytes).unwrap_or_default()),
+        )
+    }
 }
 
 #[async_trait]
@@ -257,6 +291,16 @@ impl ProxyHttp for PhpProxy {
         session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> PingoraResult<bool> {
+        // Enforce the PHP-declared path prefix before reading the body, so a
+        // misdirected request never wakes PHP and never streams its body in.
+        if let Some(rt) = self.runtime()
+            && !rt.path_prefix.is_empty()
+            && !session.req_header().uri.path().starts_with(&rt.path_prefix)
+        {
+            reject_not_found(session).await?;
+            return Ok(true); // answered here; PHP never woken
+        }
+
         let Some(request) = build_request(session, &self.config).await? else {
             return Ok(true); // rejected here; 413 already written
         };
@@ -265,7 +309,7 @@ impl ProxyHttp for PhpProxy {
         // framed body (Content-Length or chunked) HTTP/1.1 falls back to close-delimiting,
         // which forces a connection close per request — no keepalive, a fresh 64 KiB
         // accept buffer every time. A Content-Length keeps connections alive.
-        let response = self.php.exec(request).await.map_err(|e| {
+        let response: extension_api::Response = self.php.exec(request).await.map_err(|e| {
             Error::explain(
                 ErrorType::HTTPStatus(502),
                 format!("php exec failed: {e:#}"),
@@ -447,6 +491,18 @@ async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<
 /// 413 + close: the unread body is still on the wire, so the connection can't be reused.
 async fn reject_payload_too_large(session: &mut Session) -> PingoraResult<()> {
     let mut header = ResponseHeader::build(413, Some(1))?;
+    header.insert_header("Content-Length", "0")?;
+    session.set_keepalive(None);
+    session
+        .write_response_header(Box::new(header), true)
+        .await?;
+    Ok(())
+}
+
+/// 404 + close: the request targets a path outside the configured prefix. Rejected
+/// before the body is read, so — like the 413 path — the connection can't be reused.
+async fn reject_not_found(session: &mut Session) -> PingoraResult<()> {
+    let mut header = ResponseHeader::build(404, Some(1))?;
     header.insert_header("Content-Length", "0")?;
     session.set_keepalive(None);
     session

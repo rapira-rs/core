@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use tokio::sync::mpsc;
 
 use crate::{
+    handle_config::ConfigCell,
     start::Rapira,
     types::{Context, Frame, Job, Request},
 };
@@ -22,6 +23,8 @@ const FRAME_CAP: usize = 1;
 #[derive(Clone)]
 pub struct RapiraHandle {
     intake: mpsc::Sender<Job>,
+    /// The blob the worker script declared for its handler (see [`Self::handler_config`]).
+    config: ConfigCell,
 }
 
 impl Rapira {
@@ -32,6 +35,7 @@ impl Rapira {
             .ok_or_else(|| anyhow!("Rapira intake is None"))?;
         Ok(RapiraHandle {
             intake: intake.clone(),
+            config: self.config.clone(),
         })
     }
 }
@@ -58,5 +62,12 @@ impl RapiraHandle {
             })
             .map_err(|_| anyhow!("worker pool stopped"))?;
         Ok(rx)
+    }
+
+    /// A clone of the opaque config blob the worker script declared for its
+    /// handler, or `None` if it hasn't (yet). A lock plus a `Vec` clone of a few
+    /// dozen bytes; the caller (an extension) owns the interpretation.
+    pub fn handler_config(&self) -> Option<Vec<u8>> {
+        self.config.lock().expect("config cell poisoned").clone()
     }
 }

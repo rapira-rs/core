@@ -72,6 +72,12 @@ pub trait Backend: Send + Sync + 'static {
     /// Submit `req` and resolve with the whole response; the error contract lives on
     /// [`Php::exec`].
     fn exec(&self, req: Request) -> Pin<Box<dyn Future<Output = Result<Response>> + Send + '_>>;
+
+    /// Opaque, plugin-defined config the worker script declared for its handler
+    /// (e.g. serialized JSON). `None` if none was declared. Default: none.
+    fn handler_config(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// The PHP bridge handed to every extension. Cheap to clone; every clone shares the
@@ -106,6 +112,12 @@ impl Php {
     /// body (so the body may be incomplete).
     pub async fn exec(&self, req: Request) -> Result<Response> {
         self.backend.exec(req).await
+    }
+
+    /// The opaque config blob the worker script declared for its handler; the
+    /// calling plugin owns its interpretation. `None` until PHP declares one.
+    pub fn handler_config(&self) -> Option<Vec<u8>> {
+        self.backend.handler_config()
     }
 }
 

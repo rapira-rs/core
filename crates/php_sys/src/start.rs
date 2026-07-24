@@ -45,6 +45,9 @@ pub struct Rapira {
     board: Option<rapira_scoreboard::Scoreboard>,
     /// Some = this value owns module teardown (fused path); None = worker flavor.
     module: Option<PhpModule>,
+    /// Shared with the PHP worker thread (writer) and every `RapiraHandle` (reader):
+    /// the config blob the worker script declares for its handler.
+    pub(crate) config: crate::handle_config::ConfigCell,
     _not_send: PhantomData<*const ()>, // !Send + !Sync, to prevent dropping from a foreign thread (which would be UB)
 }
 
@@ -94,12 +97,17 @@ impl Rapira {
         slot.bind(std::process::id());
 
         let (intake, intake_rx) = mpsc::channel::<Job>(1024);
+        let config: crate::handle_config::ConfigCell = Default::default();
 
         trace!(target: "rapira", "spawning worker thread");
-        let worker: JoinHandle<()> = thread::spawn(move || {
-            sb_set(slot);
-            quota::install(max_requests, on_quota, on_unhealthy);
-            worker_main(mode, intake_rx)
+        let worker: JoinHandle<()> = thread::spawn({
+            let config = config.clone();
+            move || {
+                sb_set(slot);
+                quota::install(max_requests, on_quota, on_unhealthy);
+                crate::handle_config::install(config);
+                worker_main(mode, intake_rx)
+            }
         });
 
         Ok(Self {
@@ -107,6 +115,7 @@ impl Rapira {
             worker: Some(worker),
             board,
             module: None,
+            config,
             _not_send: PhantomData,
         })
     }

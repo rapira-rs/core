@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: f2adba2782cd471711845ccf99588c3eb6388b22 */
+ * Stub hash: 5f326c8163f7cd7846497fb1e2f3dd7f19254b7a */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -18,6 +18,7 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_PluginHandlerConfig___construct, 0, 
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Plugin_Http_HttpHandlerConfig___construct, 0, 0, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, pathPrefix, IS_STRING, 0, "\'\'")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Plugin_Http_HttpHandler_handleRequest, 0, 1, _IS_BOOL, 0)
@@ -132,6 +133,12 @@ static zend_class_entry *register_class_Rapira_Plugin_Http_HttpHandlerConfig(zen
 
 	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Plugin\\Http", "HttpHandlerConfig", class_Rapira_Plugin_Http_HttpHandlerConfig_methods);
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Rapira_PluginHandlerConfig, ZEND_ACC_FINAL|ZEND_ACC_READONLY_CLASS);
+
+	zval property_pathPrefix_default_value;
+	ZVAL_UNDEF(&property_pathPrefix_default_value);
+	zend_string *property_pathPrefix_name = zend_string_init("pathPrefix", sizeof("pathPrefix") - 1, 1);
+	zend_declare_typed_property(class_entry, property_pathPrefix_name, &property_pathPrefix_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING));
+	zend_string_release(property_pathPrefix_name);
 
 	return class_entry;
 }
