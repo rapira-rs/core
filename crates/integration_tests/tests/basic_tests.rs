@@ -504,8 +504,8 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
 }
 
 /// Levels of the worker's teardown last-error records carrying `mark`. Anchored on that line's
-/// own prefix: an extension that hooks the error callback logs its stack frames on the same
-/// target, and a frame naming the marker is not a diagnostic record.
+/// own prefix so each logging path is asserted separately, and so a `php`-target record that
+/// only quotes the marker — a stack frame, say — is never counted as a diagnostic.
 fn last_error_levels(logged: &[integration_tests::Captured], mark: &str) -> Vec<log::Level> {
     php_levels(logged, mark, true)
 }

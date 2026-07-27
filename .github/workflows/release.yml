@@ -28,7 +28,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Fail fast (before 8 expensive builds) if the tag disagrees with Cargo.toml.
+  # Fail fast (before 6 expensive builds) if the tag disagrees with Cargo.toml.
   guard:
     runs-on: ubuntu-latest
     outputs:
@@ -117,7 +117,7 @@ jobs:
         if: matrix.provision == 'source-unix' && runner.os == 'macOS'
         run: brew install pkg-config openssl@3 curl oniguruma libxml2 sqlite
 
-      # Split restore/save (as master-zts.yml): the PHP build survives later failures.
+      # Split restore/save (as master.yml): the PHP build survives later failures.
       - name: Restore PHP embed runtime
         id: phpcache
         if: matrix.provision == 'source-unix'

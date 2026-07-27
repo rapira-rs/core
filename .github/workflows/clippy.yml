@@ -43,6 +43,9 @@ jobs:
             - uses: dtolnay/rust-toolchain@stable
               with: { components: clippy }
             - uses: Swatinem/rust-cache@v2
+              with:
+                  # this job exists to fail on -D warnings; keep the deps cache when it does
+                  cache-on-failure: true
             - run: cargo clippy --workspace --all-targets -- -D warnings
             # --all-targets skips the feature-gated e2e target; lint it explicitly.
             - run: cargo clippy -p integration_tests --features e2e --tests -- -D warnings

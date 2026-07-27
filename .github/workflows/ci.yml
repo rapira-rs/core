@@ -25,8 +25,8 @@ jobs:
           php-version: ${{ matrix.php }}
           # left unset, the cached PHP tarball keeps its coverage driver enabled; it overrides
           # zend_error_cb and zend_execute_ex, so the embed SAPI reports diagnostics through the
-          # extension instead of php_error_cb and runs without JIT. `extensions:` is additive and
-          # cannot remove it.
+          # extension instead of php_error_cb and runs without JIT. One knob covers both drivers;
+          # disabling through `extensions:` would have to name each of them.
           coverage: none
           # keep in sync with ci/php-configure-flags.txt
           extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, opcache, openssl, pdo_sqlite, phar, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
@@ -35,13 +35,15 @@ jobs:
           fail-fast: true # a missing extension fails the job instead of warning
 
       # `coverage: none` above disables it; assert, so a driver leaking back in fails here
-      # instead of surfacing as diagnostics that never went through php_error_cb
+      # instead of surfacing as diagnostics that never went through php_error_cb. This reads the
+      # CLI SAPI: a proxy, since drivers are enabled per-SAPI and no tool reports the embed
+      # conf.d. Both are cleared by the same phpdismod, so a leak shows up here too.
       - name: Verify no coverage driver in the PHP build
         if: runner.os == 'Linux'
         run: |
-          if php -m | grep -qiE '^(xdebug|pcov)$'; then
+          mods=$(php -m); echo "$mods"
+          if grep -qiE '^(xdebug|pcov)$' <<<"$mods"; then
             echo "::error::a PHP coverage driver is enabled; it overrides zend_error_cb and JIT in the embed SAPI"
-            php -m
             exit 1
           fi
 
