@@ -161,7 +161,7 @@ pub fn block_early_signals() {
 /// the engine is up, and Zend never touches them since the master never calls
 /// `php_request_startup`.
 pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
-    let mut sp = [0 as RawFd; 2];
+    let mut sp: [i32; 2] = [0 as RawFd; 2];
     // AF_UNIX SOCK_STREAM self-pipe, both ends O_NONBLOCK + FD_CLOEXEC.
     // SAFETY: sp is a 2-element array the syscall fills with valid fds.
     anyhow::ensure!(
@@ -196,7 +196,7 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
     }
 
     // Undo the early-boot block: from here signals land in the handler.
-    let mut all = sigset(&[]);
+    let mut all: libc::sigset_t = sigset(&[]);
     // SAFETY: all is a live sigset_t.
     unsafe { libc::sigfillset(&mut all) };
     sigprocmask(libc::SIG_UNBLOCK, &all);

@@ -251,8 +251,8 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     }
 
     fn fork_initial(&mut self) {
-        let now = Instant::now();
-        let count = match self.cfg.pm {
+        let now: Instant = Instant::now();
+        let count: usize = match self.cfg.pm {
             PmMode::Static => self.cfg.processes,
             PmMode::Dynamic {
                 min_spare,
@@ -744,7 +744,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             let now = Instant::now();
 
             // 1. Drain the self-pipe fully; defer the reap until after.
-            let mut got_chld = false;
+            let mut got_chld: bool = false;
             if n > 0 && (fds[0].revents & libc::POLLIN) != 0 {
                 let mut buf = [0u8; 64];
                 for b in drain_pipe(self.self_pipe.rd.as_raw_fd(), &mut buf) {

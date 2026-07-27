@@ -101,10 +101,10 @@ pub fn run(
 ) -> anyhow::Result<StopReason> {
     // Handlers exist only from here (after MINIT); the fork bracket blocks
     // around each fork so no handler runs in a child window.
-    let self_pipe = signals::install_master_signals()?;
-    let lifeline = Lifeline::create()?;
+    let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
+    let lifeline: Lifeline = Lifeline::create()?;
     // Held to end of scope: Drop unlinks the pidfile on every exit path.
-    let _pidfile = match &cfg.pidfile {
+    let _pidfile: Option<pidfile::PidFile> = match &cfg.pidfile {
         Some(p) => Some(pidfile::PidFile::write(p)?),
         None => None,
     };
