@@ -136,7 +136,7 @@ while ($http->handleRequest($handler)) {
 
 The config class picks the plugin; `create_plugin_handler()` throws a `Rapira\RapiraException` if no handler matches the config class, or outside worker mode (classic mode has no resident loop). `$http->config->info` describes the plugin the config targets.
 
-`handleRequest()` blocks until shutdown, so one worker script drives one handler: a loop on a second handler is reached only after the first returns `false`.
+`handleRequest()` returns after each request; the loop around it is what runs until shutdown. So one worker script drives one handler — a loop on a second handler is reached only once the first returns `false`.
 
 `$http->getInfo()` returns this worker's live counters — `state`, `pid`, `queued`, `handled`, `errors`, `recycles`, `restarts` — read from its scoreboard slot, except `queued`, which is the current depth of its job intake.
 
