@@ -495,8 +495,103 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
     assert_eq!(status, 200, "worker still serves after no-context output");
     let logged = LOG_CAPTURE.lock().unwrap();
     assert!(
-        logged.iter().any(|l| l.contains("WORKER-BOOT-OUTPUT")),
+        logged
+            .iter()
+            .any(|c| c.message.contains("WORKER-BOOT-OUTPUT")),
         "worker bootstrap output must be logged (captured: {logged:?})"
+    );
+    Ok(())
+}
+
+/// Levels of the `php`-target records carrying `mark`.
+fn php_levels(logged: &[integration_tests::Captured], mark: &str) -> Vec<log::Level> {
+    logged
+        .iter()
+        .filter(|c| c.target == "php" && c.message.contains(mark))
+        .map(|c| c.level)
+        .collect()
+}
+
+#[test]
+fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    LOG_CAPTURE.lock().unwrap().clear();
+
+    let r = Rapira::start(Mode::Worker(fixture("error-levels-worker.php")))?;
+    let h = r.handle()?;
+    for step in ["deprecated", "warn", "boom"] {
+        let uri = format!("/?step={step}");
+        let _ = drain(h.handle_blocking(req(&uri, "error-levels-worker.php"))?);
+    }
+    drop(h);
+    r.shutdown();
+
+    // display_errors sends the text to the body and log_errors is off, so the teardown line is
+    // the only php-target record per request -- the exact counts also catch double logging
+    let logged = LOG_CAPTURE.lock().unwrap();
+    assert_eq!(
+        php_levels(&logged, "MASKED-DEPRECATION"),
+        vec![log::Level::Trace],
+        "a diagnostic the script masked must not reach error (captured: {logged:?})"
+    );
+    assert_eq!(
+        php_levels(&logged, "REPORTED-WARNING"),
+        vec![log::Level::Warn],
+        "an unmasked E_USER_WARNING logs at warn (captured: {logged:?})"
+    );
+    assert_eq!(
+        php_levels(&logged, "REPORTED-FATAL"),
+        vec![log::Level::Error],
+        "an uncaught throw stays an error-level diagnostic (captured: {logged:?})"
+    );
+    Ok(())
+}
+
+// error_reporting(0) masks every type php-src would mask, fatals included; the recycle it
+// causes still has to be explained, so fatals are exempt from the mask.
+#[test]
+fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    LOG_CAPTURE.lock().unwrap().clear();
+
+    // own worker: error_reporting(0) is restored per cycle, so it would leak into later jobs
+    let r = Rapira::start(Mode::Worker(fixture("error-levels-worker.php")))?;
+    let h = r.handle()?;
+    let _ = drain(h.handle_blocking(req("/?step=silent-fatal", "error-levels-worker.php"))?);
+    drop(h);
+    r.shutdown();
+
+    let logged = LOG_CAPTURE.lock().unwrap();
+    assert_eq!(
+        php_levels(&logged, "SILENCED-FATAL"),
+        vec![log::Level::Error],
+        "a fatal stays visible however the script masks it (captured: {logged:?})"
+    );
+    Ok(())
+}
+
+// log_errors routes the diagnostic through the SAPI log callback too; both paths must agree.
+#[test]
+fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    LOG_CAPTURE.lock().unwrap().clear();
+
+    let r = Rapira::start(Mode::Worker(fixture("error-levels-worker.php")))?;
+    let h = r.handle()?;
+    let (status, _) = drain(h.handle_blocking(req("/?step=logged", "error-levels-worker.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200);
+    let logged = LOG_CAPTURE.lock().unwrap();
+    let levels = php_levels(&logged, "LOGGED-DEPRECATION");
+    assert_eq!(
+        levels,
+        vec![log::Level::Debug; 2],
+        "one record from the log callback, one from the teardown slot, both at debug (captured: {logged:?})"
     );
     Ok(())
 }

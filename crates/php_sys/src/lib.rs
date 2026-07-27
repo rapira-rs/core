@@ -4,6 +4,7 @@ pub mod bindings;
 pub mod callbacks;
 pub mod classic_worker;
 pub mod context;
+pub mod diagnostics;
 pub mod executor;
 pub mod handler;
 pub mod module;
@@ -31,6 +32,7 @@ pub const FAILURE: c_int = -1;
 // `Outcome::from_c` (unexpected values fall back to `Bailout`) rather than transmuted here.
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;
+    pub fn rapira_eg() -> *mut zend_executor_globals;
     pub fn rapira_pg() -> *mut php_core_globals;
     pub fn rapira_finish_output() -> c_int;
     pub fn rapira_init_call_stack();
