@@ -24,6 +24,8 @@ jobs:
             - uses: shivammathur/setup-php@v2
               with:
                   php-version: "8.5"
+                  # left unset, the cached PHP tarball keeps its coverage driver enabled
+                  coverage: none
               env:
                   phpts: nts
 

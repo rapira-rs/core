@@ -120,7 +120,14 @@ pub struct Captured {
     pub message: String,
 }
 
-pub static LOG_CAPTURE: Mutex<Vec<Captured>> = Mutex::new(Vec::new());
+static LOG_CAPTURE: Mutex<Vec<Captured>> = Mutex::new(Vec::new());
+
+/// The captured records. A failing assertion holds this guard while it panics, so the lock is
+/// recovered rather than unwrapped: otherwise one real failure poisons the buffer and every
+/// later test in the binary dies on `PoisonError` instead of its own assertion.
+pub fn captured() -> sync::MutexGuard<'static, Vec<Captured>> {
+    LOG_CAPTURE.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 struct CaptureLogger;
 impl log::Log for CaptureLogger {
@@ -128,13 +135,11 @@ impl log::Log for CaptureLogger {
         true
     }
     fn log(&self, record: &log::Record) {
-        if let Ok(mut buf) = LOG_CAPTURE.lock() {
-            buf.push(Captured {
-                level: record.level(),
-                target: record.target().to_owned(),
-                message: record.args().to_string(),
-            });
-        }
+        captured().push(Captured {
+            level: record.level(),
+            target: record.target().to_owned(),
+            message: record.args().to_string(),
+        });
     }
     fn flush(&self) {}
 }

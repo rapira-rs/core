@@ -23,11 +23,27 @@ jobs:
         if: runner.os == 'Linux'
         with:
           php-version: ${{ matrix.php }}
+          # left unset, the cached PHP tarball keeps its coverage driver enabled; it overrides
+          # zend_error_cb and zend_execute_ex, so the embed SAPI reports diagnostics through the
+          # extension instead of php_error_cb and runs without JIT. `extensions:` is additive and
+          # cannot remove it.
+          coverage: none
           # keep in sync with ci/php-configure-flags.txt
           extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, opcache, openssl, pdo_sqlite, phar, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
           phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning
+
+      # `coverage: none` above disables it; assert, so a driver leaking back in fails here
+      # instead of surfacing as diagnostics that never went through php_error_cb
+      - name: Verify no coverage driver in the PHP build
+        if: runner.os == 'Linux'
+        run: |
+          if php -m | grep -qiE '^(xdebug|pcov)$'; then
+            echo "::error::a PHP coverage driver is enabled; it overrides zend_error_cb and JIT in the embed SAPI"
+            php -m
+            exit 1
+          fi
 
       - name: Build deps for bindgen/cc (Linux)
         if: runner.os == 'Linux'

@@ -1,6 +1,6 @@
 use std::thread;
 
-use integration_tests::{LOG_CAPTURE, drain, fixture, init_log_capture, php_lock, req};
+use integration_tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 use php_sys::{Mode, Rapira};
 
 // this test works on both zts and nts
@@ -484,7 +484,7 @@ fn worker_session_isolation() -> anyhow::Result<()> {
 fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
-    LOG_CAPTURE.lock().unwrap().clear(); // drop anything captured by earlier tests
+    captured().clear(); // drop anything captured by earlier tests
 
     let r = Rapira::start(Mode::Worker(fixture("boot-output-worker.php")))?;
     let h = r.handle()?;
@@ -493,7 +493,7 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
     r.shutdown();
 
     assert_eq!(status, 200, "worker still serves after no-context output");
-    let logged = LOG_CAPTURE.lock().unwrap();
+    let logged = captured();
     assert!(
         logged
             .iter()
@@ -503,11 +503,31 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Levels of the `php`-target records carrying `mark`.
-fn php_levels(logged: &[integration_tests::Captured], mark: &str) -> Vec<log::Level> {
+/// Levels of the worker's teardown last-error records carrying `mark`. Anchored on that line's
+/// own prefix: an extension that hooks the error callback logs its stack frames on the same
+/// target, and a frame naming the marker is not a diagnostic record.
+fn last_error_levels(logged: &[integration_tests::Captured], mark: &str) -> Vec<log::Level> {
+    php_levels(logged, mark, true)
+}
+
+/// Levels of the SAPI log-callback records carrying `mark` — the `php` target minus the
+/// teardown line.
+fn log_callback_levels(logged: &[integration_tests::Captured], mark: &str) -> Vec<log::Level> {
+    php_levels(logged, mark, false)
+}
+
+fn php_levels(
+    logged: &[integration_tests::Captured],
+    mark: &str,
+    teardown: bool,
+) -> Vec<log::Level> {
     logged
         .iter()
-        .filter(|c| c.target == "php" && c.message.contains(mark))
+        .filter(|c| {
+            c.target == "php"
+                && c.message.starts_with("last error: ") == teardown
+                && c.message.contains(mark)
+        })
         .map(|c| c.level)
         .collect()
 }
@@ -516,7 +536,7 @@ fn php_levels(logged: &[integration_tests::Captured], mark: &str) -> Vec<log::Le
 fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
-    LOG_CAPTURE.lock().unwrap().clear();
+    captured().clear();
 
     let r = Rapira::start(Mode::Worker(fixture("error-levels-worker.php")))?;
     let h = r.handle()?;
@@ -529,19 +549,19 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
 
     // display_errors sends the text to the body and log_errors is off, so the teardown line is
     // the only php-target record per request -- the exact counts also catch double logging
-    let logged = LOG_CAPTURE.lock().unwrap();
+    let logged = captured();
     assert_eq!(
-        php_levels(&logged, "MASKED-DEPRECATION"),
+        last_error_levels(&logged, "MASKED-DEPRECATION"),
         vec![log::Level::Trace],
         "a diagnostic the script masked must not reach error (captured: {logged:?})"
     );
     assert_eq!(
-        php_levels(&logged, "REPORTED-WARNING"),
+        last_error_levels(&logged, "REPORTED-WARNING"),
         vec![log::Level::Warn],
         "an unmasked E_USER_WARNING logs at warn (captured: {logged:?})"
     );
     assert_eq!(
-        php_levels(&logged, "REPORTED-FATAL"),
+        last_error_levels(&logged, "REPORTED-FATAL"),
         vec![log::Level::Error],
         "an uncaught throw stays an error-level diagnostic (captured: {logged:?})"
     );
@@ -554,7 +574,7 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
 fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
-    LOG_CAPTURE.lock().unwrap().clear();
+    captured().clear();
 
     // own worker: error_reporting(0) is restored per cycle, so it would leak into later jobs
     let r = Rapira::start(Mode::Worker(fixture("error-levels-worker.php")))?;
@@ -563,9 +583,9 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     drop(h);
     r.shutdown();
 
-    let logged = LOG_CAPTURE.lock().unwrap();
+    let logged = captured();
     assert_eq!(
-        php_levels(&logged, "SILENCED-FATAL"),
+        last_error_levels(&logged, "SILENCED-FATAL"),
         vec![log::Level::Error],
         "a fatal stays visible however the script masks it (captured: {logged:?})"
     );
@@ -573,11 +593,12 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
 }
 
 // log_errors routes the diagnostic through the SAPI log callback too; both paths must agree.
+// Assumes php_error_cb owns that callback: an extension that hooks it reports at its own level.
 #[test]
 fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
-    LOG_CAPTURE.lock().unwrap().clear();
+    captured().clear();
 
     let r = Rapira::start(Mode::Worker(fixture("error-levels-worker.php")))?;
     let h = r.handle()?;
@@ -586,12 +607,16 @@ fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
     r.shutdown();
 
     assert_eq!(status, 200);
-    let logged = LOG_CAPTURE.lock().unwrap();
-    let levels = php_levels(&logged, "LOGGED-DEPRECATION");
+    let logged = captured();
     assert_eq!(
-        levels,
-        vec![log::Level::Debug; 2],
-        "one record from the log callback, one from the teardown slot, both at debug (captured: {logged:?})"
+        log_callback_levels(&logged, "LOGGED-DEPRECATION"),
+        vec![log::Level::Debug],
+        "the log callback reports a deprecation at debug (captured: {logged:?})"
+    );
+    assert_eq!(
+        last_error_levels(&logged, "LOGGED-DEPRECATION"),
+        vec![log::Level::Debug],
+        "so does the teardown slot (captured: {logged:?})"
     );
     Ok(())
 }
