@@ -18,6 +18,7 @@ struct PhpBuild {
 }
 
 fn main() -> anyhow::Result<()> {
+    println!("cargo:rustc-check-cfg=cfg(php84)");
     println!("cargo:rustc-check-cfg=cfg(php85)");
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=PHP_CONFIG");
@@ -29,8 +30,12 @@ fn main() -> anyhow::Result<()> {
     }
     println!("cargo:rustc-link-lib=dylib=php");
 
+    // `php84` covers every version below 8.5, not just 8.4: those are the ones whose
+    // OPcache gates startup on a SAPI-name allowlist (see build_sapi_module).
     if php.version >= (8, 5) {
         println!("cargo:rustc-cfg=php85");
+    } else {
+        println!("cargo:rustc-cfg=php84");
     }
 
     let mut c = cc::Build::new();
