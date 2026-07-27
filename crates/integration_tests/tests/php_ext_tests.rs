@@ -207,3 +207,10 @@ fn filter_success() -> anyhow::Result<()> {
 fn filter_exception() -> anyhow::Result<()> {
     exception("php_ext/filter-worker.php", "filter:a@b.com")
 }
+
+// No `exception` counterpart: this guards that OPcache actually started under our SAPI
+// name, which PHP <= 8.4 gates on an allowlist (see build_sapi_module). Nothing to throw.
+#[test]
+fn opcache_success() -> anyhow::Result<()> {
+    success("php_ext/opcache-worker.php", "opcache:enabled")
+}

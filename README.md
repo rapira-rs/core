@@ -11,6 +11,7 @@ Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HT
 - C compiler and `pkg-config` (the build compiles `wrapper.c`/`module.c` against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, NTS, built with the embed SAPI (`--enable-embed=shared`, provides `libphp.so`; `libphp.dylib` on macOS). ZTS builds are rejected at compile time. `ci/php-configure-flags.txt` has the full configure line used for release builds.
+- On 8.4 builds the SAPI registers itself as `fastcgi`, because OPcache on that version starts only for a fixed list of SAPI names; `PHP_SAPI` and `php_sapi_name()` report `rapira` on 8.5+. phpinfo's *Server API* row reads `Rapira` on both.
 
 Install PHP with the embed SAPI from your package manager:
 

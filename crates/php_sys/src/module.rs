@@ -7,6 +7,14 @@ use std::{
 
 pub(crate) fn build_sapi_module() -> sapi_module_struct {
     sapi_module_struct {
+        // OPcache <= 8.4 starts only for SAPI names on accel_find_sapi()'s allowlist; an
+        // unlisted name leaves accel_startup_ok false, so the pre-fork MINIT never creates
+        // the SHM. "fastcgi" is on that allowlist and is referenced nowhere else in php-src.
+        // 8.5 removed the allowlist:
+        // https://github.com/php/php-src/commit/3088d6406847dd425dd43122f5de57cc97aa4408
+        #[cfg(php84)]
+        name: c"fastcgi".as_ptr() as *mut c_char,
+        #[cfg(not(php84))]
         name: c"rapira".as_ptr() as *mut c_char,
         pretty_name: c"Rapira".as_ptr() as *mut c_char,
         startup: Some(callbacks::sapi_startup_cb),
