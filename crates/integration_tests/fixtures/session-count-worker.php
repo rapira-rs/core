@@ -4,6 +4,7 @@ $handler = static function (): void {
 	$_SESSION['count'] = isset($_SESSION['count']) ? $_SESSION['count'] + 1 : 0;
 	echo "Count: {$_SESSION['count']}\n";
 };
-while (\rapira_handle_request($handler)) {
+$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
+while ($http->handleRequest($handler)) {
 	gc_collect_cycles();
 }

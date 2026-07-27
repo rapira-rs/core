@@ -67,7 +67,7 @@ pub fn worker_body(
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { php_sys::rapira_child_init() };
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
-    let hooks = WorkerHooks {
+    let hooks: WorkerHooks = WorkerHooks {
         max_requests: effective_quota(max_requests),
         on_quota: Some(Box::new({
             let stopper = stopper.clone();
@@ -91,14 +91,14 @@ pub fn worker_body(
 
     extension_host::spawn_lifeline_watch(env.lifeline);
 
-    let running = host.run(handle, script);
+    let running: extension_host::Running = host.run(handle, script);
     let _ = stopper.set(running.stopper());
     // Quota/unhealthy may have fired before the stopper existed.
     if WORKER_EXIT.load(SeqCst) != -1 {
         stopper.get().expect("just set").stop();
     }
 
-    let outcomes = running.serve_worker();
+    let outcomes: Vec<Result<(), String>> = running.serve_worker();
     drop(rapira); // joins the PHP thread; module teardown stays with the master
 
     // A decided protocol code (recycle/unhealthy) wins: those carry supervision

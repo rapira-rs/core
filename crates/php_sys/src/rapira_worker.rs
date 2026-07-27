@@ -34,7 +34,8 @@ pub enum WorkerExit {
     Restart, // worker_main drops PhpThread and builds a fresh one
 }
 
-// What the C `rapira_handle_request` does after a worker-loop turn. Keep in sync with module.c.
+// What the C `HttpHandler::handleRequest` does after a worker-loop turn. Keep in
+// sync with plugin_handler.c.
 #[repr(i32)]
 enum HandleAction {
     Stop = 0,     // clean loop exit (intake channel closed) -> RETURN_BOOL(false)
@@ -49,6 +50,12 @@ struct WorkerChan {
 
 fn worker_recycle() -> bool {
     WORKER.with_borrow(|w| w.as_ref().is_some_and(|wc| wc.recycle))
+}
+
+/// Whether the resident worker loop owns this thread. `WORKER` is installed by
+/// `rapira_worker` only, so this is false under `classic_worker`.
+pub(crate) fn worker_mode_active() -> bool {
+    WORKER.with_borrow(|w| w.is_some())
 }
 
 fn set_worker_recycle() {
@@ -132,7 +139,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
 }
 
 /// # Safety
-/// Invoked from C (the `rapira_handle_request` PHP function) once per worker-loop
+/// Invoked from C (`HttpHandler::handleRequest`) once per worker-loop
 /// iteration. `fci` and `fcc` must be valid, non-null pointers produced by
 /// `Z_PARAM_FUNC` and remain valid for the call. Must run on the resident worker
 /// thread whose `WORKER` thread-local is initialized, inside its active request.
@@ -212,7 +219,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     }
 }
 
-// worker-mode wrapper, still called from inside the PHP loop (via rapira_handle_request):
+// worker-mode wrapper, called from inside the PHP loop (via HttpHandler::handleRequest):
 fn next_job() -> Option<Job> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;

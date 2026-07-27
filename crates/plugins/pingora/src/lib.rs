@@ -265,7 +265,7 @@ impl ProxyHttp for PhpProxy {
         // framed body (Content-Length or chunked) HTTP/1.1 falls back to close-delimiting,
         // which forces a connection close per request — no keepalive, a fresh 64 KiB
         // accept buffer every time. A Content-Length keeps connections alive.
-        let response = self.php.exec(request).await.map_err(|e| {
+        let response: extension_api::Response = self.php.exec(request).await.map_err(|e| {
             Error::explain(
                 ErrorType::HTTPStatus(502),
                 format!("php exec failed: {e:#}"),

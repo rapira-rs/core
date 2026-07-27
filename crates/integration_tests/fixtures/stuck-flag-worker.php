@@ -9,7 +9,8 @@ class BailWrapper
 	}
 }
 stream_wrapper_register('bail', BailWrapper::class); // is_url=0 local wrapper
-while (rapira_handle_request(static function (): void {
+$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
+while ($http->handleRequest(static function (): void {
 	if (($_GET['step'] ?? '') === 'boom') {
 		include 'bail://x'; // sets PG(in_user_include)=1, then bails -> restore (userspace.c:371) skipped
 		return;

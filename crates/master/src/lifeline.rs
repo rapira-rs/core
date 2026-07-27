@@ -25,7 +25,7 @@ impl Lifeline {
         let mut fds = [0 as RawFd; 2];
         #[cfg(target_os = "linux")]
         // SAFETY: fds is a 2-element array the syscall fills with valid fds.
-        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        let rc: i32 = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
         #[cfg(not(target_os = "linux"))]
         let rc = {
             // SAFETY: fds is a 2-element array the syscall fills with valid fds.

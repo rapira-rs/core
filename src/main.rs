@@ -5,6 +5,7 @@ use log::info;
 use php_sys::{Mode, Rapira};
 use rapira_config::{Listen, Overrides, PmMode, Settings};
 use rapira_pingora::{Config as HttpConfig, HttpServer, Listen as HttpListen};
+use rapira_scoreboard::Scoreboard;
 use std::path::PathBuf;
 
 mod worker;
@@ -90,7 +91,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // rapira_config::Listen and rapira_pingora::Listen are distinct types on purpose: the
     // extension crate stays independent of core's config crate, and core owns the one
     // mapping between them (a From impl is barred by the orphan rule anyway).
-    let http_cfg = HttpConfig {
+    let http_cfg: HttpConfig = HttpConfig {
         listen: match settings.http.listen {
             Listen::Tcp(addr) => HttpListen::Tcp(addr),
             Listen::Unix(path) => HttpListen::Unix(path),
@@ -111,9 +112,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // Master-side pre-fork binds: every worker inherits these fds; the master
     // holds them for its whole life so respawned generations re-inherit.
-    let mut prepare_ctx = PrepareCtx::new();
+    let mut prepare_ctx: PrepareCtx = PrepareCtx::new();
     host.prepare_all(&mut prepare_ctx)?;
-    let listeners = prepare_ctx.listener_fds().to_vec();
+    let listeners: Vec<i32> = prepare_ctx.listener_fds().to_vec();
 
     // Both forms run the same worker model; --classic only changes whether the script is
     // re-included per request (Classic) or stays resident (Worker).
@@ -125,7 +126,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // PHP MINIT once, in the still-single-threaded master (opcache SHM created
     // here is shared with every forked worker). Workers never tear this down.
-    let module = Rapira::boot_master()?;
+    let module: php_sys::PhpModule = Rapira::boot_master()?;
 
     // Reload needs at most `processes + 1` slots (one overlap headroom worker);
     // 2x is generous slack. Reject configs the board cannot hold instead of
@@ -136,9 +137,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         settings.pool.processes,
         rapira_scoreboard::SB_MAX_SLOTS / 2
     );
-    let scoreboard = rapira_scoreboard::Scoreboard::create(settings.pool.processes * 2)?;
+    let scoreboard: Scoreboard = Scoreboard::create(settings.pool.processes * 2)?;
 
-    let cfg = rapira_master::MasterConfig {
+    let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {
         processes: settings.pool.processes,
         pm: match settings.pm.mode {
             PmMode::Static => rapira_master::PmMode::Static,
@@ -157,16 +158,17 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         pidfile: settings.pm.pidfile.clone(),
         listeners,
     };
-    let max_requests = settings.pm.max_requests;
+    let max_requests: u64 = settings.pm.max_requests;
 
     // The closure runs ONLY in freshly-forked children: each child's COW copy
     // of `host_cell` is Some, taken exactly once per child. The parent's copy
     // stays untouched (and keeps the prepared fds alive for re-inheritance).
-    let mut host_cell = Some(host);
-    let stop = rapira_master::run(cfg, scoreboard, move |env| {
-        let host = host_cell.take().expect("fresh child owns the host copy");
-        worker::worker_body(env, host, mode.clone(), script.clone(), max_requests)
-    });
+    let mut host_cell: Option<ExtensionHost> = Some(host);
+    let stop: Result<rapira_master::StopReason, anyhow::Error> =
+        rapira_master::run(cfg, scoreboard, move |env: rapira_master::WorkerEnv| {
+            let host: ExtensionHost = host_cell.take().expect("fresh child owns the host copy");
+            worker::worker_body(env, host, mode.clone(), script.clone(), max_requests)
+        });
 
     match stop {
         Ok(rapira_master::StopReason::Drained) => {

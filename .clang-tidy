@@ -1,6 +1,7 @@
 ---
-# Survey mode: every check clang-tidy has, including org-specific style guides
-# (llvm-*, google-*, altera-*, fuchsia-*, ...) that contradict each other.
+# Survey mode: every check clang-tidy has except altera-* (Intel FPGA/OpenCL rules
+# that fire on ordinary host C), including org-specific style guides (llvm-*,
+# google-*, fuchsia-*, ...) that contradict each other.
 # For day-to-day work, replace the Checks line with the curated set below.
 #
 # Curated set (tested against module.c/wrapper.c, Zend-macro noise excluded):
@@ -23,7 +24,7 @@
 #   -misc-header-include-cycle,
 #   -misc-include-cleaner,
 #   -misc-use-internal-linkage
-Checks: '*'
+Checks: '*,-altera-*'
 WarningsAsErrors: 'bugprone-*,cert-*,clang-analyzer-*,concurrency-*'
 HeaderFilterRegex: 'crates/php_sys/.*\.h$'
 FormatStyle: file

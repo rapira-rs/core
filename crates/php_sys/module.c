@@ -1,8 +1,6 @@
 #include "wrapper.h"
+#include "plugin_handler.h"
 
-extern int rapira_rs_handle_request(
-    zend_fcall_info *fci,
-    zend_fcall_info_cache *fcc); // Rust: main handler: rapira_worker.rs
 extern void rapira_rs_finish_response(void); // Rust: ctx.finish()
 
 // ub_write's client-abort raise (php_handle_aborted_connection,
@@ -25,13 +23,6 @@ enum {
     BAILOUT = 1,
     EXIT = 2,
     THROW = 3,
-};
-
-// Keep in sync with rapira_worker.rs HandleAction.
-enum {
-    RAPIRA_STOP = 0,
-    RAPIRA_CONTINUE = 1,
-    RAPIRA_RECYCLE = 2,
 };
 
 // Guard a teardown step: on bailout, flag it and close the observer frames the
@@ -64,31 +55,6 @@ int rapira_finish_output(void) {
     return OK;
 }
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_handle_request, 0, 1,
-                                        _IS_BOOL, 0)
-ZEND_ARG_INFO(0, handler)
-ZEND_END_ARG_INFO()
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_finish_request, 0, 0,
-                                        _IS_BOOL, 0)
-ZEND_END_ARG_INFO()
-
-PHP_FUNCTION(rapira_handle_request) {
-    zend_fcall_info fci;
-    zend_fcall_info_cache fcc;
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-    Z_PARAM_FUNC(fci, fcc)
-    ZEND_PARSE_PARAMETERS_END();
-    int action = rapira_rs_handle_request(&fci, &fcc);
-    if (action == RAPIRA_RECYCLE) {
-        // A teardown/handler bailout left the executor corrupt (imbalanced VM stack, half-torn
-        // request). Unwind the whole resident script - over PHP frames only, up to
-        // php_execute_script's zend_try - so no bytecode runs over it; run_cycle then does the full
-        // php_request_shutdown + recycle. RETURN_BOOL is never reached on this path.
-        zend_bailout();
-    }
-    RETURN_BOOL(action == RAPIRA_CONTINUE);
-}
-
 PHP_FUNCTION(rapira_finish_request) {
     ZEND_PARSE_PARAMETERS_NONE();
     if (rapira_finish_output()) { // non-zero == BAILOUT: re-raise so
@@ -98,20 +64,20 @@ PHP_FUNCTION(rapira_finish_request) {
     RETURN_TRUE;
 }
 
-static const zend_function_entry rapira_functions[] = {
-    PHP_FE(rapira_handle_request, arginfo_rapira_handle_request)
-        PHP_FE(rapira_finish_request, arginfo_rapira_finish_request)
-            PHP_FE_END};
+PHP_MINIT_FUNCTION(rapira) {
+    rapira_register_classes();
+    return SUCCESS;
+}
 
 zend_module_entry rapira_module_entry = {
     STANDARD_MODULE_HEADER,
     "rapira",
-    rapira_functions,
+    NULL, /* functions: installed by rapira_process_init */
+    PHP_MINIT(rapira),
     NULL,
     NULL,
     NULL,
-    NULL,
-    NULL, /* MINIT, MSHUTDOWN, RINIT, RSHUTDOWN, MINFO */
+    NULL, /* MSHUTDOWN, RINIT, RSHUTDOWN, MINFO */
     "0.1.0",
     STANDARD_MODULE_PROPERTIES};
 
@@ -323,6 +289,8 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     zval retval;
     ZVAL_UNDEF(&retval);
     fci->size = sizeof *fci;
+    // fci does not outlive this frame, so pointing it at a local is fine.
+    // cppcheck-suppress autoVariables
     fci->retval = &retval;
     fci->param_count = 0;
     fci->named_params = NULL;
@@ -415,7 +383,7 @@ int rapira_request_teardown(void) {
     // a bailout here abandons the observer frames of everything it longjmps
     // over. php_request_shutdown's zend_observer_fcall_end_all() only reaches
     // them while the VM stack still holds them, and the PHP worker loop pops
-    // that stack the moment rapira_handle_request returns - close them here,
+    // that stack the moment HttpHandler::handleRequest returns - close them here,
     // where they're intact
     zend_execute_data *observed_base = EG(current_observed_frame);
 
@@ -476,8 +444,18 @@ void rapira_clear_last_error(void) {
 
 // once per process, before sapi_startup
 void rapira_process_init(void) {
+    // ext_functions[] is static to plugin_handler.c and .functions needs a constant
+    // initializer, so wire it up here - before php_module_startup reads the entry.
+    rapira_module_entry.functions = rapira_php_functions();
+
 #if defined(SIGPIPE) && defined(SIG_IGN)
-    signal(SIGPIPE, SIG_IGN);
+    // Ignore SIGPIPE so writes to a hung-up client return EPIPE instead of killing
+    // the worker. signal() only fails with EINVAL, which SIGPIPE/SIG_IGN cannot hit;
+    // abort rather than run a worker any client could kill.
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("rapira: signal(SIGPIPE, SIG_IGN)");
+        abort();
+    }
 #endif
     zend_signal_startup();
 }
@@ -496,7 +474,7 @@ void rapira_child_init(void) {
   nothing reclaims the resource in a resident request, so sweep dead ones
   before serving the next job. Safe here: the previous request is finished. */
 void rapira_release_temporary_streams(void) {
-    zend_resource *val;
+    zend_resource *val = NULL;
     int stream_type = php_file_le_stream();
     ZEND_HASH_FOREACH_PTR(&EG(regular_list), val) {
         if (val->type == stream_type) {

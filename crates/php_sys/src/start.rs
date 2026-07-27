@@ -193,6 +193,19 @@ fn worker_main(mode: Mode, rx: Receiver<Job>) {
     }
 }
 
+/// Jobs waiting in the intake channel. 0 when the receiver is not installed — a
+/// best-effort gauge, never a lock.
+pub(crate) fn intake_depth() -> u64 {
+    JOB_RX
+        .try_with(|cell| {
+            cell.try_borrow()
+                .ok()
+                .and_then(|rx| rx.as_ref().map(|r| r.len() as u64))
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+}
+
 /// Block for the next job (shutdown-aware): `None` means the intake channel
 /// closed — every `Sender`/`RapiraHandle` was dropped, i.e. Rapira is shutting
 /// down. The single place the receiver is consumed; the classic loop,

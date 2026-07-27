@@ -6,7 +6,23 @@
 PHP_CONFIG ?= php-config
 LOCATE_PHP = PREFIX=$$($(PHP_CONFIG) --prefix 2>/dev/null); test -n "$$PREFIX" || { echo "$(PHP_CONFIG) not found; set PHP_CONFIG=/path/to/php-config"; exit 1; }; LIBPHP=$$(find "$$PREFIX/lib64" "$$PREFIX/lib" "$$PREFIX"/lib/php* -maxdepth 1 \( -name 'libphp*.so' -o -name 'libphp*.dylib' \) 2>/dev/null | head -1); test -n "$$LIBPHP" || { echo "no libphp*.so/.dylib under $$PREFIX; install your distro's PHP embed package or build PHP with --enable-embed=shared"; exit 1; }; LIBDIR=$$(dirname "$$LIBPHP"); mkdir -p target/phplib || exit 1; case "$$LIBPHP" in *.dylib) ln -sf "$$LIBPHP" target/phplib/libphp.dylib || exit 1;; *) ln -sf "$$LIBPHP" target/phplib/libphp.so || exit 1;; esac; PHPLIB="$$PWD/target/phplib"
 
-.PHONY: test test_nts test_e2e coverage
+# Regenerate crates/php_sys/rapira_arginfo.h from rapira.stub.php. The generated
+# header is committed, so only maintainers editing the stub need this. gen_stub
+# unpacks PHP-Parser next to itself on first run (network) and the installed copy
+# sits in a root-owned tree, so run from a writable copy under target/.
+# gen_stub emits arginfo for the PHP it ships with, so run it with that same build
+# rather than whatever `php` PATH resolves to.
+GEN_STUB ?= $(shell $(PHP_CONFIG) --prefix)/lib/php/build/gen_stub.php
+PHP_BIN ?= $(shell $(PHP_CONFIG) --prefix)/bin/php
+
+.PHONY: test test_nts test_e2e coverage stubs
+
+stubs:
+	@test -f "$(GEN_STUB)" || { echo "gen_stub.php not found at $(GEN_STUB); set GEN_STUB=/path/to/gen_stub.php"; exit 1; }
+	@test -x "$(PHP_BIN)" || { echo "php not found at $(PHP_BIN); set PHP_BIN=/path/to/php"; exit 1; }
+	@mkdir -p target/stubgen
+	@cp "$(GEN_STUB)" target/stubgen/gen_stub.php
+	@$(PHP_BIN) target/stubgen/gen_stub.php crates/php_sys/rapira.stub.php
 
 # Sequential recipe (not prerequisites) so `make -j` cannot run the suites
 # concurrently; the e2e servers must not overlap the in-process PHP tests.

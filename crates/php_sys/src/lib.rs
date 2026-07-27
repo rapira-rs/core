@@ -7,6 +7,7 @@ pub mod context;
 pub mod executor;
 pub mod handler;
 pub mod module;
+pub mod plugin_handler;
 pub mod quota;
 pub mod rapira_worker;
 pub mod scoreboard;

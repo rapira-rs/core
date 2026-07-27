@@ -196,7 +196,7 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
     }
 
     // Undo the early-boot block: from here signals land in the handler.
-    let mut all = sigset(&[]);
+    let mut all: libc::sigset_t = sigset(&[]);
     // SAFETY: all is a live sigset_t.
     unsafe { libc::sigfillset(&mut all) };
     sigprocmask(libc::SIG_UNBLOCK, &all);

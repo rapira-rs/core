@@ -13,5 +13,6 @@ $handler = static function (): void {
 	}
 	echo 'sxml:' . (new SimpleXMLElement('<r><v>ok</v></r>'))->v;
 };
-while (\rapira_handle_request($handler)) {
+$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
+while ($http->handleRequest($handler)) {
 }

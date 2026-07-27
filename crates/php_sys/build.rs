@@ -34,7 +34,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut c = cc::Build::new();
-    c.file("wrapper.c").file("module.c");
+    // Zend fixes the parameter list of every entry point it declares through a
+    // macro (INTERNAL_FUNCTION_PARAMETERS' `return_value`, PHP_MINIT_FUNCTION's
+    // INIT_FUNC_ARGS `type`/`module_number`), so an unused one is never actionable here.
+    c.flag_if_supported("-Wno-unused-parameter");
+    c.file("wrapper.c")
+        .file("module.c")
+        .file("plugin_handler.c");
     for d in &php.includes {
         c.include(d);
     }
@@ -66,7 +72,15 @@ fn main() -> anyhow::Result<()> {
         .generate()?
         .write_to_file(PathBuf::from(env::var("OUT_DIR")?).join("bindings.rs"))?;
 
-    for f in ["wrapper.h", "module.c", "wrapper.c", "allowed_bindings.rs"] {
+    for f in [
+        "wrapper.h",
+        "module.c",
+        "wrapper.c",
+        "plugin_handler.c",
+        "plugin_handler.h",
+        "rapira_arginfo.h",
+        "allowed_bindings.rs",
+    ] {
         println!("cargo:rerun-if-changed={f}");
     }
 
