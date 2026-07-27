@@ -19,6 +19,15 @@ fn plugin_handler_serves_requests() -> anyhow::Result<()> {
         body.contains("state=active") && body.contains("handled=0"),
         "getInfo reads the live slot (got: {body:?})"
     );
+    // The fused flavor runs the worker in this process, so the slot's pid is ours.
+    assert!(
+        body.contains(&format!("pid={}", std::process::id())),
+        "getInfo reports this worker's pid (got: {body:?})"
+    );
+    assert!(
+        body.contains("errors=0") && body.contains("recycles=0") && body.contains("restarts=0"),
+        "a clean first request has nothing to report (got: {body:?})"
+    );
 
     // A throwing handler must not take the loop down: the next request still serves.
     // (Status stays 200 here: display_errors is on, so PHP's fatal output commits
@@ -31,8 +40,13 @@ fn plugin_handler_serves_requests() -> anyhow::Result<()> {
     let (after, body) = drain(h.handle_blocking(req("/", "plugin-handler-worker.php"))?);
     assert_eq!(after, 200, "the loop survives the throw (body {body:?})");
     assert!(
-        body.contains("handled=2"),
+        body.contains("handled=2") && body.contains("errors=1"),
         "counters advance across requests (got: {body:?})"
+    );
+    // An uncaught throw is an error response, not corrupt executor state.
+    assert!(
+        body.contains("recycles=0") && body.contains("restarts=0"),
+        "the throw needed no recycle (got: {body:?})"
     );
 
     drop(h);
@@ -63,7 +77,8 @@ fn plugin_handler_class_shape() -> anyhow::Result<()> {
         "prop-readonly=1",
         "write=blocked",
         "instanceof=1",
-        "ctor=blocked ctor=blocked",
+        // HttpHandler, RuntimeInfo, PluginInfo: every class a factory owns.
+        "ctor=blocked ctor=blocked ctor=blocked",
     ] {
         assert!(body.contains(expected), "{expected} (got: {body:?})");
     }
@@ -86,70 +101,46 @@ fn plugin_handler_refused_in_classic_mode() -> anyhow::Result<()> {
     Ok(())
 }
 
-// The in-process harness drives jobs straight through RapiraHandle, bypassing
-// pingora, so it can't observe the 404 — but it proves the config PHP declared at
-// create_plugin_handler is marshaled to the Rust side and readable off the handle.
-// (The pingora-side 404 behavior is the e2e test path_prefix_rejects_before_php.)
+// A config class no plugin claims is the only error the dispatch itself can raise, and
+// userland can reach it by subclassing the abstract base.
 #[test]
-fn handler_config_blob_is_delivered() -> anyhow::Result<()> {
+fn unknown_config_class_is_refused() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("plugin-config-worker.php")))?;
-    let h = r.handle()?;
-
-    let (status, _) = drain(h.handle_blocking(req("/api/x", "plugin-config-worker.php"))?);
-    assert_eq!(status, 200);
-
-    // A served request proves the bootstrap ran, so the config is declared by now.
-    // (Reading before this races the worker thread, which declares at thread start.)
-    let blob = h.handler_config().expect("config declared at bootstrap");
-    let json: serde_json::Value = serde_json::from_slice(&blob)?;
-    assert_eq!(
-        json["pathPrefix"], "/api",
-        "the declared prefix reached Rust verbatim (got: {json})"
-    );
-    assert_eq!(
-        json["info"]["name"], "http",
-        "the plugin slot rides along (got: {json})"
-    );
-
-    drop(h);
-    r.shutdown();
-    Ok(())
-}
-
-// A config the factory cannot serialize, and one the front could never match, must
-// both be refused at declaration time — and neither may disturb the config already
-// declared. Without the encode check, the failed one ships a truncated JSON fragment
-// that the plugin can only read as "nothing declared", silently dropping the prefix.
-#[test]
-fn refused_configs_leave_the_declared_one_intact() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let script = "plugin-config-errors-worker.php";
+    let script = "plugin-unknown-config-worker.php";
     let r = Rapira::start(Mode::Worker(fixture(script)))?;
     let h = r.handle()?;
 
-    let (_, body) = drain(h.handle_blocking(req("/x?probe=utf8", script))?);
-    assert!(
-        body.contains("threw:cannot serialize"),
-        "an unencodable config is refused (got: {body:?})"
-    );
-
-    let (_, body) = drain(h.handle_blocking(req("/x?probe=prefix", script))?);
-    assert!(
-        body.contains("threw:pathPrefix must start with '/'"),
-        "a prefix the front cannot match is refused (got: {body:?})"
-    );
-
-    let blob = h
-        .handler_config()
-        .expect("the bootstrap config is still there");
-    let json: serde_json::Value = serde_json::from_slice(&blob)?;
-    assert_eq!(
-        json["pathPrefix"], "/api",
-        "a refused config never reached the plugin (got: {json})"
-    );
-
+    let (_, body) = drain(h.handle_blocking(req("/", script))?);
     drop(h);
     r.shutdown();
+
+    assert!(
+        body.contains("threw:no plugin handler for config UnknownConfig"),
+        "the factory names the class it cannot serve (got: {body:?})"
+    );
+    Ok(())
+}
+
+// A userland subclass of the abstract PluginHandler inherits the no-ctor handler, so
+// `new` throws. It must not then run __destruct over the half-built instance.
+#[test]
+fn blocked_construction_skips_the_destructor() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let script = "plugin-handler-subclass-worker.php";
+    let r = Rapira::start(Mode::Worker(fixture(script)))?;
+    let h = r.handle()?;
+
+    let (_, body) = drain(h.handle_blocking(req("/", script))?);
+    drop(h);
+    r.shutdown();
+
+    assert!(
+        body.contains("threw:Cannot directly construct Foo"),
+        "the subclass inherits the no-ctor handler (got: {body:?})"
+    );
+    assert!(
+        !body.contains("DESTRUCT"),
+        "__destruct must not run on a never-constructed object (got: {body:?})"
+    );
     Ok(())
 }

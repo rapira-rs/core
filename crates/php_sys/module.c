@@ -1,5 +1,5 @@
 #include "wrapper.h"
-#include "handle_config.h"
+#include "plugin_handler.h"
 
 extern void rapira_rs_finish_response(void); // Rust: ctx.finish()
 
@@ -444,16 +444,14 @@ void rapira_clear_last_error(void) {
 
 // once per process, before sapi_startup
 void rapira_process_init(void) {
-    /* gen_stub emits ext_functions[] as a static table, visible only inside
-    handle_config.c, and .functions is a static initializer that cannot call an
-    accessor. Rust calls this immediately before php_module_startup
-    (src/start.rs), so the entry is complete before the engine reads it. */
+    // ext_functions[] is static to plugin_handler.c and .functions needs a constant
+    // initializer, so wire it up here - before php_module_startup reads the entry.
     rapira_module_entry.functions = rapira_php_functions();
 
 #if defined(SIGPIPE) && defined(SIG_IGN)
-    // Ignore SIGPIPE so a write to a hung-up client returns EPIPE instead of
-    // killing the worker. Failure is impossible for SIGPIPE/SIG_IGN (only EINVAL),
-    // but a worker a client can SIGPIPE-kill must not run - so treat it as fatal.
+    // Ignore SIGPIPE so writes to a hung-up client return EPIPE instead of killing
+    // the worker. signal() only fails with EINVAL, which SIGPIPE/SIG_IGN cannot hit;
+    // abort rather than run a worker any client could kill.
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
         perror("rapira: signal(SIGPIPE, SIG_IGN)");
         abort();

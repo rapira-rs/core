@@ -16,38 +16,6 @@ fn static_pool_forks_n_workers() {
     );
 }
 
-// A pathPrefix set on HttpHandlerConfig in PHP reaches the pingora front and is
-// enforced there: a matching path runs PHP, a non-matching path is 404'd without
-// ever waking PHP. Only the real binary exercises pingora, so this is e2e.
-#[test]
-fn path_prefix_rejects_before_php() {
-    let srv = spawn_with_config("plugin-config-worker.php", 1, "");
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-
-    let (ok, body) =
-        http_get(srv.addr, "/api/ping", Duration::from_secs(10)).expect("GET /api/ping");
-    let body = String::from_utf8_lossy(&body);
-    assert_eq!(ok, 200, "matching path is served\n{}", diagnostics(&srv));
-    assert!(
-        body.contains("served:/api/ping"),
-        "PHP ran for the matching path (got: {body:?})\n{}",
-        diagnostics(&srv)
-    );
-
-    // "/apidocs" shares the prefix's bytes but not its first segment: the gate is a
-    // path test, not a string test, so it must be rejected like any other outsider.
-    for path in ["/nope", "/apidocs"] {
-        let (miss, body) = http_get(srv.addr, path, Duration::from_secs(10))
-            .unwrap_or_else(|e| panic!("GET {path}: {e}"));
-        let body = String::from_utf8_lossy(&body);
-        assert_eq!(miss, 404, "pingora rejects {path}\n{}", diagnostics(&srv));
-        assert!(
-            !body.contains("served:"),
-            "PHP must not have run for {path} (got: {body:?})"
-        );
-    }
-}
-
 #[test]
 fn http_round_trip() {
     let srv = spawn_with_config("echo-worker.php", 1, "");

@@ -38,7 +38,9 @@ fn main() -> anyhow::Result<()> {
     // macro (INTERNAL_FUNCTION_PARAMETERS' `return_value`, PHP_MINIT_FUNCTION's
     // INIT_FUNC_ARGS `type`/`module_number`), so an unused one is never actionable here.
     c.flag_if_supported("-Wno-unused-parameter");
-    c.file("wrapper.c").file("module.c").file("handle_config.c");
+    c.file("wrapper.c")
+        .file("module.c")
+        .file("plugin_handler.c");
     for d in &php.includes {
         c.include(d);
     }
@@ -74,8 +76,8 @@ fn main() -> anyhow::Result<()> {
         "wrapper.h",
         "module.c",
         "wrapper.c",
-        "handle_config.c",
-        "handle_config.h",
+        "plugin_handler.c",
+        "plugin_handler.h",
         "rapira_arginfo.h",
         "allowed_bindings.rs",
     ] {

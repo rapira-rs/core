@@ -3,6 +3,7 @@ use Rapira\Plugin\Http\HttpHandler;
 use Rapira\Plugin\Http\HttpHandlerConfig;
 use Rapira\Plugin\Http\RuntimeInfo;
 use Rapira\PluginHandlerConfig;
+use Rapira\PluginInfo;
 use function Rapira\create_plugin_handler;
 
 $http = create_plugin_handler(new HttpHandlerConfig());
@@ -17,7 +18,7 @@ $handler = static function () use ($http): void {
 		'prop-readonly=' . (int) $base->getProperty('info')->isReadOnly(),
 		'instanceof=' . (int) ($http instanceof \Rapira\PluginHandler),
 	];
-	foreach ([HttpHandler::class, RuntimeInfo::class] as $blocked) {
+	foreach ([HttpHandler::class, RuntimeInfo::class, PluginInfo::class] as $blocked) {
 		try {
 			new $blocked();
 			$out[] = 'ctor=allowed';

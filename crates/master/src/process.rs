@@ -197,7 +197,7 @@ pub(crate) fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
 ) -> std::io::Result<libc::pid_t> {
     // Fail in the parent, before the bracket, where the error can be reported;
     // the child inherits its own copy of the dup, the parent's drops on return.
-    let lifeline_rd: std::os::unix::prelude::OwnedFd = lifeline.dup_read_end()?;
+    let lifeline_rd: std::os::fd::OwnedFd = lifeline.dup_read_end()?;
 
     // Block the master signal set around fork so no handler runs in the fork
     // window in either process.

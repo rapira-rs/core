@@ -12,6 +12,11 @@ $handler = static function () use ($http): void {
 	$info = $http->getInfo();
 	echo "plugin={$http->config->info->name}",
 		" state={$info->state}",
+		" pid={$info->pid}",
+		" queued={$info->queued}",
+		" errors={$info->errors}",
+		" recycles={$info->recycles}",
+		" restarts={$info->restarts}",
 		" handled={$info->handled}\n";
 };
 

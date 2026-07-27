@@ -35,7 +35,7 @@ pub enum WorkerExit {
 }
 
 // What the C `HttpHandler::handleRequest` does after a worker-loop turn. Keep in
-// sync with handle_config.c.
+// sync with plugin_handler.c.
 #[repr(i32)]
 enum HandleAction {
     Stop = 0,     // clean loop exit (intake channel closed) -> RETURN_BOOL(false)
@@ -219,7 +219,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     }
 }
 
-// worker-mode wrapper, still called from inside the PHP loop (via HttpHandler::handleRequest):
+// worker-mode wrapper, called from inside the PHP loop (via HttpHandler::handleRequest):
 fn next_job() -> Option<Job> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;

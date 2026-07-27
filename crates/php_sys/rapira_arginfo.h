@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 5f326c8163f7cd7846497fb1e2f3dd7f19254b7a */
+ * Stub hash: 29a91a15b9cf3eb7c0231e7978bf0263e14a2cb5 */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -8,17 +8,7 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_Rapira_create_plugin_handler, 0, 
 	ZEND_ARG_OBJ_INFO(0, config, Rapira\\PluginHandlerConfig, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_PluginInfo___construct, 0, 0, 2)
-	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
-	ZEND_ARG_TYPE_INFO(0, description, IS_STRING, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_PluginHandlerConfig___construct, 0, 0, 1)
-	ZEND_ARG_OBJ_INFO(0, info, Rapira\\PluginInfo, 0)
-ZEND_END_ARG_INFO()
-
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Plugin_Http_HttpHandlerConfig___construct, 0, 0, 0)
-	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, pathPrefix, IS_STRING, 0, "\'\'")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Plugin_Http_HttpHandler_handleRequest, 0, 1, _IS_BOOL, 0)
@@ -30,8 +20,6 @@ ZEND_END_ARG_INFO()
 
 ZEND_FUNCTION(rapira_finish_request);
 ZEND_FUNCTION(Rapira_create_plugin_handler);
-ZEND_METHOD(Rapira_PluginInfo, __construct);
-ZEND_METHOD(Rapira_PluginHandlerConfig, __construct);
 ZEND_METHOD(Rapira_Plugin_Http_HttpHandlerConfig, __construct);
 ZEND_METHOD(Rapira_Plugin_Http_HttpHandler, handleRequest);
 ZEND_METHOD(Rapira_Plugin_Http_HttpHandler, getInfo);
@@ -39,16 +27,6 @@ ZEND_METHOD(Rapira_Plugin_Http_HttpHandler, getInfo);
 static const zend_function_entry ext_functions[] = {
 	ZEND_FE(rapira_finish_request, arginfo_rapira_finish_request)
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "create_plugin_handler"), zif_Rapira_create_plugin_handler, arginfo_Rapira_create_plugin_handler, 0, NULL, NULL)
-	ZEND_FE_END
-};
-
-static const zend_function_entry class_Rapira_PluginInfo_methods[] = {
-	ZEND_ME(Rapira_PluginInfo, __construct, arginfo_class_Rapira_PluginInfo___construct, ZEND_ACC_PUBLIC)
-	ZEND_FE_END
-};
-
-static const zend_function_entry class_Rapira_PluginHandlerConfig_methods[] = {
-	ZEND_ME(Rapira_PluginHandlerConfig, __construct, arginfo_class_Rapira_PluginHandlerConfig___construct, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -67,7 +45,7 @@ static zend_class_entry *register_class_Rapira_PluginInfo(void)
 {
 	zend_class_entry ce, *class_entry;
 
-	INIT_NS_CLASS_ENTRY(ce, "Rapira", "PluginInfo", class_Rapira_PluginInfo_methods);
+	INIT_NS_CLASS_ENTRY(ce, "Rapira", "PluginInfo", NULL);
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_READONLY_CLASS);
 
 	zval property_name_default_value;
@@ -87,7 +65,7 @@ static zend_class_entry *register_class_Rapira_PluginHandlerConfig(void)
 {
 	zend_class_entry ce, *class_entry;
 
-	INIT_NS_CLASS_ENTRY(ce, "Rapira", "PluginHandlerConfig", class_Rapira_PluginHandlerConfig_methods);
+	INIT_NS_CLASS_ENTRY(ce, "Rapira", "PluginHandlerConfig", NULL);
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_ABSTRACT|ZEND_ACC_READONLY_CLASS);
 
 	zval property_info_default_value;
@@ -133,12 +111,6 @@ static zend_class_entry *register_class_Rapira_Plugin_Http_HttpHandlerConfig(zen
 
 	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Plugin\\Http", "HttpHandlerConfig", class_Rapira_Plugin_Http_HttpHandlerConfig_methods);
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Rapira_PluginHandlerConfig, ZEND_ACC_FINAL|ZEND_ACC_READONLY_CLASS);
-
-	zval property_pathPrefix_default_value;
-	ZVAL_UNDEF(&property_pathPrefix_default_value);
-	zend_string *property_pathPrefix_name = zend_string_init("pathPrefix", sizeof("pathPrefix") - 1, 1);
-	zend_declare_typed_property(class_entry, property_pathPrefix_name, &property_pathPrefix_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING));
-	zend_string_release(property_pathPrefix_name);
 
 	return class_entry;
 }

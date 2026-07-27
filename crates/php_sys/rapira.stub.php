@@ -12,15 +12,12 @@ namespace {
 
 namespace Rapira {
     /**
-     * Identity of the plugin a handler config targets. Declared by the plugin,
-     * never filled in by the user.
+     * Identity of the plugin a handler config targets; the concrete config fills it in.
      */
     final readonly class PluginInfo
     {
         public string $name;
         public string $description;
-
-        public function __construct(string $name, string $description) {}
     }
 
     /**
@@ -30,8 +27,6 @@ namespace Rapira {
     abstract readonly class PluginHandlerConfig
     {
         public PluginInfo $info;
-
-        public function __construct(PluginInfo $info) {}
     }
 
     /**
@@ -54,23 +49,21 @@ namespace Rapira {
 }
 
 namespace Rapira\Plugin\Http {
+    /** Declares that this worker serves HTTP. Pass it to create_plugin_handler(). */
     final readonly class HttpHandlerConfig extends \Rapira\PluginHandlerConfig
     {
-        /** Serve only requests under this path; others get 404 without invoking PHP. Empty = all. */
-        public string $pathPrefix;
-
-        public function __construct(string $pathPrefix = '')
-        {
-            $this->pathPrefix = $pathPrefix;
-        }
+        public function __construct() {}
     }
+
     /**
      * Live worker counters. Obtain one from HttpHandler::getInfo().
      */
     final readonly class RuntimeInfo
     {
+        /** One of: starting, idle, active, draining, free. */
         public string $state;
         public int $pid;
+        /** Depth of this worker's job intake right now, not a running total. */
         public int $queued;
         public int $handled;
         public int $errors;
@@ -86,6 +79,7 @@ namespace Rapira\Plugin\Http {
          */
         public function handleRequest(callable $handler): bool {}
 
+        /** This worker's live counters, read at call time. */
         public function getInfo(): RuntimeInfo {}
     }
 }
