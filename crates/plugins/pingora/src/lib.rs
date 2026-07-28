@@ -1,7 +1,7 @@
 //! Rapira HTTP front: a Pingora server that terminates HTTP and streams each request
 //! through PHP via the extension `Php` bridge.
 //!
-//! The extension-host runtime does not enable IO, so the server runs on its own
+//! The extension runtime does not enable IO, so the server runs on its own
 //! IO-enabled runtime on a dedicated thread; `shutdown` flips a watch channel to drain it.
 
 use std::sync::Arc;
@@ -12,7 +12,9 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use extension_api::{Extension, ListenAddr, Php, PrepareCtx, PreparedListener, Request, Result};
-use pingora::http::ResponseHeader;
+use pingora::http::{RequestHeader, ResponseHeader};
+use pingora::modules::http::compression::ResponseCompressionBuilder;
+use pingora::modules::http::{HttpModule, HttpModuleBuilder, HttpModules, Module};
 use pingora::proxy::{ProxyHttp, Session, http_proxy_service};
 use pingora::server::configuration::ServerConf;
 use pingora::server::{Fds, ListenFds};
@@ -47,6 +49,22 @@ pub struct Config {
     /// Maximum request body size in bytes; larger bodies are rejected with 413.
     /// Default mirrors PHP's own `post_max_size` default (8M).
     pub max_body_size: usize,
+    /// What to do with a request field whose name is not [`is_safe_field_name`].
+    pub unsafe_field_names: UnsafeFieldNames,
+}
+
+/// What to do with a request field name that maps onto a CGI variable another name
+/// already owns. Structurally mirrors rapira's config-side type, but owned here so this
+/// extension crate never depends on core's config crate.
+/// There is deliberately no "allow" arm: every comparable server either hardcodes the
+/// drop or gates it behind a boolean defaulting to on, and an off-switch here would only
+/// re-open the collision this exists to close (CVE-2026-52845 landed as exactly that fix).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsafeFieldNames {
+    /// Remove the field before anything downstream sees it.
+    Drop,
+    /// Answer 400 and serve nothing.
+    Reject,
 }
 
 impl Default for Config {
@@ -57,7 +75,68 @@ impl Default for Config {
             server_name: "localhost".to_owned(),
             server_port: 8000,
             max_body_size: 8 * 1024 * 1024,
+            unsafe_field_names: UnsafeFieldNames::Drop,
         }
+    }
+}
+
+/// Whether a request field name reaches a CGI variable no other name can.
+///
+/// The CGI name is the field name uppercased with `-` rewritten to `_`, and PHP rewrites
+/// `.` and space to `_` again when it registers the variable. A name carrying either byte
+/// therefore lands on the variable a `-` name owns, letting a client fold a value into a
+/// field the front set. This is an allowlist rather than a denylist of those two bytes, so
+/// it stays correct if either mapper widens.
+fn is_safe_field_name(name: &str) -> bool {
+    name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Applies [`UnsafeFieldNames`] to the downstream request. Serves as both the builder and
+/// the per-request module: the policy is `Copy` and there is no per-request state.
+struct FieldNameFilter(UnsafeFieldNames);
+
+#[async_trait]
+impl HttpModule for FieldNameFilter {
+    async fn request_header_filter(&mut self, req: &mut RequestHeader) -> PingoraResult<()> {
+        // Collected first: `remove_header` needs the map mutably, and it drops every value
+        // under the name along with its case-preserving entry.
+        let unsafe_names: Vec<String> = req
+            .headers
+            .keys()
+            .filter(|name| !is_safe_field_name(name.as_str()))
+            .map(|name| name.as_str().to_owned())
+            .collect();
+        if unsafe_names.is_empty() {
+            return Ok(());
+        }
+        if self.0 == UnsafeFieldNames::Reject {
+            return Err(Error::explain(
+                ErrorType::HTTPStatus(400),
+                format!(
+                    "field name aliases a CGI variable: {}",
+                    unsafe_names.join(", ")
+                ),
+            ));
+        }
+        for name in &unsafe_names {
+            req.remove_header(name.as_str());
+            log::debug!("dropped request header {name}: name aliases a CGI variable");
+        }
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl HttpModuleBuilder for FieldNameFilter {
+    fn init(&self) -> Module {
+        Box::new(Self(self.0))
     }
 }
 
@@ -248,6 +327,15 @@ impl ProxyHttp for PhpProxy {
         self.inflight.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Runs before `request_filter`, so the field-name policy is applied while the request
+    /// is still a header map — everything downstream sees an already-screened one.
+    fn init_downstream_modules(&self, modules: &mut HttpModules) {
+        // The trait default supplies this and an override replaces the whole body, so it
+        // has to be re-added or downstream compression loses its (disabled) module.
+        modules.add_module(ResponseCompressionBuilder::enable(0));
+        modules.add_module(Box::new(FieldNameFilter(self.config.unsafe_field_names)));
+    }
+
     async fn logging(&self, _session: &mut Session, _e: Option<&Error>, _ctx: &mut Self::CTX) {
         self.inflight.fetch_sub(1, Ordering::AcqRel);
     }
@@ -283,32 +371,7 @@ impl ProxyHttp for PhpProxy {
         // skip_response_header like on any response.
         let no_body = matches!(status, 204 | 304);
 
-        let mut header = ResponseHeader::build(status, Some(response.headers.len() + 1))?;
-        // Extra hop-by-hop fields named by a Connection value (RFC 9110 §7.6.1,
-        // https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1). PHP almost never
-        // sends Connection, so this stays empty and allocates nothing.
-        let mut conn_named: Vec<String> = Vec::new();
-        for (name, value) in response.headers {
-            if name.eq_ignore_ascii_case("connection") {
-                connection_named_headers(&value, &mut conn_named);
-                continue; // Connection is itself hop-by-hop
-            }
-            // Framing is derived from the buffered body and connection management is
-            // ours, never PHP's (hop-by-hop, RFC 9110 §7.6.1).
-            if skip_response_header(&name) {
-                continue;
-            }
-            // append: PHP may legally repeat headers (Set-Cookie, Vary, Link).
-            header.append_header(name, value)?; // value: Vec<u8>, binary-safe
-        }
-        // Rare path only: drop the fields a Connection value named, before our own
-        // Content-Length goes in below so a `Connection: content-length` can't strip it.
-        for tok in &conn_named {
-            header.remove_header(tok.as_str());
-        }
-        if !no_body {
-            header.insert_header("Content-Length", response.body.len().to_string())?;
-        }
+        let header = build_response_header(status, response.headers, response.body.len(), no_body)?;
         session
             .write_response_header(Box::new(header), no_body)
             .await?;
@@ -331,6 +394,49 @@ impl ProxyHttp for PhpProxy {
             "rapira-pingora serves all requests locally; no upstream",
         ))
     }
+}
+
+/// Assemble the response head: PHP's fields minus the ones this front owns, then our
+/// own framing. A field no front can represent is dropped with a log rather than
+/// failing the call — the head carries the whole response, so one bad field must not
+/// cost the body.
+fn build_response_header(
+    status: u16,
+    headers: Vec<(String, Vec<u8>)>,
+    body_len: usize,
+    no_body: bool,
+) -> PingoraResult<ResponseHeader> {
+    let mut header = ResponseHeader::build(status, Some(headers.len() + 1))?;
+    // Extra hop-by-hop fields named by a Connection value (RFC 9110 §7.6.1,
+    // https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1). PHP almost never
+    // sends Connection, so this stays empty and allocates nothing.
+    let mut conn_named: Vec<String> = Vec::new();
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("connection") {
+            connection_named_headers(&value, &mut conn_named);
+            continue; // Connection is itself hop-by-hop
+        }
+        // Framing is derived from the buffered body and connection management is
+        // ours, never PHP's (hop-by-hop, RFC 9110 §7.6.1).
+        if skip_response_header(&name) {
+            continue;
+        }
+        // append: PHP may legally repeat headers (Set-Cookie, Vary, Link).
+        let logged = name.clone();
+        if let Err(e) = header.append_header(name, value) {
+            // value: Vec<u8>, binary-safe
+            log::debug!("dropped response header {logged}: {e}");
+        }
+    }
+    // Rare path only: drop the fields a Connection value named, before our own
+    // Content-Length goes in below so a `Connection: content-length` can't strip it.
+    for tok in &conn_named {
+        header.remove_header(tok.as_str());
+    }
+    if !no_body {
+        header.insert_header("Content-Length", body_len.to_string())?;
+    }
+    Ok(header)
 }
 
 /// Parse a `Connection` header value into the lower-cased field names it lists,
@@ -362,10 +468,39 @@ pub fn skip_response_header(name: &str) -> bool {
     .any(|h| name.eq_ignore_ascii_case(h))
 }
 
+/// Fold the header map into one entry per field name. Repeats of a field are a comma
+/// list (RFC 9110 §5.3, https://www.rfc-editor.org/rfc/rfc9110#section-5.3); `Cookie`
+/// rejoins on `"; "` instead, the cookie-string form its parser expects (RFC 6265
+/// §4.2.1, https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1).
+///
+/// Combining is done here, not in the CGI mapping downstream: `HeaderMap` groups by
+/// name, so this needs no assumption about the order repeats arrive in. Values stay raw
+/// bytes — a lossy UTF-8 decode would corrupt latin1/binary values (a signed header, a
+/// latin1 cookie) that PHP must see verbatim.
+fn combine_headers(header: &RequestHeader) -> Vec<(String, Vec<u8>)> {
+    let mut headers: Vec<(String, Vec<u8>)> = Vec::with_capacity(header.headers.keys_len());
+    for name in header.headers.keys() {
+        let separator: &[u8] = if name.as_str() == "cookie" {
+            b"; "
+        } else {
+            b", "
+        };
+        let mut combined: Vec<u8> = Vec::new();
+        for (i, value) in header.headers.get_all(name).iter().enumerate() {
+            if i > 0 {
+                combined.extend_from_slice(separator);
+            }
+            combined.extend_from_slice(value.as_bytes());
+        }
+        headers.push((name.as_str().to_owned(), combined));
+    }
+    headers
+}
+
 /// Map a Pingora downstream request into a rapira `Request`. `None` means the request
 /// was rejected here (413 already written).
 async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<Option<Request>> {
-    let header: &pingora::prelude::RequestHeader = session.req_header();
+    let header: &RequestHeader = session.req_header();
     let method: String = header.method.as_str().to_owned();
     let uri: String = header.uri.to_string(); // path + ?query → REQUEST_URI
     // → SERVER_PROTOCOL, e.g. "HTTP/1.1". The framework-type → CGI-string mapping
@@ -379,14 +514,7 @@ async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<
         pingora::http::Version::HTTP_3 => "HTTP/3.0".to_owned(),
         _ => format!("{v:?}"),
     };
-    let headers: Vec<(String, Vec<u8>)> = header
-        .headers
-        .iter()
-        // Header values pass through as raw bytes — a lossy UTF-8 decode here would
-        // corrupt latin1/binary values (e.g. a signed header, a latin1 cookie) that
-        // PHP must see verbatim, exactly as the response path already preserves them.
-        .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
-        .collect();
+    let headers: Vec<(String, Vec<u8>)> = combine_headers(header);
 
     let declared_len = header
         .headers
@@ -453,4 +581,178 @@ async fn reject_payload_too_large(session: &mut Session) -> PingoraResult<()> {
         .write_response_header(Box::new(header), true)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hdrs(pairs: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.as_bytes().to_vec()))
+            .collect()
+    }
+
+    /// The Connection-named removals must run before our own Content-Length goes in,
+    /// or PHP could strip the framing out from under the body.
+    #[test]
+    fn connection_value_cannot_strip_framing() {
+        let head = build_response_header(
+            200,
+            hdrs(&[
+                ("Connection", "content-length, x-drop"),
+                ("X-Drop", "1"),
+                ("X-Keep", "2"),
+            ]),
+            7,
+            false,
+        )
+        .unwrap();
+        assert_eq!(head.headers.get("content-length").unwrap().as_bytes(), b"7");
+        assert!(head.headers.get("x-drop").is_none());
+        assert_eq!(head.headers.get("x-keep").unwrap().as_bytes(), b"2");
+        assert!(head.headers.get("connection").is_none());
+    }
+
+    #[test]
+    fn bodyless_statuses_get_no_content_length() {
+        for status in [204u16, 304] {
+            let head = build_response_header(status, hdrs(&[("X-A", "1")]), 0, true).unwrap();
+            assert!(head.headers.get("content-length").is_none(), "{status}");
+        }
+    }
+
+    /// A space is not a tchar, so no front can put this name on the wire. Dropping the
+    /// field must not cost the rest of the response.
+    #[test]
+    fn unrepresentable_header_is_dropped_not_fatal() {
+        let head = build_response_header(
+            200,
+            hdrs(&[("Content Type", "text/html"), ("X-Keep", "2")]),
+            3,
+            false,
+        )
+        .unwrap();
+        assert_eq!(head.headers.get("x-keep").unwrap().as_bytes(), b"2");
+        assert_eq!(head.headers.get("content-length").unwrap().as_bytes(), b"3");
+    }
+
+    #[test]
+    fn php_framing_headers_never_reach_the_wire() {
+        let head = build_response_header(
+            200,
+            hdrs(&[("Content-Length", "999"), ("Transfer-Encoding", "chunked")]),
+            4,
+            false,
+        )
+        .unwrap();
+        assert_eq!(head.headers.get("content-length").unwrap().as_bytes(), b"4");
+        assert!(head.headers.get("transfer-encoding").is_none());
+    }
+
+    #[test]
+    fn connection_tokens_are_split_trimmed_and_lowercased() {
+        let mut out = Vec::new();
+        connection_named_headers(b"  Keep-Alive , ,X-Foo\t", &mut out);
+        assert_eq!(out, vec!["keep-alive".to_owned(), "x-foo".to_owned()]);
+    }
+
+    fn request_with(fields: &[(&str, &str)]) -> RequestHeader {
+        let mut header = RequestHeader::build("GET", b"/", None).unwrap();
+        for (name, value) in fields {
+            header.append_header(name.to_string(), *value).unwrap();
+        }
+        header
+    }
+
+    fn combined<'a>(headers: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
+        headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_slice())
+    }
+
+    #[test]
+    fn repeated_fields_combine_into_one_entry() {
+        let headers = combine_headers(&request_with(&[
+            ("Cookie", "a=1"),
+            ("Cookie", "b=2"),
+            ("Accept", "text/*"),
+            ("Accept", "image/*"),
+            ("User-Agent", "curl"),
+        ]));
+        assert_eq!(combined(&headers, "cookie"), Some(&b"a=1; b=2"[..]));
+        assert_eq!(combined(&headers, "accept"), Some(&b"text/*, image/*"[..]));
+        assert_eq!(combined(&headers, "user-agent"), Some(&b"curl"[..]));
+        assert_eq!(headers.len(), 3, "one entry per field name");
+    }
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime")
+            .block_on(f)
+    }
+
+    /// Field names surviving `policy`, in map order.
+    fn surviving(policy: UnsafeFieldNames, fields: &[(&str, &str)]) -> PingoraResult<Vec<String>> {
+        let mut header = request_with(fields);
+        run(FieldNameFilter(policy).request_header_filter(&mut header))?;
+        Ok(header
+            .headers
+            .keys()
+            .map(|name| name.as_str().to_owned())
+            .collect())
+    }
+
+    #[test]
+    fn only_alphanumerics_and_dash_are_safe_field_names() {
+        assert!(is_safe_field_name("x-forwarded-for"));
+        assert!(is_safe_field_name("Sec-Ch-Ua-Mobile"));
+        // Aliases today: `-` becomes `_`, and PHP rewrites `.` to `_` as well.
+        assert!(!is_safe_field_name("x_forwarded_for"));
+        assert!(!is_safe_field_name("x.forwarded.for"));
+        // Legal tchars that do not alias today; the allowlist covers them anyway.
+        assert!(!is_safe_field_name("x~foo"));
+        assert!(!is_safe_field_name("x$foo"));
+    }
+
+    #[test]
+    fn drop_removes_only_the_unsafe_names() {
+        let names = surviving(
+            UnsafeFieldNames::Drop,
+            &[
+                ("X-Forwarded-For", "203.0.113.7"),
+                ("X_Forwarded_For", "1.2.3.4"),
+                ("X.Forwarded.For", "5.6.7.8"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(names, ["x-forwarded-for"]);
+    }
+
+    #[test]
+    fn reject_answers_400_only_when_a_name_is_unsafe() {
+        let err =
+            surviving(UnsafeFieldNames::Reject, &[("X_Forwarded_For", "1.2.3.4")]).unwrap_err();
+        assert_eq!(err.etype(), &ErrorType::HTTPStatus(400));
+        let names = surviving(UnsafeFieldNames::Reject, &[("X-Forwarded-For", "1.2.3.4")]).unwrap();
+        assert_eq!(names, ["x-forwarded-for"]);
+    }
+
+    /// The separator goes in on position, not on "nothing accumulated yet" — an empty
+    /// first value must still be one of the list's elements.
+    #[test]
+    fn an_empty_first_value_still_separates() {
+        let headers = combine_headers(&request_with(&[("Accept", ""), ("Accept", "text/*")]));
+        assert_eq!(combined(&headers, "accept"), Some(&b", text/*"[..]));
+    }
+
+    #[test]
+    fn hop_by_hop_names_match_case_insensitively() {
+        assert!(skip_response_header("Transfer-Encoding"));
+        assert!(skip_response_header("PROXY-CONNECTION"));
+        assert!(!skip_response_header("content-type"));
+    }
 }

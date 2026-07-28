@@ -69,9 +69,14 @@ pub struct Request {
     pub script_name: String,
     pub document_root: String,
     pub script_filename: PathBuf,
+    /// At most one entry per field name, a field's repeats already combined by the
+    /// front. A repeated name here would register the CGI variable twice, and
+    /// `php_register_variable_safe` keeps only the last.
     pub headers: Vec<(String, Vec<u8>)>, // values as bytes: latin1/binary-safe
     pub server_vars: Vec<(String, String)>,
-    pub content_type: Option<String>,
+    /// Raw bytes like every other header value: php-src builds the multipart boundary
+    /// straight out of this, so it must match the body's bytes exactly.
+    pub content_type: Option<Vec<u8>>,
     pub content_length: i64, // -1 if unknown
     pub body: Box<dyn Read + Send>,
 }
@@ -79,6 +84,17 @@ pub struct Request {
 pub struct ResponseHead {
     pub status: u16,
     pub headers: Vec<(String, Vec<u8>)>,
+}
+
+/// The leading integer of a `Status:` value — `404`, or `404 Not Found` — when it is a
+/// plausible response status. Anything else leaves the status untouched; the field is
+/// dropped either way, since no client should be shown it.
+fn status_field_code(value: &[u8]) -> Option<u16> {
+    let digits: &[u8] = value
+        .split(|b| b.is_ascii_whitespace())
+        .find(|token| !token.is_empty())?;
+    let code: u16 = std::str::from_utf8(digits).ok()?.parse().ok()?;
+    (100..=599).contains(&code).then_some(code)
 }
 
 pub struct ReqC {
@@ -134,7 +150,7 @@ impl ReqC {
             ctype: r
                 .content_type
                 .as_deref()
-                .map(|s| CString::new(s.as_bytes()).unwrap_or_default()),
+                .map(|s| CString::new(s).unwrap_or_default()),
             env,
         }
     }
@@ -195,7 +211,22 @@ impl Context {
 
     /// Record the response head (first write wins is enforced by the callers' `stream` guards)
     /// and advance `stream` to `HeadSent`.
-    pub fn commit_head(&mut self, status: u16, headers: Vec<(String, Vec<u8>)>) {
+    ///
+    /// A `Status:` field is consumed here rather than forwarded. `sapi_header_op` gives it
+    /// no special handling — it screens only `HTTP/`, `Content-Type`, `Content-Length`,
+    /// `Location` and `WWW-Authenticate` — so turning it into the response status is the
+    /// SAPI's job, and it must not reach the client under its own name.
+    pub fn commit_head(&mut self, status: u16, mut headers: Vec<(String, Vec<u8>)>) {
+        let mut status: u16 = status;
+        headers.retain(|(name, value)| {
+            if !name.eq_ignore_ascii_case("status") {
+                return true;
+            }
+            if let Some(code) = status_field_code(value) {
+                status = code;
+            }
+            false
+        });
         self.head = Some(ResponseHead { status, headers });
         self.stream = StreamState::HeadSent;
     }
@@ -211,5 +242,28 @@ impl Context {
                 truncated,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_field_code_takes_the_leading_integer() {
+        assert_eq!(status_field_code(b"404"), Some(404));
+        assert_eq!(status_field_code(b"404 Not Found"), Some(404));
+        assert_eq!(status_field_code(b"  503   "), Some(503));
+    }
+
+    /// An unparseable or out-of-range value leaves the status alone. The caller drops the
+    /// field either way, so a bogus one is discarded rather than shown to the client.
+    #[test]
+    fn status_field_code_rejects_implausible_values() {
+        assert_eq!(status_field_code(b""), None);
+        assert_eq!(status_field_code(b"Not Found"), None);
+        assert_eq!(status_field_code(b"99"), None);
+        assert_eq!(status_field_code(b"600"), None);
+        assert_eq!(status_field_code(b"70000"), None);
     }
 }

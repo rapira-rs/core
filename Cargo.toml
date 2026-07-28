@@ -13,7 +13,7 @@ path = "src/main.rs"
 # not a package. Top-level crates are explicit; plugins keep the glob.
 members = [
     "crates/config",
-    "crates/extension_host",
+    "crates/runtime",
     "crates/extensions_api",
     "crates/integration_tests",
     "crates/master",
@@ -26,7 +26,7 @@ members = [
 anyhow = "1"
 log = { version = "0.4", features = ["std"] }
 php_sys = { path = "crates/php_sys" }
-extension_host = { path = "crates/extension_host" }
+rapira_runtime = { path = "crates/runtime" }
 rapira_config = { path = "crates/config" }
 extension_api = { path = "crates/extensions_api" }
 rapira_pingora = { path = "crates/plugins/pingora" }
@@ -40,9 +40,6 @@ env_logger = "0.11"
 all = "warn"
 
 [profile.release]
-# Cross-crate LTO + single codegen unit: the hot path spans pingora/tokio/plugin
-# crates, and the per-request cost is spread across many small cross-crate calls.
-# NOTE: panic stays "unwind" — php_sys contains bailouts with catch_unwind.
 lto = "thin"
 codegen-units = 1
 
@@ -52,7 +49,7 @@ clap = { version = "4", features = ["derive", "env"] }
 extension_api = { workspace = true }
 rapira_master = { workspace = true }
 rapira_scoreboard = { workspace = true }
-extension_host = { workspace = true }
+rapira_runtime = { workspace = true }
 php_sys = { workspace = true }
 rapira_config = { workspace = true }
 rapira_pingora = { workspace = true }

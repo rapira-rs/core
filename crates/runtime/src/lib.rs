@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
@@ -54,11 +55,11 @@ struct Registered {
 
 /// Collects native extensions, then drives them all with one `run` call.
 #[derive(Default)]
-pub struct ExtensionHost {
+pub struct ExtensionRuntime {
     exts: Vec<Registered>,
 }
 
-impl ExtensionHost {
+impl ExtensionRuntime {
     pub fn new() -> Self {
         Self::default()
     }
@@ -67,7 +68,7 @@ impl ExtensionHost {
     /// is a hard error.
     pub fn register<E: Extension>(&mut self, config: E::Config) -> anyhow::Result<()> {
         let ext = E::init(config);
-        let name = ext.name().to_string();
+        let name: String = ext.name().to_string();
         if self.exts.iter().any(|e| e.name == name) {
             anyhow::bail!("duplicate extension {name:?}");
         }
@@ -163,11 +164,14 @@ impl RapiraBackend {
     /// The one place the `extension_api::Request → php_sys::Request` mapping lives.
     fn to_request(&self, req: extension_api::Request) -> php_sys::Request {
         let query = req.uri.split_once('?').map_or("", |(_, q)| q).to_string();
+        // Carried as raw bytes, like every other header value: php-src takes the
+        // multipart boundary out of this verbatim, so a lossy decode would turn a
+        // non-UTF-8 boundary into U+FFFD and the body's real boundary would never match.
         let content_type = req
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| String::from_utf8_lossy(v).into_owned());
+            .map(|(_, v)| v.clone());
 
         php_sys::Request {
             method: req.method,
@@ -201,7 +205,7 @@ impl extension_api::Backend for RapiraBackend {
     ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::Response>> + Send + '_>>
     {
         Box::pin(async move {
-            let mut rx = self.rapira.handle(self.to_request(req)).await?;
+            let mut rx: Receiver<php_sys::Frame> = self.rapira.handle(self.to_request(req)).await?;
             let Some(frame) = rx.recv().await else {
                 return Err(anyhow::anyhow!(
                     "php worker died mid-response (channel closed without a response)"
@@ -276,40 +280,6 @@ fn wait_signal(signals: &[libc::c_int]) -> libc::c_int {
         libc::sigwait(&set, &mut sig);
         sig
     }
-}
-
-/// Spawn a thread that raises SIGQUIT (pending on the blocked set → picked up
-/// by the `serve_worker` watcher as a graceful drain) when the master dies:
-/// the inherited lifeline read end returns EOF once every master-held write
-/// end is gone.
-pub fn spawn_lifeline_watch(lifeline: std::os::fd::OwnedFd) {
-    std::thread::Builder::new()
-        .name("rapira-lifeline".into())
-        .spawn(move || {
-            use std::os::fd::AsRawFd;
-            let mut byte = 0u8;
-            loop {
-                // SAFETY: reads into a 1-byte stack buffer on an fd we own.
-                let n = unsafe { libc::read(lifeline.as_raw_fd(), (&raw mut byte).cast(), 1) };
-                if n == 0 {
-                    log::warn!(target: "rapira", "master died (lifeline EOF); draining");
-                    // Process-directed (kill self), not raise(): raise is
-                    // thread-directed, so a blocked SIGQUIT would sit in this
-                    // thread's private pending set where the serve_worker sigwait
-                    // (on another thread) never sees it. kill() targets the
-                    // process, landing in the shared pending set the watcher drains.
-                    unsafe { libc::kill(libc::getpid(), libc::SIGQUIT) };
-                    return;
-                }
-                if n < 0
-                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
-                {
-                    continue;
-                }
-                return; // master never writes; anything else is fd teardown
-            }
-        })
-        .expect("spawn lifeline thread");
 }
 
 /// A cheap handle that asks a [`Running`] host to stop gracefully. Callable
@@ -405,9 +375,9 @@ mod tests {
     /// The host is built, registered, then consumed by `run` on one thread; it need not
     /// be `Sync`, but staged launchers must be `Send` (they move into spawned tasks).
     #[test]
-    fn extension_host_is_send() {
+    fn rapira_runtime_is_send() {
         fn assert_send<T: Send>() {}
-        assert_send::<ExtensionHost>();
+        assert_send::<ExtensionRuntime>();
     }
 
     /// The reaper dequeues a blocked, pending signal via `sigwait` instead of letting it

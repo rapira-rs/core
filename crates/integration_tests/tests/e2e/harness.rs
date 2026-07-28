@@ -107,6 +107,21 @@ fn rapira_bin() -> PathBuf {
 /// times to survive the bind :0 -> spawn TOCTOU race. Panics with the log tail
 /// if the master never accepts a connection.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
+    spawn_with_extras(fixture, processes, "", extra_toml)
+}
+
+/// [`spawn_with_config`] for keys that belong inside the `[http]` table, which the
+/// trailing `extra_toml` cannot reach without redeclaring the table.
+pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
+    spawn_with_extras(fixture, processes, http_extra, "")
+}
+
+fn spawn_with_extras(
+    fixture: &str,
+    processes: usize,
+    http_extra: &str,
+    extra_toml: &str,
+) -> Server {
     let dir = scratch_dir();
     std::fs::copy(fixture_path(fixture), dir.join(fixture))
         .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
@@ -116,7 +131,7 @@ pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> S
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         std::fs::write(
             dir.join("rapira.toml"),
-            render_config(port, processes, fixture, extra_toml),
+            render_config(port, processes, fixture, http_extra, extra_toml),
         )
         .expect("write config");
         let log = File::create(dir.join("server.log")).expect("create server.log");
@@ -140,9 +155,15 @@ pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> S
     panic!("rapira never accepted a connection after 3 attempts\n{last_log}");
 }
 
-fn render_config(port: u16, processes: usize, fixture: &str, extra: &str) -> String {
+fn render_config(
+    port: u16,
+    processes: usize,
+    fixture: &str,
+    http_extra: &str,
+    extra: &str,
+) -> String {
     format!(
-        "[http]\nlisten = \"127.0.0.1:{port}\"\n\n\
+        "[http]\nlisten = \"127.0.0.1:{port}\"\n{http_extra}\n\
          [pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n\n\
          {extra}"
     )
@@ -172,13 +193,67 @@ fn wait_for_port(addr: &SocketAddr, child: &mut Child, timeout: Duration) -> boo
 /// Hand-rolled HTTP/1.1 GET with `Connection: close`; the body is read to EOF
 /// (close-delimited), so no chunked/keep-alive parsing is needed.
 pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
+    http_get_with_headers(addr, path, &[], timeout)
+}
+
+/// [`http_get`] plus extra request fields, written in the order given so a repeated
+/// name stays repeated on the wire.
+pub fn http_get_with_headers(
+    addr: SocketAddr,
+    path: &str,
+    fields: &[(&str, &str)],
+    timeout: Duration,
+) -> io::Result<(u16, Vec<u8>)> {
+    parse_status_and_body(&http_get_raw(addr, path, fields, timeout)?)
+}
+
+/// The whole response, head included — for assertions about which fields actually
+/// reached the client.
+pub fn http_get_raw(
+    addr: SocketAddr,
+    path: &str,
+    fields: &[(&str, &str)],
+    timeout: Duration,
+) -> io::Result<Vec<u8>> {
     let mut s = TcpStream::connect_timeout(&addr, timeout)?;
     s.set_read_timeout(Some(timeout))?;
     s.set_write_timeout(Some(timeout))?;
     write!(
         s,
-        "GET {path} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n"
     )?;
+    for (name, value) in fields {
+        write!(s, "{name}: {value}\r\n")?;
+    }
+    write!(s, "\r\n")?;
+    s.flush()?;
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw)?;
+    Ok(raw)
+}
+
+/// Sibling of [`http_get`] with a body. `content_type` is bytes, not text: a multipart
+/// boundary is opaque octets and obs-text is legal in a field value.
+pub fn http_post(
+    addr: SocketAddr,
+    path: &str,
+    content_type: &[u8],
+    body: &[u8],
+    timeout: Duration,
+) -> io::Result<(u16, Vec<u8>)> {
+    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
+    s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(timeout))?;
+    let mut req = Vec::new();
+    write!(
+        req,
+        "POST {path} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n"
+    )?;
+    req.extend_from_slice(b"Content-Type: ");
+    req.extend_from_slice(content_type);
+    write!(req, "\r\nContent-Length: {}\r\n\r\n", body.len())?;
+    req.extend_from_slice(body);
+    s.write_all(&req)?;
     s.flush()?;
     let mut raw = Vec::new();
     s.read_to_end(&mut raw)?;

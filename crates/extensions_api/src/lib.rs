@@ -23,7 +23,7 @@ pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 /// (master-side, pre-fork: bind inheritable resources) → `run` (serve, in the worker
 /// process) → `shutdown` (drain). `run` and `shutdown` are never borrowed at once — the
 /// host drops the in-flight `run` future before it calls `shutdown` (see
-/// `extension_host`).
+/// `rapira_runtime`).
 pub trait Extension: Send + 'static {
     /// Extension-specific configuration, injected at construction. `()` when the
     /// extension needs none.
@@ -64,7 +64,7 @@ pub trait Extension: Send + 'static {
     }
 }
 
-/// The host-side PHP executor behind [`Php`]. `extension_host` implements it over the
+/// The host-side PHP executor behind [`Php`]. `rapira_runtime` implements it over the
 /// worker pool; extensions only ever see [`Php`]. Host-internal: not part of the
 /// extension-facing API and not semver-guarded.
 #[doc(hidden)]
@@ -84,7 +84,7 @@ pub struct Php {
 }
 
 impl Php {
-    /// Host-internal: `extension_host` builds one and clones it into every `run`.
+    /// Host-internal: `rapira_runtime` builds one and clones it into every `run`.
     /// Not part of the extension-facing API and not semver-guarded.
     #[doc(hidden)]
     pub fn new(backend: Arc<dyn Backend>, script: PathBuf) -> Self {
@@ -122,6 +122,10 @@ pub struct Request {
     pub server_port: u16,
     /// Header values are raw bytes (latin1/binary-safe), mirroring [`Response`]:
     /// a client may send octets that are not valid UTF-8 and PHP must see them verbatim.
+    ///
+    /// At most one entry per field name: combine a field's repeats before submitting —
+    /// a comma list, or `"; "` for `Cookie` (RFC 9110 §5.3). A repeated name reaches
+    /// `$_SERVER` as the last value alone, not as the list.
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Vec<u8>,
 }

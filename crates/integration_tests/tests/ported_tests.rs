@@ -6,7 +6,7 @@ use php_sys::{Frame, Mode, Rapira, Request};
 fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u8>) -> Request {
     let mut r: Request = req(&format!("/{fixture_name}?{query}"), fixture_name);
     r.method = "POST".into();
-    r.content_type = content_type.map(str::to_string);
+    r.content_type = content_type.map(|s| s.as_bytes().to_vec());
     r.content_length = body.len() as i64;
     r.body = Box::new(std::io::Cursor::new(body));
     r
@@ -557,9 +557,18 @@ fn large_post_body_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn multipart_body_with(boundary: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"--");
+    body.extend_from_slice(boundary);
+    body.extend_from_slice(b"\r\nContent-Disposition: form-data; name=\"file\"; filename=\"foo.txt\"\r\nContent-Type: text/plain\r\n\r\nbar\r\n--");
+    body.extend_from_slice(boundary);
+    body.extend_from_slice(b"--\r\n");
+    body
+}
+
 fn multipart_body() -> Vec<u8> {
-    b"--RAPIRA\r\nContent-Disposition: form-data; name=\"file\"; filename=\"foo.txt\"\r\nContent-Type: text/plain\r\n\r\nbar\r\n--RAPIRA--\r\n"
-        .to_vec()
+    multipart_body_with(b"RAPIRA")
 }
 
 fn assert_upload_and_cleanup(status: u16, body: &str) {
@@ -725,13 +734,15 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle()?;
+    // One entry per field name: repeats are combined by the front, so this is the shape
+    // a request reaches php_sys in. Two wire Cookie headers are covered end to end by
+    // the e2e suite.
     let mut request = req("/multi-cookie.php", "multi-cookie.php");
-    request.headers.push(("Cookie".into(), "a=1".into()));
-    request.headers.push(("Cookie".into(), "b=2".into()));
+    request.headers.push(("Cookie".into(), "a=1; b=2".into()));
     let (status, body) = drain(h.handle_blocking(request)?);
     drop(h);
     r.shutdown();
-    assert_eq!((status, body.as_str()), (200, "1,2,a=1; b=2")); // fails today as "1,-,b=2"
+    assert_eq!((status, body.as_str()), (200, "1,2,a=1; b=2"));
     Ok(())
 }
 
@@ -774,5 +785,46 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
         "session Set-Cookie must reach the client (headers: {:?})",
         resp.headers
     );
+    Ok(())
+}
+
+/// A boundary is opaque octets and obs-text is legal in a field value, so Content-Type
+/// must reach php-src byte for byte — decoding it lossily leaves rfc1867 hunting for a
+/// boundary the body never contains, and the upload silently vanishes.
+#[test]
+fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("upload-worker.php")))?;
+    let h = r.handle()?;
+    let boundary: &[u8] = b"RAP\xff\xfeIRA";
+    let mut request = post("upload-worker.php", "", None, multipart_body_with(boundary));
+    let mut ctype = b"multipart/form-data; boundary=".to_vec();
+    ctype.extend_from_slice(boundary);
+    request.content_type = Some(ctype);
+    let (status, body) = drain(h.handle_blocking(request)?);
+    drop(h);
+    r.shutdown();
+    assert_upload_and_cleanup(status, &body);
+    Ok(())
+}
+
+/// sapi_header_op screens only CR, LF and NUL, so a name with a space and a value with
+/// a C0 control both reach the SAPI. Dropping those two fields must not cost the status,
+/// the other headers, or the body.
+#[test]
+fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("bad-header-worker.php")))?;
+    let h = r.handle()?;
+    let resp = recv_all(h.handle_blocking(req("/bad-header-worker.php", "bad-header-worker.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.heads, 1, "a head must still be produced");
+    assert_eq!(resp.status, 201);
+    assert_eq!(resp.body, "body");
+    assert_eq!(header_value(&resp, "X-Keep").as_deref(), Some("kept"));
+    assert!(header_value(&resp, "Content Type").is_none());
+    assert!(header_value(&resp, "X-Ctl").is_none());
     Ok(())
 }

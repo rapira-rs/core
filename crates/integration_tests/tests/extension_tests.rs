@@ -1,9 +1,9 @@
 //! End-to-end: a native extension drives requests through PHP via `Php`.
 
 use extension_api::{Extension, Php, Request, Response, Result};
-use extension_host::ExtensionHost;
 use integration_tests::{fixture, php_lock};
 use php_sys::{Mode, Rapira};
+use rapira_runtime::ExtensionRuntime;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -74,7 +74,7 @@ fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     // join!ed execs serialize onto the single interpreter; this proves completion,
     // not parallelism.
     let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")))?;
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     host.register::<Driver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("ext-driver-worker.php"))
@@ -91,7 +91,7 @@ fn classic_mode_serves_exec() -> anyhow::Result<()> {
     // Classic mode runs the front controller per exec, with the URI in $_GET, so it
     // echoes "ok:<from>" — exec works with a real front controller (why serve takes a SCRIPT).
     let rapira = Rapira::start(Mode::Classic)?;
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     host.register::<Driver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("ext-driver-classic.php"))
@@ -142,7 +142,7 @@ impl Extension for ErrorPathDriver {
 fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Worker(fixture("error-keeps-headers-worker.php")))?;
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     host.register::<ErrorPathDriver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("error-keeps-headers-worker.php"))
@@ -194,7 +194,7 @@ impl Extension for TruncatedDriver {
 fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Worker(fixture("output-then-throw-worker.php")))?;
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     host.register::<TruncatedDriver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("output-then-throw-worker.php"))
@@ -213,7 +213,7 @@ fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
 fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     host.register::<ErrorPathDriver>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("error-keeps-headers.php"))
@@ -260,7 +260,7 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
     let _guard = php_lock();
     RESIDENT_SHUTDOWN.store(false, Ordering::Relaxed);
     let rapira = Rapira::start(Mode::Classic)?;
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     host.register::<Resident>(())?;
     let running = host.run(rapira.handle()?, fixture("ext-driver-classic.php"));
 
@@ -287,7 +287,7 @@ fn many_extensions_run() -> anyhow::Result<()> {
     // The fan-out (12 drivers × 2 execs) serializes onto the single PHP interpreter.
     // This proves all N extensions complete, not a strict parallelism bound.
     let rapira = Rapira::start(Mode::Worker(fixture("ext-driver-worker.php")))?;
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     for _ in 0..N {
         host.register::<Driver>(())?;
     }
@@ -323,7 +323,7 @@ impl Extension for Fixed {
 
 #[test]
 fn duplicate_extension_name_is_rejected() {
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     host.register::<Fixed>(()).unwrap();
     let err = host.register::<Fixed>(()).unwrap_err();
     assert!(
@@ -336,7 +336,7 @@ fn duplicate_extension_name_is_rejected() {
 fn run_one<E: Extension<Config = ()>>() -> anyhow::Result<Vec<Result<(), String>>> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     host.register::<E>(())?;
     let outcomes = host
         .run(rapira.handle()?, fixture("ext-driver-classic.php"))
@@ -432,7 +432,7 @@ impl Extension for SlowShutdown {
 fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
-    let mut host = ExtensionHost::new();
+    let mut host = ExtensionRuntime::new();
     host.register::<SlowShutdown>(())?;
     // A tiny grace so the timeout branch fires fast instead of after the 30s default.
     let running = host.run_with_grace(

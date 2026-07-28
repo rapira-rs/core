@@ -45,7 +45,7 @@ pub(crate) fn dynamic_tick(inp: &DynInput, spawn_rate: &mut u32) -> DynAction {
             *spawn_rate = 1;
             return DynAction::ReachedMaxChildren;
         }
-        *spawn_rate = (*spawn_rate * 2).min(MAX_SPAWN_RATE);
+        *spawn_rate = spawn_rate.saturating_mul(2).min(MAX_SPAWN_RATE);
         return DynAction::Spawn(want);
     }
     *spawn_rate = 1;
@@ -53,12 +53,14 @@ pub(crate) fn dynamic_tick(inp: &DynInput, spawn_rate: &mut u32) -> DynAction {
 }
 
 /// Dynamic initial cohort: midpoint of the spare band, clamped to max_children.
+/// `min_spare <= max_spare` is enforced when the config is merged, a crate away;
+/// saturating here keeps the function total on its own.
 pub(crate) fn dynamic_start_count(
     min_spare: usize,
     max_spare: usize,
     max_children: usize,
 ) -> usize {
-    (min_spare + (max_spare - min_spare) / 2).min(max_children)
+    (min_spare + max_spare.saturating_sub(min_spare) / 2).min(max_children)
 }
 
 /// Ondemand arming invariant. We watch the listeners in poll only when a fork is

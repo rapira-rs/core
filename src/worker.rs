@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 use std::sync::{Arc, OnceLock};
 
-use extension_host::{ExtensionHost, Stopper};
 use php_sys::{Mode, Rapira, WorkerHooks};
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
+use rapira_runtime::{ExtensionRuntime, Stopper};
 
 /// First writer wins, except unhealthy upgrades a pending recycle;
 /// -1 = unset (drained → 0).
@@ -57,7 +57,7 @@ fn effective_quota(max_requests: u64) -> u64 {
 /// engine teardown.
 pub fn worker_body(
     env: WorkerEnv,
-    host: ExtensionHost,
+    host: ExtensionRuntime,
     mode: Mode,
     script: PathBuf,
     max_requests: u64,
@@ -89,9 +89,9 @@ pub fn worker_body(
         return WORKER_EXIT_UNHEALTHY;
     };
 
-    extension_host::spawn_lifeline_watch(env.lifeline);
+    rapira_master::spawn_lifeline_watch(env.lifeline);
 
-    let running: extension_host::Running = host.run(handle, script);
+    let running: rapira_runtime::Running = host.run(handle, script);
     let _ = stopper.set(running.stopper());
     // Quota/unhealthy may have fired before the stopper existed.
     if WORKER_EXIT.load(SeqCst) != -1 {
