@@ -1,4 +1,5 @@
 use crate::context::{ctx, with_ctx};
+use crate::diagnostics::syslog_to_level;
 use crate::types::{Context, StreamState};
 use crate::*;
 use core::slice;
@@ -396,19 +397,6 @@ pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) 
             .get(key)
             .map_or(null_mut(), |v| v.as_ptr() as *mut c_char)
     })
-}
-fn syslog_to_level(syslog_lev: c_int) -> log::Level {
-    match syslog_lev {
-        0 => log::Level::Error, // LOG_EMERG
-        1 => log::Level::Error, // LOG_ALERT
-        2 => log::Level::Error, // LOG_CRIT
-        3 => log::Level::Error, // LOG_ERR
-        4 => log::Level::Warn,  // LOG_WARNING
-        5 => log::Level::Info,  // LOG_NOTICE
-        6 => log::Level::Info,  // LOG_INFO
-        7 => log::Level::Debug, // LOG_DEBUG
-        _ => log::Level::Info,
-    }
 }
 pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type: c_int) {
     guard((), || {

@@ -62,7 +62,10 @@ fn main() -> anyhow::Result<()> {
     // exists until the master installs its own. Harmless on non-serve paths.
     rapira_master::block_early_signals();
 
-    env_logger::init();
+    // PHP diagnostics carry the level of their error type, so the `php` target starts a notch
+    // above the rest: warnings and fatals print without RUST_LOG, notices and deprecations don't.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error,php=warn"))
+        .init();
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
     match Cli::parse().command {

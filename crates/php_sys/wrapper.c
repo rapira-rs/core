@@ -1,9 +1,11 @@
 #include "wrapper.h"
 
-/* NTS: direct globals, SAPI.h:160-161 */
-
 sapi_globals_struct *rapira_sg(void) {
     return &sapi_globals;
+}
+
+zend_executor_globals *rapira_eg(void) {
+    return &executor_globals;
 }
 
 php_core_globals *rapira_pg(void) {
