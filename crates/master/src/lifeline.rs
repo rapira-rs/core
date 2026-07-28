@@ -5,7 +5,7 @@
 //! promptness (reliable because the master is single-threaded).
 
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 #[cfg(not(target_os = "linux"))]
 use crate::signals::set_cloexec;
@@ -49,4 +49,39 @@ impl Lifeline {
     pub fn dup_read_end(&self) -> io::Result<OwnedFd> {
         self.rd.try_clone()
     }
+}
+
+/// Worker side of the pipe: spawn a thread that raises SIGQUIT (pending on the
+/// blocked set → picked up by the worker's signal watcher as a graceful drain)
+/// when the master dies, because the inherited read end returns EOF once every
+/// master-held write end is gone.
+///
+/// Logs under `rapira`, the worker-lifecycle target, not this crate's `master`.
+pub fn spawn_lifeline_watch(lifeline: OwnedFd) {
+    std::thread::Builder::new()
+        .name("rapira-lifeline".into())
+        .spawn(move || {
+            let mut byte = 0u8;
+            loop {
+                // SAFETY: reads into a 1-byte stack buffer on an fd we own.
+                let n = unsafe { libc::read(lifeline.as_raw_fd(), (&raw mut byte).cast(), 1) };
+                if n == 0 {
+                    log::warn!(target: "rapira", "master died (lifeline EOF); draining");
+                    // Process-directed (kill self), not raise(): raise is
+                    // thread-directed, so a blocked SIGQUIT would sit in this
+                    // thread's private pending set where the worker's sigwait
+                    // (on another thread) never sees it. kill() targets the
+                    // process, landing in the shared pending set it drains.
+                    unsafe { libc::kill(libc::getpid(), libc::SIGQUIT) };
+                    return;
+                }
+                if n < 0
+                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                return; // master never writes; anything else is fd teardown
+            }
+        })
+        .expect("spawn lifeline thread");
 }

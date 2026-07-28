@@ -23,7 +23,7 @@ pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 /// (master-side, pre-fork: bind inheritable resources) → `run` (serve, in the worker
 /// process) → `shutdown` (drain). `run` and `shutdown` are never borrowed at once — the
 /// host drops the in-flight `run` future before it calls `shutdown` (see
-/// `extension_host`).
+/// `rapira_runtime`).
 pub trait Extension: Send + 'static {
     /// Extension-specific configuration, injected at construction. `()` when the
     /// extension needs none.
@@ -64,7 +64,7 @@ pub trait Extension: Send + 'static {
     }
 }
 
-/// The host-side PHP executor behind [`Php`]. `extension_host` implements it over the
+/// The host-side PHP executor behind [`Php`]. `rapira_runtime` implements it over the
 /// worker pool; extensions only ever see [`Php`]. Host-internal: not part of the
 /// extension-facing API and not semver-guarded.
 #[doc(hidden)]
@@ -84,7 +84,7 @@ pub struct Php {
 }
 
 impl Php {
-    /// Host-internal: `extension_host` builds one and clones it into every `run`.
+    /// Host-internal: `rapira_runtime` builds one and clones it into every `run`.
     /// Not part of the extension-facing API and not semver-guarded.
     #[doc(hidden)]
     pub fn new(backend: Arc<dyn Backend>, script: PathBuf) -> Self {
@@ -122,8 +122,55 @@ pub struct Request {
     pub server_port: u16,
     /// Header values are raw bytes (latin1/binary-safe), mirroring [`Response`]:
     /// a client may send octets that are not valid UTF-8 and PHP must see them verbatim.
+    ///
+    /// At most one entry per field name, compared case-insensitively: combine a field's
+    /// repeats with [`field_line_separator`] before submitting. Field names must also be
+    /// `[A-Za-z0-9-]`; `_` and `.` both reach the CGI variable a `-` name owns, so a name
+    /// carrying either lets a client overwrite a field the front set.
+    ///
+    /// The host re-normalises the repeats on the way in, so that violation costs a log line
+    /// rather than a silently wrong `$_SERVER`. Names it takes as given: only the layer
+    /// terminating the connection can answer a bad one with a `400` instead of dropping it
+    /// silently, so the screen belongs in the extension — `rapira_pingora` runs it in a
+    /// downstream module, before anything reads the map.
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Vec<u8>,
+}
+
+/// The separator joining repeats of `name`, or `None` when the field's grammar is one value
+/// and repeats must not be joined — the first line wins and the rest are dropped.
+///
+/// RFC 9110 §5.3 (https://www.rfc-editor.org/rfc/rfc9110#section-5.3) permits combining only
+/// "without changing the semantics of the message", i.e. for fields defined as a comma list.
+/// Joining a singleton field corrupts it: a second `Authorization` folded into the first
+/// lands inside the credential php-src base64-decodes. `Cookie` is a list but not a comma
+/// one — it rejoins on `"; "`, the cookie-string form its parser expects (RFC 6265 §4.2.1,
+/// https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1).
+///
+/// `Host` is deliberately absent: more than one `Host` line is a 400, not a first-wins
+/// (RFC 9112 §3.2, https://www.rfc-editor.org/rfc/rfc9112#section-3.2), which only a front
+/// terminating the connection can answer. The fallback therefore joins it like any other
+/// field: a front that let the repeat through has already skipped the only correct answer.
+/// Joining is the safer of the two wrong answers — `Host = uri-host [ ":" port ]` admits no
+/// comma (RFC 9110 §7.2, https://www.rfc-editor.org/rfc/rfc9110#section-7.2), so the joined
+/// value fails closed in whatever parses `HTTP_HOST`, where a first-wins would instead hand
+/// PHP a clean authority the client picked.
+pub fn field_line_separator(name: &str) -> Option<&'static [u8]> {
+    const SINGLETON: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "content-type",
+        "content-length",
+        "referer",
+        "from",
+    ];
+    if SINGLETON.iter().any(|f| name.eq_ignore_ascii_case(f)) {
+        None
+    } else if name.eq_ignore_ascii_case("cookie") {
+        Some(b"; ")
+    } else {
+        Some(b", ")
+    }
 }
 
 #[derive(Default)]

@@ -1,6 +1,6 @@
 [package]
 name = "rapira_core"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 
 [[bin]]
@@ -13,7 +13,7 @@ path = "src/main.rs"
 # not a package. Top-level crates are explicit; plugins keep the glob.
 members = [
     "crates/config",
-    "crates/extension_host",
+    "crates/runtime",
     "crates/extensions_api",
     "crates/integration_tests",
     "crates/master",
@@ -26,7 +26,7 @@ members = [
 anyhow = "1"
 log = { version = "0.4", features = ["std"] }
 php_sys = { path = "crates/php_sys" }
-extension_host = { path = "crates/extension_host" }
+rapira_runtime = { path = "crates/runtime" }
 rapira_config = { path = "crates/config" }
 extension_api = { path = "crates/extensions_api" }
 rapira_pingora = { path = "crates/plugins/pingora" }
@@ -40,9 +40,12 @@ env_logger = "0.11"
 all = "warn"
 
 [profile.release]
-# Cross-crate LTO + single codegen unit: the hot path spans pingora/tokio/plugin
-# crates, and the per-request cost is spread across many small cross-crate calls.
-# NOTE: panic stays "unwind" — php_sys contains bailouts with catch_unwind.
+# Cross-crate LTO + a single codegen unit: the hot path spans the pingora/tokio/plugin crates
+# as many small cross-crate calls.
+# NOTE: `panic` must stay "unwind". php_sys::callbacks::guard wraps every SAPI callback in
+# catch_unwind, and that is the only thing turning a panic inside PHP into "fail this request
+# and recycle the worker" instead of aborting the process. Cargo ignores `panic` for the test
+# profile, so switching it here would not fail any test.
 lto = "thin"
 codegen-units = 1
 
@@ -52,7 +55,7 @@ clap = { version = "4", features = ["derive", "env"] }
 extension_api = { workspace = true }
 rapira_master = { workspace = true }
 rapira_scoreboard = { workspace = true }
-extension_host = { workspace = true }
+rapira_runtime = { workspace = true }
 php_sys = { workspace = true }
 rapira_config = { workspace = true }
 rapira_pingora = { workspace = true }

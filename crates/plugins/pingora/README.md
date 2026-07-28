@@ -7,7 +7,7 @@ bridge. It never proxies upstream.
 ## How it works
 
 - Runs as a Rapira extension: `HttpServer` implements `extension_api::Extension`.
-- The extension host runtime has IO disabled, so Pingora runs on its own IO-enabled
+- The extension runtime has IO disabled, so Pingora runs on its own IO-enabled
   Tokio runtime on a dedicated thread.
 - Each request is mapped to an `extension_api::Request`, executed via `Php::exec`, and
   the response is written back to the client.

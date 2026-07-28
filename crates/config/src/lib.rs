@@ -131,6 +131,28 @@ pub struct HttpSettings {
     pub server_port: u16,
     /// Bytes, converted from the config's `max_body_size_mb`.
     pub max_body_size: usize,
+    pub unsafe_field_names: UnsafeFieldNames,
+}
+
+/// What to do with a request field whose name reaches a CGI variable another name owns:
+/// the `HTTP_*` mapping rewrites `-` to `_`, and PHP rewrites `.` to `_` again, so
+/// `X_Forwarded_For` and `X.Forwarded.For` both land on `HTTP_X_FORWARDED_FOR`.
+/// Only `[A-Za-z0-9-]` is safe.
+///
+/// There is deliberately no "allow" arm: an off-switch would re-open the very collision the
+/// screen exists to close, and a client that can pick the aliasing spelling can overwrite a
+/// field the front set. An allowlist of specific expected names could be safe; a boolean
+/// could not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+// No deny_unknown_fields: it governs struct variants, so it is inert on a unit-only enum.
+// An unrecognised value is already an error because serde has no variant to match it.
+#[serde(rename_all = "lowercase")]
+pub enum UnsafeFieldNames {
+    /// Remove the field before PHP sees it.
+    #[default]
+    Drop,
+    /// Answer 400 and serve nothing.
+    Reject,
 }
 
 #[derive(Debug)]
@@ -162,6 +184,9 @@ struct HttpSection {
     server_name: Option<String>,
     server_port: Option<u16>,
     max_body_size_mb: Option<usize>,
+    /// Unrecognised values are a boot error, not a silent fall back to the default —
+    /// a security knob that survives a typo is worse than one that refuses to start.
+    unsafe_field_names: Option<UnsafeFieldNames>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -346,6 +371,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
                 .unwrap_or_else(|| "localhost".to_owned()),
             server_port,
             max_body_size,
+            unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
         },
         pool: PoolSettings {
             processes,
@@ -432,6 +458,41 @@ mod tests {
                 .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
         assert_eq!(s.http.server_port, 80);
+    }
+
+    #[test]
+    fn unsafe_field_names_parses_and_defaults_to_drop() {
+        for (text, want) in [
+            ("drop", UnsafeFieldNames::Drop),
+            ("reject", UnsafeFieldNames::Reject),
+        ] {
+            let file = load_str(&format!(
+                "[http]\nunsafe_field_names = \"{text}\"\n[pool]\nentrypoint = \"a.php\"\n"
+            ))
+            .unwrap();
+            let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+            assert_eq!(s.http.unsafe_field_names, want, "{text}");
+        }
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        assert_eq!(s.http.unsafe_field_names, UnsafeFieldNames::Drop);
+    }
+
+    /// A security knob that survives a typo is worse than one that refuses to boot. `allow`
+    /// is rejected too: there is no off-switch, so asking for one must fail loudly rather
+    /// than quietly leaving the screen on.
+    #[test]
+    fn unknown_unsafe_field_names_value_is_rejected() {
+        for value in ["dorp", "allow"] {
+            assert!(
+                load_str(&format!(
+                    "[http]\nunsafe_field_names = \"{value}\"\n[pool]\nentrypoint = \"a.php\"\n"
+                ))
+                .is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]

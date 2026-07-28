@@ -1,10 +1,13 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use extension_api::PrepareCtx;
-use extension_host::ExtensionHost;
 use log::info;
 use php_sys::{Mode, Rapira};
-use rapira_config::{Listen, Overrides, PmMode, Settings};
-use rapira_pingora::{Config as HttpConfig, HttpServer, Listen as HttpListen};
+use rapira_config::{Listen, Overrides, PmMode, Settings, UnsafeFieldNames};
+use rapira_pingora::{
+    Config as HttpConfig, HttpServer, Listen as HttpListen,
+    UnsafeFieldNames as HttpUnsafeFieldNames,
+};
+use rapira_runtime::ExtensionRuntime;
 use rapira_scoreboard::Scoreboard;
 use std::path::PathBuf;
 
@@ -102,12 +105,16 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         server_name: settings.http.server_name,
         server_port: settings.http.server_port,
         max_body_size: settings.http.max_body_size,
+        unsafe_field_names: match settings.http.unsafe_field_names {
+            UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
+            UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
+        },
     };
 
     // Extensions are compiled in; register the HTTP front (and any others) here, each
     // with its config. With none registered there is nothing to serve, so exit before
     // booting PHP.
-    let mut host: ExtensionHost = ExtensionHost::new();
+    let mut host: ExtensionRuntime = ExtensionRuntime::new();
     host.register::<HttpServer>(http_cfg)?;
     if host.is_empty() {
         return Ok(());
@@ -166,10 +173,10 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // The closure runs ONLY in freshly-forked children: each child's COW copy
     // of `host_cell` is Some, taken exactly once per child. The parent's copy
     // stays untouched (and keeps the prepared fds alive for re-inheritance).
-    let mut host_cell: Option<ExtensionHost> = Some(host);
+    let mut host_cell: Option<ExtensionRuntime> = Some(host);
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
         rapira_master::run(cfg, scoreboard, move |env: rapira_master::WorkerEnv| {
-            let host: ExtensionHost = host_cell.take().expect("fresh child owns the host copy");
+            let host: ExtensionRuntime = host_cell.take().expect("fresh child owns the host copy");
             worker::worker_body(env, host, mode.clone(), script.clone(), max_requests)
         });
 

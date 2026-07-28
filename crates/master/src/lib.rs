@@ -25,7 +25,7 @@ mod process;
 mod scaling;
 mod signals;
 
-pub use lifeline::Lifeline;
+pub use lifeline::{Lifeline, spawn_lifeline_watch};
 pub use signals::block_early_signals;
 
 /// Worker exit-code protocol (worker emits, master consumes; unknown = crash).

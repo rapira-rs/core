@@ -1,9 +1,8 @@
 # core
 
 [![codecov](https://codecov.io/gh/rapira-rs/rapira/graph/badge.svg)](https://app.codecov.io/gh/rapira-rs/rapira)
-![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rapira-rs/rapira?utm_source=oss&utm_medium=github&utm_campaign=rapira-rs%2Frapira&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
-Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HTTP through the bundled `rapira_pingora` plugin (`crates/plugins/pingora`). This repo contains the SAPI core (`php_sys`), the extension host runtime, and the `rapira` binary. Linux and macOS only.
+Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HTTP through the bundled `rapira_pingora` plugin (`crates/plugins/pingora`). This repo contains the SAPI core (`php_sys`), the extension runtime (`rapira_runtime`, `crates/runtime`), and the `rapira` binary. Linux and macOS only.
 
 ## Build requirements
 
@@ -48,13 +47,13 @@ rapira serve [OPTIONS] [SCRIPT]
 Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml`
 (`--config`) or turnkey flags. Precedence is **CLI flags > config file > defaults**.
 
-| Option | Default | Description |
-|---|---|---|
-| `--config <PATH>` | none | Load settings from a `rapira.toml`. |
-| `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected. |
-| `--processes <N>` | CPU count | Worker processes to fork (static count / max_children for dynamic & ondemand). |
-| `--classic` | off | Re-include the script for every request (front-controller style) instead of keeping it resident. |
-| `SCRIPT` | required¹ | PHP entry script. Overrides `pool.entrypoint`. |
+| Option            | Default          | Description                                                                                      |
+| ----------------- | ---------------- | ------------------------------------------------------------------------------------------------ |
+| `--config <PATH>` | none             | Load settings from a `rapira.toml`.                                                              |
+| `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected.  |
+| `--processes <N>` | CPU count        | Worker processes to fork (static count / max_children for dynamic & ondemand).                   |
+| `--classic`       | off              | Re-include the script for every request (front-controller style) instead of keeping it resident. |
+| `SCRIPT`          | required¹        | PHP entry script. Overrides `pool.entrypoint`.                                                   |
 
 ¹ Required unless the config file sets `pool.entrypoint`.
 
@@ -73,6 +72,7 @@ listen = "127.0.0.1:8000"
 server_name = "localhost"    # optional; SERVER_NAME reported to PHP
 server_port = 8000           # optional; defaults to the listen TCP port (80 for unix:)
 max_body_size_mb = 8         # optional; larger request bodies get a 413
+unsafe_field_names = "drop"  # optional; drop (default) | reject
 
 [pool]
 processes = 4                # worker processes to fork (max_children for pm = dynamic/ondemand)
@@ -92,6 +92,19 @@ pidfile = "/run/rapira.pid"  # optional; relative paths resolve against this fil
 
 Unknown keys are rejected. A relative `SCRIPT` on the command line resolves against the
 current directory; a relative `pool.entrypoint` resolves against the config file's directory.
+
+### Request field names
+
+CGI folds a field name into a `$_SERVER` key by uppercasing it and rewriting `-` to `_`, and PHP rewrites `.` to `_` again when it registers the variable. So `X-Forwarded-For`, `X_Forwarded_For` and `X.Forwarded.For` all reach `$_SERVER['HTTP_X_FORWARDED_FOR']` — which lets a client overwrite a field a trusted proxy in front of rapira set.
+
+`http.unsafe_field_names` decides what happens to a name that is not `[A-Za-z0-9-]`:
+
+- `drop` (default) — the field is removed before PHP sees it, and each removal is logged at `warn`.
+- `reject` — the request is answered `400` and nothing is served.
+
+There is no way to turn the screen off. If your clients legitimately send underscore names, rename them to the `-` spelling; a proxy in front of rapira can do the rewrite.
+
+Two other request-field rules follow from the same mapping: a field sent more than once is combined into one value (a comma list, or `"; "` for `Cookie`) before PHP sees it, except for fields whose grammar is a single value — `Authorization`, `Content-Type` and friends keep the first line only. More than one `Host` line is a `400`.
 
 ### Process model
 
