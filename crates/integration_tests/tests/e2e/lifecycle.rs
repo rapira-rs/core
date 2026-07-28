@@ -301,6 +301,27 @@ fn reject_policy_answers_400_for_an_alias_name() {
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 }
 
+/// More than one `Host` line is a 400 (RFC 9112 §3.2,
+/// https://www.rfc-editor.org/rfc/rfc9112#section-3.2). Only a real socket shows that the
+/// pair survives the h1 parser to be caught here: pingora appends every parsed line to the
+/// map and its `validate_request` screens duplicate `Content-Length` only, so nothing
+/// upstream collapses or rejects the second one.
+#[test]
+fn a_second_host_field_line_answers_400() {
+    let srv = spawn_with_config("repeated-headers-worker.php", 1, "");
+    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+
+    // The harness writes `Host: e2e` itself, so one extra makes two lines on the wire.
+    let (code, _) = http_get_with_headers(
+        srv.addr,
+        "/",
+        &[("Host", "evil.example")],
+        Duration::from_secs(10),
+    )
+    .expect("GET / with two Host field lines");
+    assert_eq!(code, 400, "\n{}", diagnostics(&srv));
+}
+
 /// `header("Status: 404")` must become the response code, not a literal field on a 200.
 /// php-src's sapi_header_op does not special-case it, so the field arrives verbatim and the
 /// origin server is what has to convert it (RFC 3875 §6.2.1).

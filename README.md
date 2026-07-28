@@ -105,7 +105,7 @@ CGI folds a field name into a `$_SERVER` key by uppercasing it and rewriting `-`
 
 There is no way to turn the screen off. If your clients legitimately send underscore names, rename them to the `-` spelling; a proxy in front of rapira can do the rewrite.
 
-Two other request-field rules follow from the same mapping: a field sent more than once is combined into one value (a comma list, or `; ` for `Cookie`) before PHP sees it, except for fields whose grammar is a single value — `Authorization`, `Content-Type` and friends keep the first line only. More than one `Host` line is a `400`.
+Two other request-field rules follow from the same mapping: a field sent more than once is combined into one value (a comma list, or `"; "` for `Cookie`) before PHP sees it, except for fields whose grammar is a single value — `Authorization`, `Content-Type` and friends keep the first line only. More than one `Host` line is a `400`.
 
 ### Process model
 

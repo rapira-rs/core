@@ -128,8 +128,11 @@ pub struct Request {
     /// `[A-Za-z0-9-]`; `_` and `.` both reach the CGI variable a `-` name owns, so a name
     /// carrying either lets a client overwrite a field the front set.
     ///
-    /// The host re-normalises both on the way in, so a violation costs a log line rather
-    /// than a silently wrong `$_SERVER`.
+    /// The host re-normalises the repeats on the way in, so that violation costs a log line
+    /// rather than a silently wrong `$_SERVER`. Names it takes as given: only the layer
+    /// terminating the connection can answer a bad one with a `400` instead of dropping it
+    /// silently, so the screen belongs in the extension — `rapira_pingora` runs it in a
+    /// downstream module, before anything reads the map.
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Vec<u8>,
 }
@@ -146,7 +149,8 @@ pub struct Request {
 ///
 /// `Host` is deliberately absent: more than one `Host` line is a 400, not a first-wins
 /// (RFC 9112 §3.2, https://www.rfc-editor.org/rfc/rfc9112#section-3.2), which only a front
-/// terminating the connection can answer.
+/// terminating the connection can answer. The fallback therefore joins it like any other
+/// field: a front that let the repeat through has already skipped the only correct answer.
 pub fn field_line_separator(name: &str) -> Option<&'static [u8]> {
     const SINGLETON: &[&str] = &[
         "authorization",
