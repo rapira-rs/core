@@ -40,6 +40,12 @@ env_logger = "0.11"
 all = "warn"
 
 [profile.release]
+# Cross-crate LTO + a single codegen unit: the hot path spans the pingora/tokio/plugin crates
+# as many small cross-crate calls.
+# NOTE: `panic` must stay "unwind". php_sys::callbacks::guard wraps every SAPI callback in
+# catch_unwind, and that is the only thing turning a panic inside PHP into "fail this request
+# and recycle the worker" instead of aborting the process. Cargo ignores `panic` for the test
+# profile, so switching it here would not fail any test.
 lto = "thin"
 codegen-units = 1
 

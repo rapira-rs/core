@@ -204,9 +204,14 @@ fn non_utf8_multipart_boundary_uploads() {
         http_post(srv.addr, "/", &ctype, &body, Duration::from_secs(10)).expect("POST /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     let out = String::from_utf8_lossy(&out);
+    let tmp = out.strip_prefix("foo.txt|0|bar|").unwrap_or_else(|| {
+        panic!("upload must parse (got {out:?})\n{}", diagnostics(&srv));
+    });
+    // Only level running a resident worker, so the only one where a temp file rfc1867 never
+    // unlinks would pile up across requests until upload_tmp_dir runs out of inodes.
     assert!(
-        out.starts_with("foo.txt|0|bar|"),
-        "upload must parse (got {out:?})\n{}",
+        !std::path::Path::new(tmp).exists(),
+        "upload temp file {tmp} must be cleaned up\n{}",
         diagnostics(&srv)
     );
 }
@@ -297,8 +302,8 @@ fn reject_policy_answers_400_for_an_alias_name() {
 }
 
 /// `header("Status: 404")` must become the response code, not a literal field on a 200.
-/// php-src's sapi_header_op does not special-case it, so the SAPI is what has to consume
-/// it — the CGI SAPI does (cgi_main.c) and nginx additionally hides it from the client.
+/// php-src's sapi_header_op does not special-case it, so the field arrives verbatim and the
+/// origin server is what has to convert it (RFC 3875 §6.2.1).
 #[test]
 fn status_field_sets_the_code_and_never_reaches_the_client() {
     let srv = spawn_with_config("status-header-worker.php", 1, "");

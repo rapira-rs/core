@@ -51,15 +51,15 @@ impl SapiHeader {
             return None;
         }
         let line: &[u8] = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
-        let parsed: Option<(String, Vec<u8>)> = split_header_line(line);
-        if parsed.is_none() {
+        let Some(field) = split_header_line(line) else {
             log::debug!(
                 target: "php",
                 "dropped unrepresentable response header: {}",
                 String::from_utf8_lossy(line)
             );
-        }
-        parsed
+            return None;
+        };
+        Some(field)
     }
 }
 
@@ -69,10 +69,14 @@ fn is_tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
-/// A field-value byte: visible ASCII, obs-text (`0x80..=0xff`), or HTAB. Excludes the
-/// C0 controls and DEL, which a `Vec<u8>` can carry but no field value may.
-fn is_field_vchar(b: u8) -> bool {
-    b >= 0x20 && b != 0x7f || b == b'\t'
+/// A byte a field value may carry: visible ASCII, obs-text (`0x80..=0xff`), SP or HTAB.
+/// Excludes the C0 controls and DEL, which a `Vec<u8>` can hold but no field value may.
+///
+/// Wider than `field-vchar` itself (RFC 9110 §5.5 puts `VCHAR` at `%x21-7E`) because SP and
+/// HTAB are legal *between* vchars in a `field-value`; the caller has already trimmed the
+/// ends, so only interior whitespace reaches here.
+fn is_field_value_byte(b: u8) -> bool {
+    (b >= 0x20 && b != 0x7f) || b == b'\t'
 }
 
 /// Split one emitted header line into a name and value, rejecting anything a front
@@ -86,7 +90,7 @@ fn split_header_line(line: &[u8]) -> Option<(String, Vec<u8>)> {
     if name.is_empty() || !name.iter().all(|&b| is_tchar(b)) {
         return None;
     }
-    if !value.iter().all(|&b| is_field_vchar(b)) {
+    if !value.iter().all(|&b| is_field_value_byte(b)) {
         return None;
     }
     // tchar is ASCII, so the name is UTF-8 by construction.
@@ -118,13 +122,18 @@ fn cgi_header_name(field: &str) -> CString {
 /// half that allocates: it must run to completion before the first register call, so that
 /// frame stays a POF (see the note there).
 ///
-/// One entry per field name in, one out — the front combines a field's repeats before
-/// this point, so nothing here has to look back at what it already pushed.
+/// Returns `ManuallyDrop` rather than a plain `Vec` so the caller cannot hold this across a
+/// register call without saying so: a live `Vec` + `CString`s there is drop glue on a frame a
+/// `zend_bailout` longjmps straight past. Reclaim it with `ManuallyDrop::into_inner` on the
+/// success path.
+///
+/// One entry per field name in, one out — repeats are combined before this point, so nothing
+/// here has to look back at what it already pushed.
 fn cgi_header_vars<'a>(
     headers: &'a [(String, Vec<u8>)],
     content_length: i64,
     server_vars: &'a [(String, String)],
-) -> Vec<(CString, Cow<'a, [u8]>)> {
+) -> ManuallyDrop<Vec<(CString, Cow<'a, [u8]>)>> {
     let mut pairs: Vec<(CString, Cow<'a, [u8]>)> =
         Vec::with_capacity(1 + headers.len() + server_vars.len());
 
@@ -143,7 +152,7 @@ fn cgi_header_vars<'a>(
             Cow::Borrowed(value.as_bytes()),
         ));
     }
-    pairs
+    ManuallyDrop::new(pairs)
 }
 
 pub(crate) unsafe extern "C" fn sapi_startup_cb(sapi_module: *mut sapi_module_struct) -> c_int {
@@ -363,11 +372,11 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         // load-bearing: php_register_variable_safe overwrites a same-named entry (last write wins),
         // so extra server vars registered last take precedence over the derived HTTP_* /
         // CONTENT_LENGTH vars.
-        let pairs = ManuallyDrop::new(cgi_header_vars(
+        let pairs = cgi_header_vars(
             &ctx.req.headers,
             ctx.req.content_length,
             &ctx.req.server_vars,
-        ));
+        );
         for (name, val) in pairs.iter() {
             put_bytes(name, &val[..]);
         }
@@ -497,7 +506,9 @@ mod tests {
     fn registration_order_gives_server_vars_precedence() {
         let headers = hdrs(&[("accept", "text/*")]);
         let server_vars = [("HTTP_ACCEPT".to_owned(), "override".to_owned())];
-        let pairs = cgi_header_vars(&headers, 12, &server_vars);
+        // into_inner because cgi_header_vars hands back a ManuallyDrop: outside the callback
+        // there is no bailout to survive, so the batch is reclaimed normally.
+        let pairs = ManuallyDrop::into_inner(cgi_header_vars(&headers, 12, &server_vars));
         assert_eq!(
             names(&pairs),
             ["CONTENT_LENGTH", "HTTP_ACCEPT", "HTTP_ACCEPT"]

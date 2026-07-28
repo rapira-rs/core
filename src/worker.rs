@@ -1,4 +1,4 @@
-//! Post-fork worker body: quota hooks, extension host + the single PHP
+//! Post-fork worker body: quota hooks, `rapira_runtime` + the single PHP
 //! interpreter, and the exit-code protocol the master consumes. Signal
 //! dispositions and the {QUIT, INT} mask were already set by the master's
 //! fork bracket before this runs.

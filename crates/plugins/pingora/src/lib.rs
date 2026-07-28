@@ -56,9 +56,12 @@ pub struct Config {
 /// What to do with a request field name that maps onto a CGI variable another name
 /// already owns. Structurally mirrors rapira's config-side type, but owned here so this
 /// extension crate never depends on core's config crate.
-/// There is deliberately no "allow" arm: every comparable server either hardcodes the
-/// drop or gates it behind a boolean defaulting to on, and an off-switch here would only
-/// re-open the collision this exists to close (CVE-2026-52845 landed as exactly that fix).
+///
+/// There is deliberately no "allow" arm. Servers that address this at all default to keeping
+/// an aliasing name away from the CGI variable, and the ones that shipped a plain off-switch
+/// are where the collision keeps coming back — CVE-2026-52845 is that bug reached through a
+/// header filter that only removed the exact spelling. An allowlist of specific expected names
+/// could be safe; a boolean could not, so neither is offered until there is a use for one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsafeFieldNames {
     /// Remove the field before anything downstream sees it.
@@ -83,10 +86,11 @@ impl Default for Config {
 /// Whether a request field name reaches a CGI variable no other name can.
 ///
 /// The CGI name is the field name uppercased with `-` rewritten to `_`, and PHP rewrites
-/// `.` and space to `_` again when it registers the variable. A name carrying either byte
+/// `.` and space to `_` again when it registers the variable. A name carrying `_` or `.`
 /// therefore lands on the variable a `-` name owns, letting a client fold a value into a
-/// field the front set. This is an allowlist rather than a denylist of those two bytes, so
-/// it stays correct if either mapper widens.
+/// field the front set. (Space cannot reach here — it is not a tchar, so the parser rejects
+/// it first.) This is an allowlist rather than a denylist of those two bytes, so it stays
+/// correct if either mapper widens.
 fn is_safe_field_name(name: &str) -> bool {
     name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
@@ -110,17 +114,26 @@ impl HttpModule for FieldNameFilter {
             return Ok(());
         }
         if self.0 == UnsafeFieldNames::Reject {
+            // Only the count and one example: pingora logs this at error level (the default
+            // filter's only visible level), so joining every name lets one request with a
+            // few hundred junk fields write a few hundred KB of log.
             return Err(Error::explain(
                 ErrorType::HTTPStatus(400),
                 format!(
-                    "field name aliases a CGI variable: {}",
-                    unsafe_names.join(", ")
+                    "{} field name(s) alias a CGI variable, e.g. {}",
+                    unsafe_names.len(),
+                    unsafe_names[0]
                 ),
             ));
         }
         for name in &unsafe_names {
             req.remove_header(name.as_str());
-            log::debug!("dropped request header {name}: name aliases a CGI variable");
+            // warn, not debug: the default filter prints errors only, so a debug line here
+            // makes a dropped client field indistinguishable from one never sent.
+            log::warn!(
+                "dropped request header {name}: name aliases a CGI variable \
+                 (unsafe_field_names = \"drop\"; use \"reject\" to answer 400 instead)"
+            );
         }
         Ok(())
     }
@@ -306,7 +319,17 @@ async fn serve(
     while inflight.load(Ordering::Acquire) > 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    log::info!("[rapira-pingora] accept loop stopped");
+    // Falling out of the loop on the deadline means the caller is about to drop the runtime
+    // out from under requests that are still running, cutting their responses mid-flight.
+    // Reporting Ok here would surface that as a clean stop with exit code 0.
+    let stranded = inflight.load(Ordering::Acquire);
+    if stranded > 0 {
+        return Err(anyhow!(
+            "http drain timed out after {DRAIN_GRACE:?} with {stranded} request(s) in flight; \
+             their responses were cut short"
+        ));
+    }
+    log::info!("[rapira-pingora] drained cleanly; accept loop stopped");
     Ok(())
 }
 
@@ -327,8 +350,9 @@ impl ProxyHttp for PhpProxy {
         self.inflight.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Runs before `request_filter`, so the field-name policy is applied while the request
-    /// is still a header map — everything downstream sees an already-screened one.
+    /// Registered once when the service is built. The module's `request_header_filter` then
+    /// runs per request ahead of `request_filter`, so the field-name policy is applied while
+    /// the request is still a header map and every later phase sees a screened one.
     fn init_downstream_modules(&self, modules: &mut HttpModules) {
         // The trait default supplies this and an override replaces the whole body, so it
         // has to be re-added or downstream compression loses its (disabled) module.
@@ -421,10 +445,12 @@ fn build_response_header(
         if skip_response_header(&name) {
             continue;
         }
-        // append: PHP may legally repeat headers (Set-Cookie, Vary, Link).
+        // append: PHP may legally repeat headers (Set-Cookie, Vary, Link). value is
+        // Vec<u8>, so it stays binary-safe.
+        // Cloned for the log because append_header takes the name by value and pingora has
+        // no IntoCaseHeaderName impl for a non-'static &str — it cannot be borrowed.
         let logged = name.clone();
         if let Err(e) = header.append_header(name, value) {
-            // value: Vec<u8>, binary-safe
             log::debug!("dropped response header {logged}: {e}");
         }
     }
@@ -468,33 +494,49 @@ pub fn skip_response_header(name: &str) -> bool {
     .any(|h| name.eq_ignore_ascii_case(h))
 }
 
-/// Fold the header map into one entry per field name. Repeats of a field are a comma
-/// list (RFC 9110 §5.3, https://www.rfc-editor.org/rfc/rfc9110#section-5.3); `Cookie`
-/// rejoins on `"; "` instead, the cookie-string form its parser expects (RFC 6265
-/// §4.2.1, https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1).
+/// Fold the header map into one entry per field name, joining a field's repeats with
+/// [`field_line_separator`] — or keeping only the first line for a field whose grammar is
+/// one value.
 ///
 /// Combining is done here, not in the CGI mapping downstream: `HeaderMap` groups by
-/// name, so this needs no assumption about the order repeats arrive in. Values stay raw
+/// name, so this needs no assumption that repeats arrive adjacent. Values stay raw
 /// bytes — a lossy UTF-8 decode would corrupt latin1/binary values (a signed header, a
 /// latin1 cookie) that PHP must see verbatim.
-fn combine_headers(header: &RequestHeader) -> Vec<(String, Vec<u8>)> {
+///
+/// A repeated `Host` is answered 400 rather than folded: RFC 9112 §3.2
+/// (https://www.rfc-editor.org/rfc/rfc9112#section-3.2) makes that a MUST, and pingora's own
+/// `validate_request` screens duplicates of `Content-Length` only.
+fn combine_headers(header: &RequestHeader) -> PingoraResult<Vec<(String, Vec<u8>)>> {
     let mut headers: Vec<(String, Vec<u8>)> = Vec::with_capacity(header.headers.keys_len());
     for name in header.headers.keys() {
-        let separator: &[u8] = if name.as_str() == "cookie" {
-            b"; "
-        } else {
-            b", "
-        };
-        let mut combined: Vec<u8> = Vec::new();
-        for (i, value) in header.headers.get_all(name).iter().enumerate() {
-            if i > 0 {
-                combined.extend_from_slice(separator);
+        let name: &str = name.as_str();
+        let mut lines = header.headers.get_all(name).iter();
+        let Some(first) = lines.next() else { continue };
+        let mut combined: Vec<u8> = first.as_bytes().to_vec();
+
+        if name.eq_ignore_ascii_case("host") {
+            if lines.next().is_some() {
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(400),
+                    "request carries more than one Host field line",
+                ));
             }
-            combined.extend_from_slice(value.as_bytes());
+        } else if let Some(separator) = extension_api::field_line_separator(name) {
+            for value in lines {
+                combined.extend_from_slice(separator);
+                combined.extend_from_slice(value.as_bytes());
+            }
+        } else {
+            // Singleton field: the extra lines are dropped, so say so — a client that sent
+            // two Authorization headers otherwise just sees its credential stop working.
+            let dropped = lines.count();
+            if dropped > 0 {
+                log::warn!("dropped {dropped} extra {name} field line(s): not a list field");
+            }
         }
-        headers.push((name.as_str().to_owned(), combined));
+        headers.push((name.to_owned(), combined));
     }
-    headers
+    Ok(headers)
 }
 
 /// Map a Pingora downstream request into a rapira `Request`. `None` means the request
@@ -514,7 +556,7 @@ async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<
         pingora::http::Version::HTTP_3 => "HTTP/3.0".to_owned(),
         _ => format!("{v:?}"),
     };
-    let headers: Vec<(String, Vec<u8>)> = combine_headers(header);
+    let headers: Vec<(String, Vec<u8>)> = combine_headers(header)?;
 
     let declared_len = header
         .headers
@@ -681,7 +723,8 @@ mod tests {
             ("Accept", "text/*"),
             ("Accept", "image/*"),
             ("User-Agent", "curl"),
-        ]));
+        ]))
+        .unwrap();
         assert_eq!(combined(&headers, "cookie"), Some(&b"a=1; b=2"[..]));
         assert_eq!(combined(&headers, "accept"), Some(&b"text/*, image/*"[..]));
         assert_eq!(combined(&headers, "user-agent"), Some(&b"curl"[..]));
@@ -745,8 +788,43 @@ mod tests {
     /// first value must still be one of the list's elements.
     #[test]
     fn an_empty_first_value_still_separates() {
-        let headers = combine_headers(&request_with(&[("Accept", ""), ("Accept", "text/*")]));
+        let headers =
+            combine_headers(&request_with(&[("Accept", ""), ("Accept", "text/*")])).unwrap();
         assert_eq!(combined(&headers, "accept"), Some(&b", text/*"[..]));
+    }
+
+    /// Joining a singleton field corrupts it — a second `Authorization` folded into the
+    /// first lands inside the credential php-src base64-decodes, turning a working login
+    /// into a garbage one. The first line wins, as it did before combining moved here.
+    #[test]
+    fn singleton_fields_keep_only_the_first_line() {
+        let headers = combine_headers(&request_with(&[
+            ("Authorization", "Basic dXNlcjpwYXNz"),
+            ("Authorization", "Basic ZXZpbDpldmls"),
+            ("Content-Type", "text/plain"),
+            ("Content-Type", "text/evil"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            combined(&headers, "authorization"),
+            Some(&b"Basic dXNlcjpwYXNz"[..])
+        );
+        assert_eq!(combined(&headers, "content-type"), Some(&b"text/plain"[..]));
+    }
+
+    /// RFC 9112 §3.2 makes more than one Host field line a 400. pingora's `validate_request`
+    /// screens duplicate `Content-Length` only, so nothing upstream catches this.
+    #[test]
+    fn a_repeated_host_is_rejected() {
+        let err = combine_headers(&request_with(&[
+            ("Host", "good.example"),
+            ("Host", "evil.example"),
+        ]))
+        .unwrap_err();
+        assert_eq!(err.etype(), &ErrorType::HTTPStatus(400));
+
+        let headers = combine_headers(&request_with(&[("Host", "good.example")])).unwrap();
+        assert_eq!(combined(&headers, "host"), Some(&b"good.example"[..]));
     }
 
     #[test]

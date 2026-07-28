@@ -123,11 +123,46 @@ pub struct Request {
     /// Header values are raw bytes (latin1/binary-safe), mirroring [`Response`]:
     /// a client may send octets that are not valid UTF-8 and PHP must see them verbatim.
     ///
-    /// At most one entry per field name: combine a field's repeats before submitting —
-    /// a comma list, or `"; "` for `Cookie` (RFC 9110 §5.3). A repeated name reaches
-    /// `$_SERVER` as the last value alone, not as the list.
+    /// At most one entry per field name, compared case-insensitively: combine a field's
+    /// repeats with [`field_line_separator`] before submitting. Field names must also be
+    /// `[A-Za-z0-9-]`; `_` and `.` both reach the CGI variable a `-` name owns, so a name
+    /// carrying either lets a client overwrite a field the front set.
+    ///
+    /// The host re-normalises both on the way in, so a violation costs a log line rather
+    /// than a silently wrong `$_SERVER`.
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Vec<u8>,
+}
+
+/// The separator joining repeats of `name`, or `None` when the field's grammar is one value
+/// and repeats must not be joined — the first line wins and the rest are dropped.
+///
+/// RFC 9110 §5.3 (https://www.rfc-editor.org/rfc/rfc9110#section-5.3) permits combining only
+/// "without changing the semantics of the message", i.e. for fields defined as a comma list.
+/// Joining a singleton field corrupts it: a second `Authorization` folded into the first
+/// lands inside the credential php-src base64-decodes. `Cookie` is a list but not a comma
+/// one — it rejoins on `"; "`, the cookie-string form its parser expects (RFC 6265 §4.2.1,
+/// https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1).
+///
+/// `Host` is deliberately absent: more than one `Host` line is a 400, not a first-wins
+/// (RFC 9112 §3.2, https://www.rfc-editor.org/rfc/rfc9112#section-3.2), which only a front
+/// terminating the connection can answer.
+pub fn field_line_separator(name: &str) -> Option<&'static [u8]> {
+    const SINGLETON: &[&str] = &[
+        "authorization",
+        "proxy-authorization",
+        "content-type",
+        "content-length",
+        "referer",
+        "from",
+    ];
+    if SINGLETON.iter().any(|f| name.eq_ignore_ascii_case(f)) {
+        None
+    } else if name.eq_ignore_ascii_case("cookie") {
+        Some(b"; ")
+    } else {
+        Some(b", ")
+    }
 }
 
 #[derive(Default)]

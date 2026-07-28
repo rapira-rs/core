@@ -16,7 +16,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
@@ -68,7 +67,7 @@ impl ExtensionRuntime {
     /// is a hard error.
     pub fn register<E: Extension>(&mut self, config: E::Config) -> anyhow::Result<()> {
         let ext = E::init(config);
-        let name: String = ext.name().to_string();
+        let name = ext.name().to_string();
         if self.exts.iter().any(|e| e.name == name) {
             anyhow::bail!("duplicate extension {name:?}");
         }
@@ -162,7 +161,8 @@ impl RapiraBackend {
     }
 
     /// The one place the `extension_api::Request → php_sys::Request` mapping lives.
-    fn to_request(&self, req: extension_api::Request) -> php_sys::Request {
+    fn to_request(&self, mut req: extension_api::Request) -> php_sys::Request {
+        req.headers = combine_field_lines(std::mem::take(&mut req.headers));
         let query = req.uri.split_once('?').map_or("", |(_, q)| q).to_string();
         // Carried as raw bytes, like every other header value: php-src takes the
         // multipart boundary out of this verbatim, so a lossy decode would turn a
@@ -195,6 +195,34 @@ impl RapiraBackend {
     }
 }
 
+/// Make `php_sys::Request::headers`' "at most one entry per field name" invariant true rather
+/// than merely documented. The front an extension is built on normally groups by name already
+/// (this is a no-op for `rapira_pingora`), but the invariant governs the CGI `$_SERVER` mapping
+/// and every consumer of a violation disagrees about which duplicate wins: `HTTP_*` keeps the
+/// last, the cookie fold keeps all, and the `AUTH_TYPE` lookup keeps the first. Normalising at
+/// the one funnel every extension passes through costs a pass over ~20 short names.
+///
+/// Case-insensitive, because `cgi_header_name` uppercases: `Cookie` and `cookie` are distinct
+/// `String`s that land on one CGI variable.
+fn combine_field_lines(lines: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<(String, Vec<u8>)> = Vec::with_capacity(lines.len());
+    for (name, value) in lines {
+        let Some(i) = out.iter().position(|(n, _)| n.eq_ignore_ascii_case(&name)) else {
+            out.push((name, value));
+            continue;
+        };
+        let Some(separator) = extension_api::field_line_separator(&name) else {
+            log::warn!("dropped a repeated {name} field line: not a list field");
+            continue;
+        };
+        log::warn!("combined a repeated {name} field line; extensions should submit one entry");
+        let combined: &mut Vec<u8> = &mut out[i].1;
+        combined.extend_from_slice(separator);
+        combined.extend_from_slice(&value);
+    }
+    out
+}
+
 impl extension_api::Backend for RapiraBackend {
     /// Submit `req` and collect the whole response — the worker seals it into a
     /// single frame, so the caller wakes once per response (the error contract lives
@@ -205,7 +233,7 @@ impl extension_api::Backend for RapiraBackend {
     ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::Response>> + Send + '_>>
     {
         Box::pin(async move {
-            let mut rx: Receiver<php_sys::Frame> = self.rapira.handle(self.to_request(req)).await?;
+            let mut rx = self.rapira.handle(self.to_request(req)).await?;
             let Some(frame) = rx.recv().await else {
                 return Err(anyhow::anyhow!(
                     "php worker died mid-response (channel closed without a response)"
@@ -378,6 +406,56 @@ mod tests {
     fn rapira_runtime_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<ExtensionRuntime>();
+    }
+
+    fn lines(pairs: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.as_bytes().to_vec()))
+            .collect()
+    }
+
+    fn value<'a>(pairs: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
+        pairs
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_slice())
+    }
+
+    /// `php_sys::Request::headers` promises at most one entry per name, and the consumers of a
+    /// violation disagree about which duplicate wins — `HTTP_*` keeps the last, the cookie fold
+    /// keeps all, `AUTH_TYPE` keeps the first. An extension that submits repeats must not be
+    /// able to produce that split.
+    #[test]
+    fn repeated_field_lines_are_combined_before_php_sees_them() {
+        let combined = combine_field_lines(lines(&[
+            ("Cookie", "a=1"),
+            ("cookie", "b=2"),
+            ("X-Forwarded-For", "1.2.3.4"),
+            ("X-Forwarded-For", "5.6.7.8"),
+            ("Accept", "text/*"),
+        ]));
+        assert_eq!(combined.len(), 3, "one entry per field name");
+        assert_eq!(value(&combined, "cookie"), Some(&b"a=1; b=2"[..]));
+        assert_eq!(
+            value(&combined, "x-forwarded-for"),
+            Some(&b"1.2.3.4, 5.6.7.8"[..])
+        );
+        assert_eq!(value(&combined, "accept"), Some(&b"text/*"[..]));
+    }
+
+    /// Joining a singleton field corrupts it: a second `Authorization` folded into the first
+    /// lands inside the credential php-src base64-decodes.
+    #[test]
+    fn repeated_singleton_field_lines_keep_only_the_first() {
+        let combined = combine_field_lines(lines(&[
+            ("Authorization", "Basic dXNlcjpwYXNz"),
+            ("Authorization", "Basic ZXZpbDpldmls"),
+        ]));
+        assert_eq!(
+            value(&combined, "authorization"),
+            Some(&b"Basic dXNlcjpwYXNz"[..])
+        );
     }
 
     /// The reaper dequeues a blocked, pending signal via `sigwait` instead of letting it

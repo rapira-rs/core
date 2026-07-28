@@ -69,9 +69,10 @@ pub struct Request {
     pub script_name: String,
     pub document_root: String,
     pub script_filename: PathBuf,
-    /// At most one entry per field name, a field's repeats already combined by the
-    /// front. A repeated name here would register the CGI variable twice, and
-    /// `php_register_variable_safe` keeps only the last.
+    /// At most one entry per field name, compared case-insensitively — a field's repeats are
+    /// combined before this point. A repeated name would register the CGI variable twice and
+    /// `php_register_variable_safe` keeps only the last, while the `Cookie` and `AUTH_TYPE`
+    /// readers below would each pick a different one.
     pub headers: Vec<(String, Vec<u8>)>, // values as bytes: latin1/binary-safe
     pub server_vars: Vec<(String, String)>,
     /// Raw bytes like every other header value: php-src builds the multipart boundary
@@ -113,18 +114,14 @@ pub struct ReqC {
 
 impl ReqC {
     pub fn build(r: &Request) -> Self {
-        let mut cookie: Option<Vec<u8>> = None;
-        for (_, v) in r
+        // One entry per field name by the time a request gets here, and repeats of Cookie
+        // were already rejoined on "; ", so this reads the single entry. Folding here as
+        // well would leave $_COOKIE and $_SERVER['HTTP_COOKIE'] disagreeing.
+        let cookie: Option<Vec<u8>> = r
             .headers
             .iter()
-            .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
-        {
-            let buf = cookie.get_or_insert_default();
-            if !buf.is_empty() {
-                buf.extend_from_slice(b"; ");
-            }
-            buf.extend_from_slice(v);
-        }
+            .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+            .map(|(_, v)| v.clone());
 
         // Build the CStrings straight from the header bytes — no owned-String detour.
         let authorization: Option<CString> = r
@@ -212,18 +209,27 @@ impl Context {
     /// Record the response head (first write wins is enforced by the callers' `stream` guards)
     /// and advance `stream` to `HeadSent`.
     ///
-    /// A `Status:` field is consumed here rather than forwarded. `sapi_header_op` gives it
-    /// no special handling — it screens only `HTTP/`, `Content-Type`, `Content-Length`,
-    /// `Location` and `WWW-Authenticate` — so turning it into the response status is the
-    /// SAPI's job, and it must not reach the client under its own name.
-    pub fn commit_head(&mut self, status: u16, mut headers: Vec<(String, Vec<u8>)>) {
-        let mut status: u16 = status;
+    /// A `Status:` field is consumed here rather than forwarded. `sapi_header_op` gives it no
+    /// special handling — it screens only `HTTP/`, `Content-Type`, `Content-Length`, `Location`
+    /// and `WWW-Authenticate` — so the field arrives verbatim, and converting it is the origin
+    /// server's job (RFC 3875 §6.2.1: "The server MUST make any appropriate modifications to
+    /// the script's output to ensure that the response to the client complies with the response
+    /// protocol version", https://www.rfc-editor.org/rfc/rfc3875#section-6.2.1). Here the SAPI
+    /// and the origin server are one process. It must not reach the client under its own name.
+    pub fn commit_head(&mut self, mut status: u16, mut headers: Vec<(String, Vec<u8>)>) {
         headers.retain(|(name, value)| {
             if !name.eq_ignore_ascii_case("status") {
                 return true;
             }
-            if let Some(code) = status_field_code(value) {
-                status = code;
+            match status_field_code(value) {
+                Some(code) => status = code,
+                // Dropped either way, so without this the app sees its 404 silently served
+                // as a 200 with nothing logged anywhere.
+                None => log::warn!(
+                    target: "php",
+                    "ignored malformed Status field {:?}; status stays {status}",
+                    String::from_utf8_lossy(value)
+                ),
             }
             false
         });
@@ -265,5 +271,78 @@ mod tests {
         assert_eq!(status_field_code(b"99"), None);
         assert_eq!(status_field_code(b"600"), None);
         assert_eq!(status_field_code(b"70000"), None);
+    }
+
+    fn head_of(status: u16, headers: &[(&str, &str)]) -> ResponseHead {
+        let mut ctx = Context {
+            req: Request {
+                method: String::new(),
+                uri: String::new(),
+                https: false,
+                query: String::new(),
+                protocol: String::new(),
+                remote_addr: String::new(),
+                server_name: String::new(),
+                server_port: String::new(),
+                remote_port: String::new(),
+                script_name: String::new(),
+                document_root: String::new(),
+                script_filename: PathBuf::new(),
+                headers: Vec::new(),
+                server_vars: Vec::new(),
+                content_type: None,
+                content_length: -1,
+                body: Box::new(std::io::empty()),
+            },
+            c: ReqC {
+                method: CString::default(),
+                query: CString::default(),
+                uri: CString::default(),
+                script: CString::default(),
+                ctype: None,
+                cookie: None,
+                authorization: None,
+                env: HashMap::new(),
+            },
+            sender: None,
+            head: None,
+            body: Vec::new(),
+            stream: StreamState::NotSent,
+            tearing_down: false,
+        };
+        let headers = headers
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.as_bytes().to_vec()))
+            .collect();
+        ctx.commit_head(status, headers);
+        ctx.head.expect("commit_head records a head")
+    }
+
+    /// The whole `Status:` feature lives in commit_head's retain closure: the field sets the
+    /// code, never reaches the client, and the match is case-insensitive because php-src
+    /// passes whatever spelling the script wrote.
+    #[test]
+    fn commit_head_consumes_the_status_field() {
+        let head = head_of(200, &[("status", "404 Not Found"), ("X-Keep", "kept")]);
+        assert_eq!(head.status, 404);
+        assert_eq!(head.headers.len(), 1);
+        assert_eq!(head.headers[0].0, "X-Keep");
+    }
+
+    /// A `Status:` the SAPI cannot parse must still be consumed — forwarding it would put a
+    /// literal `Status:` field on the wire — but it must not invent a code.
+    #[test]
+    fn commit_head_drops_an_unparseable_status_without_changing_the_code() {
+        let head = head_of(201, &[("Status", "NotFound")]);
+        assert_eq!(head.status, 201);
+        assert!(head.headers.is_empty());
+    }
+
+    /// RFC 3875 §6.3.3 makes `Status` the script's own result code, and §6.2.1 puts the
+    /// conversion on the server — so it is authoritative over whatever code php-src had
+    /// already recorded from `http_response_code()`.
+    #[test]
+    fn commit_head_lets_the_status_field_override_the_recorded_code() {
+        assert_eq!(head_of(500, &[("Status", "404")]).status, 404);
     }
 }

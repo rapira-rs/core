@@ -135,12 +135,18 @@ pub struct HttpSettings {
 }
 
 /// What to do with a request field whose name reaches a CGI variable another name owns:
-/// the `HTTP_*` mapping rewrites `-` to `_`, and PHP rewrites `.` and space to `_` again,
-/// so `X_Forwarded_For` and `X.Forwarded.For` both land on `HTTP_X_FORWARDED_FOR`.
+/// the `HTTP_*` mapping rewrites `-` to `_`, and PHP rewrites `.` to `_` again, so
+/// `X_Forwarded_For` and `X.Forwarded.For` both land on `HTTP_X_FORWARDED_FOR`.
 /// Only `[A-Za-z0-9-]` is safe.
-/// There is deliberately no "allow" arm — see `rapira_pingora::UnsafeFieldNames`.
+///
+/// There is deliberately no "allow" arm: an off-switch would re-open the very collision the
+/// screen exists to close, and a client that can pick the aliasing spelling can overwrite a
+/// field the front set. An allowlist of specific expected names could be safe; a boolean
+/// could not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
+// No deny_unknown_fields: it governs struct variants, so it is inert on a unit-only enum.
+// An unrecognised value is already an error because serde has no variant to match it.
+#[serde(rename_all = "lowercase")]
 pub enum UnsafeFieldNames {
     /// Remove the field before PHP sees it.
     #[default]
