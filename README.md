@@ -1,7 +1,6 @@
 # core
 
 [![codecov](https://codecov.io/gh/rapira-rs/rapira/graph/badge.svg)](https://app.codecov.io/gh/rapira-rs/rapira)
-![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rapira-rs/rapira?utm_source=oss&utm_medium=github&utm_campaign=rapira-rs%2Frapira&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 Rapira - PHP application server. Embeds NTS PHP via the embed SAPI and serves HTTP through the bundled `rapira_pingora` plugin (`crates/plugins/pingora`). This repo contains the SAPI core (`php_sys`), the extension runtime (`rapira_runtime`, `crates/runtime`), and the `rapira` binary. Linux and macOS only.
 
@@ -48,13 +47,13 @@ rapira serve [OPTIONS] [SCRIPT]
 Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml`
 (`--config`) or turnkey flags. Precedence is **CLI flags > config file > defaults**.
 
-| Option | Default | Description |
-|---|---|---|
-| `--config <PATH>` | none | Load settings from a `rapira.toml`. |
-| `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected. |
-| `--processes <N>` | CPU count | Worker processes to fork (static count / max_children for dynamic & ondemand). |
-| `--classic` | off | Re-include the script for every request (front-controller style) instead of keeping it resident. |
-| `SCRIPT` | required¹ | PHP entry script. Overrides `pool.entrypoint`. |
+| Option            | Default          | Description                                                                                      |
+| ----------------- | ---------------- | ------------------------------------------------------------------------------------------------ |
+| `--config <PATH>` | none             | Load settings from a `rapira.toml`.                                                              |
+| `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected.  |
+| `--processes <N>` | CPU count        | Worker processes to fork (static count / max_children for dynamic & ondemand).                   |
+| `--classic`       | off              | Re-include the script for every request (front-controller style) instead of keeping it resident. |
+| `SCRIPT`          | required¹        | PHP entry script. Overrides `pool.entrypoint`.                                                   |
 
 ¹ Required unless the config file sets `pool.entrypoint`.
 
