@@ -8,6 +8,9 @@ permissions:
 jobs:
   coverage:
     runs-on: ubuntu-latest
+    env:
+      # setup-php's version and the versioned libphp path below must agree
+      PHP_VERSION: "8.5"
     permissions:
       contents: read
       id-token: write # Codecov OIDC upload (unavailable on fork PRs; see use_oidc below)
@@ -17,12 +20,28 @@ jobs:
 
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: "8.5"
-          # keep in sync with ci/php-configure-flags.txt
-          extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, openssl, pdo_sqlite, phar, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
+          php-version: ${{ env.PHP_VERSION }}
+          # this job measures Rust coverage; a PHP coverage driver adds nothing and, left unset,
+          # overrides zend_error_cb and zend_execute_ex in the embed SAPI
+          coverage: none
+          # keep in sync with ci.yml and ci/php-configure-flags.txt — an extension missing here
+          # makes its php_ext test skip rather than fail, so coverage silently stops measuring it
+          extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, opcache, openssl, pdo_sqlite, phar, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
           phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning
+
+      # `coverage: none` above disables it; assert, so a driver leaking back in fails here
+      # instead of surfacing as diagnostics that never went through php_error_cb. This reads the
+      # CLI SAPI: a proxy, since drivers are enabled per-SAPI and no tool reports the embed
+      # conf.d. Both are cleared by the same phpdismod, so a leak shows up here too.
+      - name: Verify no coverage driver in the PHP build
+        run: |
+          mods=$(php -m); echo "$mods"
+          if grep -qiE '^(xdebug|pcov)$' <<<"$mods"; then
+            echo "::error::a PHP coverage driver is enabled; it overrides zend_error_cb and JIT in the embed SAPI"
+            exit 1
+          fi
 
       - name: Build deps for bindgen/cc
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
@@ -32,7 +51,7 @@ jobs:
       # version and symlink it into a private dir to link against.
       - name: Expose the PHP embed lib
         run: |
-          LIBPHP=/usr/lib/libphp8.5.so
+          LIBPHP=/usr/lib/libphp${PHP_VERSION}.so
           test -e "$LIBPHP" || { echo "missing $LIBPHP"; exit 1; }
           mkdir -p "$RUNNER_TEMP/phplib"
           ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
@@ -43,6 +62,9 @@ jobs:
         with: { components: llvm-tools-preview }
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
+        with:
+          # a failing test run would otherwise discard the instrumented deps
+          cache-on-failure: true
 
       - name: Generate coverage (lcov)
         run: >-

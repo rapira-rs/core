@@ -112,7 +112,22 @@ fn init_php_env() {
     });
 }
 
-pub static LOG_CAPTURE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// One captured `log` record. PHP diagnostics are asserted on level and target, not just text.
+#[derive(Debug)]
+pub struct Captured {
+    pub level: log::Level,
+    pub target: String,
+    pub message: String,
+}
+
+static LOG_CAPTURE: Mutex<Vec<Captured>> = Mutex::new(Vec::new());
+
+/// The captured records. A failing assertion holds this guard while it panics, so the lock is
+/// recovered rather than unwrapped: otherwise one real failure poisons the buffer and every
+/// later test in the binary dies on `PoisonError` instead of its own assertion.
+pub fn captured() -> sync::MutexGuard<'static, Vec<Captured>> {
+    LOG_CAPTURE.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 struct CaptureLogger;
 impl log::Log for CaptureLogger {
@@ -120,9 +135,11 @@ impl log::Log for CaptureLogger {
         true
     }
     fn log(&self, record: &log::Record) {
-        if let Ok(mut buf) = LOG_CAPTURE.lock() {
-            buf.push(record.args().to_string());
-        }
+        captured().push(Captured {
+            level: record.level(),
+            target: record.target().to_owned(),
+            message: record.args().to_string(),
+        });
     }
     fn flush(&self) {}
 }
@@ -132,6 +149,7 @@ pub fn init_log_capture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let _ = log::set_boxed_logger(Box::new(CaptureLogger));
-        log::set_max_level(log::LevelFilter::Info);
+        // Trace: masked diagnostics and deprecations log below Info.
+        log::set_max_level(log::LevelFilter::Trace);
     });
 }

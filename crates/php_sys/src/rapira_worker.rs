@@ -1,7 +1,11 @@
 use log::error;
 
-use crate::{callbacks::*, scoreboard::sb_update, start::pull_job, types::Outcome};
+use crate::{
+    callbacks::*, diagnostics::error_type_to_level, scoreboard::sb_update, start::pull_job,
+    types::Outcome,
+};
 use std::{
+    borrow::Cow,
     cell::RefCell,
     os::raw::c_int,
     path::{Path, PathBuf},
@@ -11,7 +15,7 @@ use crate::{
     callbacks::guard,
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
-    php_request_startup, rapira_pg, rapira_run_handler,
+    php_request_startup, rapira_eg, rapira_pg, rapira_run_handler,
     types::Job,
     zend_fcall_info, zend_fcall_info_cache, *,
 };
@@ -255,12 +259,33 @@ pub extern "C" fn rapira_rs_finish_response() {
 
 fn log_and_clear_last_error() {
     unsafe {
-        let zend_str = (*rapira_pg()).last_error_message;
-        if !zend_str.is_null() {
-            let msg =
-                std::slice::from_raw_parts((*zend_str).val.as_ptr().cast::<u8>(), (*zend_str).len);
-            error!(target: "php", "last error: {}", String::from_utf8_lossy(msg));
+        let pg = rapira_pg();
+        let msg = (*pg).last_error_message;
+        // php-src's clear_last_error() releases the message but leaves last_error_type and
+        // last_error_lineno set (main/main.c:1307-1316), so the message pointer is the only
+        // valid "slot is filled" signal.
+        if !msg.is_null() {
+            // php_error_cb fills the slot for every diagnostic and only then applies
+            // EG(error_reporting), to decide display and logging (main/main.c:1394-1411), so
+            // the mask has to be reapplied here.
+            // https://www.php.net/manual/en/errorfunc.configuration.php#ini.error-reporting
+            let (level, label) =
+                error_type_to_level((*pg).last_error_type, (*rapira_eg()).error_reporting);
+            // the conversions stay inline: log! evaluates its arguments inside the level check,
+            // and this runs on every request
+            log::log!(
+                target: "php", level,
+                "last error: {label}: {} in {}:{}",
+                zstr_lossy(&*msg),
+                zstr_lossy(&*(*pg).last_error_file),
+                (*pg).last_error_lineno
+            );
         }
         rapira_clear_last_error();
     }
+}
+
+fn zstr_lossy(s: &zend_string) -> Cow<'_, str> {
+    let bytes = unsafe { std::slice::from_raw_parts(s.val.as_ptr().cast::<u8>(), s.len) };
+    String::from_utf8_lossy(bytes)
 }

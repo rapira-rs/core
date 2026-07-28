@@ -163,20 +163,23 @@ rapira serve --classic public/index.php
 
 ## Logging
 
-Logging is `env_logger`-based and configured with the `RUST_LOG` environment variable. Without it only errors are printed.
+Logging is `env_logger`-based and configured with the `RUST_LOG` environment variable. Without it PHP diagnostics print from `warn` up and everything else from `error` up.
 
 Log targets:
 
 - `rapira` — server lifecycle: boot, worker lifecycle, shutdown
 - `ext` — extension task outcomes
-- `php` — output and errors coming from PHP itself
+- `php` — output and diagnostics coming from PHP itself
 - dependencies log under their module paths (`pingora`, `tokio`, …)
+
+PHP diagnostics take their level from the error type: fatal errors (`E_ERROR`, `E_PARSE`, `E_CORE_ERROR`, `E_COMPILE_ERROR`, `E_USER_ERROR`, `E_RECOVERABLE_ERROR`) log at `error`, warnings at `warn`, notices at `info`, deprecations at `debug`. A diagnostic excluded by the script's [`error_reporting`](https://www.php.net/manual/en/function.error-reporting.php) mask drops to `trace`, so `error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED)` keeps vendor deprecations out of the log. Fatals are never demoted — they explain why a worker recycled — and `E_CORE_ERROR`/`E_CORE_WARNING` are raised before a script can set a mask at all.
 
 Examples:
 
 ```sh
 RUST_LOG=info rapira serve worker.php            # info+ for everything
 RUST_LOG=rapira=debug,php=info rapira serve worker.php
+RUST_LOG=info,php=debug rapira serve worker.php     # include PHP deprecations
 RUST_LOG=warn,rapira=trace rapira serve worker.php  # quiet deps, trace the server
 ```
 
