@@ -151,6 +151,10 @@ pub struct Request {
 /// (RFC 9112 §3.2, https://www.rfc-editor.org/rfc/rfc9112#section-3.2), which only a front
 /// terminating the connection can answer. The fallback therefore joins it like any other
 /// field: a front that let the repeat through has already skipped the only correct answer.
+/// Joining is the safer of the two wrong answers — `Host = uri-host [ ":" port ]` admits no
+/// comma (RFC 9110 §7.2, https://www.rfc-editor.org/rfc/rfc9110#section-7.2), so the joined
+/// value fails closed in whatever parses `HTTP_HOST`, where a first-wins would instead hand
+/// PHP a clean authority the client picked.
 pub fn field_line_separator(name: &str) -> Option<&'static [u8]> {
     const SINGLETON: &[&str] = &[
         "authorization",
