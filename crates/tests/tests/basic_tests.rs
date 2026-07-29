@@ -1,7 +1,7 @@
 use std::thread;
 
-use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 use php_sys::{Mode, Rapira};
+use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 
 // this test works on both zts and nts
 #[test]
@@ -516,11 +516,7 @@ fn log_callback_levels(logged: &[tests::Captured], mark: &str) -> Vec<log::Level
     php_levels(logged, mark, false)
 }
 
-fn php_levels(
-    logged: &[tests::Captured],
-    mark: &str,
-    teardown: bool,
-) -> Vec<log::Level> {
+fn php_levels(logged: &[tests::Captured], mark: &str, teardown: bool) -> Vec<log::Level> {
     logged
         .iter()
         .filter(|c| {
