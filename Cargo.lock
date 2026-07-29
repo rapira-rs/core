@@ -924,19 +924,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "integration_tests"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "extension_api",
- "libc",
- "log",
- "php_sys",
- "rapira_runtime",
- "tokio",
-]
-
-[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1977,6 +1964,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "extension_api",
+ "libc",
+ "log",
+ "php_sys",
+ "rapira_runtime",
+ "tokio",
 ]
 
 [[package]]

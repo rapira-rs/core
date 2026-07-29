@@ -15,9 +15,9 @@
 //! https://man7.org/linux/man-pages/man7/signal.7.html
 #![cfg(not(any(target_os = "macos", target_os = "windows")))]
 
-use integration_tests::{drain, fixture, php_lock_with_ini, req};
 use php_sys::{Mode, Rapira};
 use std::path::Path;
+use tests::{drain, fixture, php_lock_with_ini, req};
 
 #[test]
 fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {

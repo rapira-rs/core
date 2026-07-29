@@ -1,7 +1,7 @@
 use std::{ops::Deref, path::Path};
 
-use integration_tests::{drain, fixture, php_lock, req};
 use php_sys::{Frame, Mode, Rapira, Request};
+use tests::{drain, fixture, php_lock, req};
 
 fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u8>) -> Request {
     let mut r: Request = req(&format!("/{fixture_name}?{query}"), fixture_name);

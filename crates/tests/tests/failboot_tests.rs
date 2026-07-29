@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use integration_tests::{drain, php_lock, req, set_phprc};
 use php_sys::{Mode, Rapira};
+use tests::{drain, php_lock, req, set_phprc};
 
 // A removed ini directive is a module-startup fatal, which is what makes Rapira::start fail;
 // the follow-up clean-ini start must then run a full module startup.

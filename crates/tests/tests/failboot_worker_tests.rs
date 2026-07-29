@@ -1,7 +1,7 @@
-use integration_tests::{drain, fixture, php_lock, req};
 use php_sys::{Mode, Rapira};
 use std::sync::mpsc;
 use std::time::Duration;
+use tests::{drain, fixture, php_lock, req};
 
 // A6: a worker script that fatals before its `handleRequest` loop can
 // never read the intake channel from PHP. The Rust boot-failure drain must

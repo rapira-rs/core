@@ -41,7 +41,7 @@ test_nts:
 	RUSTFLAGS="-L native=$$PHPLIB" \
 	cargo test --workspace
 
-# The spawn-the-binary end-to-end suite (crates/integration_tests, --features e2e):
+# The spawn-the-binary end-to-end suite (crates/tests, --features e2e):
 # forks workers, binds ports, drives real HTTP, asserts signal/reload/scaling. Run
 # separately so the forking servers do not oversubscribe the in-process PHP tests.
 # Builds the rapira bin first; the harness locates it beside the test binary.
@@ -58,7 +58,7 @@ test_e2e:
 	LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
 	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
 	RUSTFLAGS="-L native=$$PHPLIB" \
-	cargo test -p integration_tests --test e2e --features e2e -- --test-threads=1
+	cargo test -p tests --test e2e --features e2e -- --test-threads=1
 
 # Requires: cargo install cargo-llvm-cov && rustup component add llvm-tools-preview
 coverage:
@@ -69,4 +69,4 @@ coverage:
 	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
 	RUSTFLAGS="-L native=$$PHPLIB" \
 	cargo llvm-cov --workspace --lcov --output-path lcov.info \
-		--ignore-filename-regex '(crates/integration_tests/|bindings\.rs$$|/src/main\.rs$$)'
+		--ignore-filename-regex '(crates/tests/|bindings\.rs$$|/src/main\.rs$$)'

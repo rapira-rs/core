@@ -21,7 +21,7 @@
       },
       "args": [
         "serve",
-        "${workspaceFolder}/crates/integration_tests/fixtures/worker.php"
+        "${workspaceFolder}/crates/tests/fixtures/worker.php"
       ],
       "cwd": "${workspaceFolder}",
       "terminal": "integrated",
@@ -50,7 +50,7 @@
       "args": [
         "serve",
         "--classic",
-        "${workspaceFolder}/crates/integration_tests/fixtures/hello.php"
+        "${workspaceFolder}/crates/tests/fixtures/hello.php"
       ],
       "cwd": "${workspaceFolder}",
       "terminal": "integrated",
@@ -67,7 +67,7 @@
           "test",
           "--no-run",
           "-p",
-          "integration_tests"
+          "tests"
         ],
         "env": {
           "PHP_CONFIG": "/usr/bin/php-config",

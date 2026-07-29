@@ -1,7 +1,7 @@
 use std::io::Read;
 
-use integration_tests::{drain, fixture, php_lock, req};
 use php_sys::{Mode, Rapira, Request};
+use tests::{drain, fixture, php_lock, req};
 
 /// Body source returning at most one byte per read() call — legal `Read`
 /// behavior that streaming bodies (pipes, chunked decoders) exhibit.

@@ -1,5 +1,5 @@
-use integration_tests::{drain, fixture, php_lock, req};
 use php_sys::{Mode, Rapira};
+use tests::{drain, fixture, php_lock, req};
 
 #[test]
 fn plugin_handler_serves_requests() -> anyhow::Result<()> {

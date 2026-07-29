@@ -69,7 +69,7 @@ jobs:
       - name: Generate coverage (lcov)
         run: >-
           cargo llvm-cov --workspace --lcov --output-path lcov.info
-          --ignore-filename-regex '(crates/integration_tests/|bindings\.rs$|/src/main\.rs$)'
+          --ignore-filename-regex '(crates/tests/|bindings\.rs$|/src/main\.rs$)'
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5

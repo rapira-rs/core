@@ -1,11 +1,11 @@
 //! End-to-end: a native extension drives requests through PHP via `Php`.
 
 use extension_api::{Extension, Php, Request, Response, Result};
-use integration_tests::{fixture, php_lock};
 use php_sys::{Mode, Rapira};
 use rapira_runtime::ExtensionRuntime;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use tests::{fixture, php_lock};
 
 /// Distinct ids so the same type can be registered many times (dup-name check).
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);

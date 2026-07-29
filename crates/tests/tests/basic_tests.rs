@@ -1,6 +1,6 @@
 use std::thread;
 
-use integration_tests::{captured, drain, fixture, init_log_capture, php_lock, req};
+use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 use php_sys::{Mode, Rapira};
 
 // this test works on both zts and nts
@@ -506,18 +506,18 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
 /// Levels of the worker's teardown last-error records carrying `mark`. Anchored on that line's
 /// own prefix so each logging path is asserted separately, and so a `php`-target record that
 /// only quotes the marker — a stack frame, say — is never counted as a diagnostic.
-fn last_error_levels(logged: &[integration_tests::Captured], mark: &str) -> Vec<log::Level> {
+fn last_error_levels(logged: &[tests::Captured], mark: &str) -> Vec<log::Level> {
     php_levels(logged, mark, true)
 }
 
 /// Levels of the SAPI log-callback records carrying `mark` — the `php` target minus the
 /// teardown line.
-fn log_callback_levels(logged: &[integration_tests::Captured], mark: &str) -> Vec<log::Level> {
+fn log_callback_levels(logged: &[tests::Captured], mark: &str) -> Vec<log::Level> {
     php_levels(logged, mark, false)
 }
 
 fn php_levels(
-    logged: &[integration_tests::Captured],
+    logged: &[tests::Captured],
     mark: &str,
     teardown: bool,
 ) -> Vec<log::Level> {

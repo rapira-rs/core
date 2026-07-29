@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use integration_tests::{drain, fixture, php_lock_with_ini, req};
 use php_sys::{Mode, Rapira};
+use tests::{drain, fixture, php_lock_with_ini, req};
 
 // The observer API only registers at module startup, and zend_test's observer writes
 // markers into the response body - so these run in their own process with their own ini,

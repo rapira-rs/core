@@ -1,5 +1,5 @@
-use integration_tests::{drain_async, fixture, php_lock_async, req};
 use php_sys::{Mode, Rapira};
+use tests::{drain_async, fixture, php_lock_async, req};
 
 #[tokio::test]
 async fn hello_world_worker() -> anyhow::Result<()> {

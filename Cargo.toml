@@ -14,8 +14,8 @@ path = "src/main.rs"
 members = [
     "crates/config",
     "crates/runtime",
-    "crates/extensions_api",
-    "crates/integration_tests",
+    "crates/api",
+    "crates/tests",
     "crates/master",
     "crates/php_sys",
     "crates/scoreboard",
@@ -28,7 +28,7 @@ log = { version = "0.4", features = ["std"] }
 php_sys = { path = "crates/php_sys" }
 rapira_runtime = { path = "crates/runtime" }
 rapira_config = { path = "crates/config" }
-extension_api = { path = "crates/extensions_api" }
+extension_api = { path = "crates/api" }
 rapira_pingora = { path = "crates/plugins/pingora" }
 rapira_master = { path = "crates/master" }
 rapira_scoreboard = { path = "crates/scoreboard" }

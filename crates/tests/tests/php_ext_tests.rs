@@ -1,5 +1,5 @@
-use integration_tests::{drain, fixture, php_lock, req};
 use php_sys::{Mode, Rapira};
+use tests::{drain, fixture, php_lock, req};
 
 // One resident worker per extension; `?boom=1` switches its handler to the throwing
 // call. 1 thread => the follow-up request rides the same interpreter, proving an

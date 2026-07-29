@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 publish = false
 license = "MIT"
-description = "Native rapira extension contract — the API every extension implements to drive PHP"
+description = "Native rapira extension contract - the API every extension implements to drive PHP"
 
 [lints]
 workspace = true

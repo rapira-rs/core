@@ -1,5 +1,5 @@
 [package]
-name = "integration_tests"
+name = "tests"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -22,7 +22,7 @@ libc = "0.2"
 
 # The spawn-the-binary E2E suite forks worker processes and runs request storms;
 # gated behind a feature so `cargo test --workspace` skips it. Run it isolated
-# (build the rapira bin first): cargo test -p integration_tests --test e2e --features e2e
+# (build the rapira bin first): cargo test -p tests --test e2e --features e2e
 [features]
 e2e = []
 

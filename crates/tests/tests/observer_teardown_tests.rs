@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use integration_tests::{drain, fixture, php_lock_with_ini, req};
 use php_sys::{Mode, Rapira};
+use tests::{drain, fixture, php_lock_with_ini, req};
 
 // A bailing save handler bails inside rapira_reset_session. The longjmp skips the observer
 // end handlers of every frame it abandons; unless rapira_request_teardown closes them,
