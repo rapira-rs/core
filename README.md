@@ -191,8 +191,6 @@ Log targets:
 - `php` — output and diagnostics coming from PHP itself
 - dependencies log under their module paths (`pingora_core`, `tokio`, …)
 
-`php` is never quieter than `warn` by default: PHP diagnostics carry the level of their error type, so warnings and fatals print out of the box while notices stay out. It follows a more verbose `level` (`level = "info"` puts PHP notices in the log), and `[log.targets] php` overrides it in either direction — including `php = "error"` for warnings-off.
-
 PHP diagnostics take their level from the error type: fatal errors (`E_ERROR`, `E_PARSE`, `E_CORE_ERROR`, `E_COMPILE_ERROR`, `E_USER_ERROR`, `E_RECOVERABLE_ERROR`) log at `error`, warnings at `warn`, notices at `info`, deprecations at `debug`. A diagnostic excluded by the script's [`error_reporting`](https://www.php.net/manual/en/function.error-reporting.php) mask drops to `trace`, so `error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED)` keeps vendor deprecations out of the log. Fatals are never demoted — they explain why a worker recycled — and `E_CORE_ERROR`/`E_CORE_WARNING` are raised before a script can set a mask at all.
 
 Formats, all written to stderr in one write per record, so master and worker output never interleaves mid-record:

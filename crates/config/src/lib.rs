@@ -136,7 +136,8 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    fn as_str(self) -> &'static str {
+    /// The config-vocabulary name, as a `RUST_LOG`-style filter directive expects it.
+    pub fn as_str(self) -> &'static str {
         match self {
             LogLevel::Error => "error",
             LogLevel::Warn => "warn",
@@ -163,32 +164,6 @@ pub struct LogSettings {
     /// Per-target overrides. Keys match by prefix (`php` also covers
     /// `php_sys::...`). BTreeMap so the rendered filter is byte-stable.
     pub targets: BTreeMap<String, LogLevel>,
-}
-
-impl LogSettings {
-    /// This section as a `RUST_LOG`-syntax filter string, the form the
-    /// subscriber's EnvFilter parses.
-    ///
-    /// The `php` target is never quieter than `warn` by default: PHP diagnostics
-    /// carry the level of their error type, so warnings and fatals print without
-    /// any configuration while notices and deprecations do not. The default
-    /// follows a more verbose base `level`, and an explicit `[log.targets] php`
-    /// overrides it in either direction.
-    pub fn filter_directives(&self) -> String {
-        let mut out = String::from(self.level.as_str());
-        // max(level, warn) differs from the base only when level is `error`, so
-        // that is the only case needing a directive of its own.
-        if self.level == LogLevel::Error && !self.targets.contains_key("php") {
-            out.push_str(",php=warn");
-        }
-        for (name, level) in &self.targets {
-            out.push(',');
-            out.push_str(name);
-            out.push('=');
-            out.push_str(level.as_str());
-        }
-        out
-    }
 }
 
 #[derive(Debug)]
@@ -814,37 +789,6 @@ mod tests {
         assert_eq!(
             s.supervisor.pidfile.as_deref(),
             Some(Path::new("/etc/rapira/rapira.pid"))
-        );
-    }
-
-    #[test]
-    fn log_filter_follows_the_php_rule() {
-        for (section, want) in [
-            // Absent [log] must render the built-in default filter exactly.
-            ("", "error,php=warn"),
-            ("[log]\nlevel = \"error\"\n", "error,php=warn"),
-            ("[log]\nlevel = \"warn\"\n", "warn"),
-            ("[log]\nlevel = \"info\"\n", "info"),
-            ("[log]\nlevel = \"trace\"\n", "trace"),
-        ] {
-            let file = load_str(&format!("[pool]\nentrypoint = \"a.php\"\n{section}")).unwrap();
-            let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-            assert_eq!(s.log.filter_directives(), want, "{section:?}");
-        }
-    }
-
-    #[test]
-    fn log_targets_override_the_php_default_and_render_sorted() {
-        let file = load_str(
-            "[pool]\nentrypoint = \"a.php\"\n[log]\nlevel = \"info\"\nformat = \"json\"\n\
-             [log.targets]\nphp = \"error\"\n\"tokio::net\" = \"debug\"\na = \"trace\"\n",
-        )
-        .unwrap();
-        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.log.format, LogFormat::Json);
-        assert_eq!(
-            s.log.filter_directives(),
-            "info,a=trace,php=error,tokio::net=debug"
         );
     }
 

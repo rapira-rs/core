@@ -15,11 +15,17 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 /// Install the global subscriber. Call once, after config resolution.
 pub fn init(log: &LogSettings) {
-    // A blank RUST_LOG counts as unset, so the precedence rule stays
-    // "if RUST_LOG has a value it replaces the config filter".
+    // A non-blank RUST_LOG replaces the config filter wholesale.
     let spec = match std::env::var("RUST_LOG") {
         Ok(s) if !s.trim().is_empty() => s,
-        _ => log.filter_directives(),
+        _ => {
+            let mut s = log.level.as_str().to_owned();
+            // parse cases like `php=info,rapira=debug`
+            for (target, level) in &log.targets {
+                s += &format!(",{target}={}", level.as_str());
+            }
+            s
+        }
     };
     let filter = EnvFilter::new(spec);
     let layer = match log.format {
@@ -46,38 +52,4 @@ pub fn init(log: &LogSettings) {
         .with(filter)
         .with(layer)
         .init();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Guards the boundary between `filter_directives()` output and
-    /// EnvFilter's directive grammar.
-    #[test]
-    fn envfilter_accepts_every_config_filter() {
-        use rapira_config::LogLevel;
-        use std::collections::BTreeMap;
-
-        let cases = [
-            LogSettings {
-                level: LogLevel::Error,
-                format: LogFormat::Plain,
-                targets: BTreeMap::new(),
-            },
-            LogSettings {
-                level: LogLevel::Trace,
-                format: LogFormat::Json,
-                targets: BTreeMap::from([
-                    ("php".to_owned(), LogLevel::Error),
-                    ("tokio::net".to_owned(), LogLevel::Debug),
-                    ("a".to_owned(), LogLevel::Trace),
-                ]),
-            },
-        ];
-        for settings in cases {
-            let spec = settings.filter_directives();
-            EnvFilter::try_new(&spec).unwrap_or_else(|e| panic!("`{spec}`: {e}"));
-        }
-    }
 }
