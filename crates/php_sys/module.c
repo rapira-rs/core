@@ -181,7 +181,7 @@ static void rapira_request_init(void) {
     // main/main.c php_request_startup(): honor the output INIs per request.
     // 8.6 stores the output_handler ini as zend_string* via OnUpdateStrNotEmpty,
     // so an empty value is NULL and the [0] emptiness check is gone:
-    // https://github.com/php/php-src/commit/e0221be81e39d5a2a01efc8578569f4a3b6ce4d4
+    // https://github.com/php/php-src/commit/e0221be81e39860e83867fadd67115e1d2c992c1
 #if PHP_VERSION_ID >= 80600
     if (PG(output_handler)) {
         zval oh;
