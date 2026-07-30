@@ -193,6 +193,8 @@ Log targets:
 
 PHP diagnostics take their level from the error type: fatal errors (`E_ERROR`, `E_PARSE`, `E_CORE_ERROR`, `E_COMPILE_ERROR`, `E_USER_ERROR`, `E_RECOVERABLE_ERROR`) log at `error`, warnings at `warn`, notices at `info`, deprecations at `debug`. A diagnostic excluded by the script's [`error_reporting`](https://www.php.net/manual/en/function.error-reporting.php) mask drops to `trace`, so `error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED)` keeps vendor deprecations out of the log. Fatals are never demoted — they explain why a worker recycled — and `E_CORE_ERROR`/`E_CORE_WARNING` are raised before a script can set a mask at all.
 
+Diagnostics go to the log, not into responses: rapira defaults [`display_errors`](https://www.php.net/manual/en/errorfunc.configuration.php#ini.display-errors) to `0` and [`log_errors`](https://www.php.net/manual/en/errorfunc.configuration.php#ini.log-errors) to `1`. These are defaults, not overrides — a php.ini that sets either wins.
+
 Formats, all written to stderr in one write per record, so master and worker output never interleaves mid-record:
 
 - `plain` — `2026-07-30T09:12:34.567890Z ERROR php: …`; colored when stderr is a terminal (`NO_COLOR` turns that off).
