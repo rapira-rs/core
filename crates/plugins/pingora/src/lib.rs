@@ -260,7 +260,7 @@ async fn serve(
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let conf: Arc<ServerConf> = Arc::new(ServerConf::default());
-    let inflight: Arc<std::sync::atomic::AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let listen = config.listen.clone();
     let mut service = http_proxy_service(
         &conf,

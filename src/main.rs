@@ -95,7 +95,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // its own usage/errors to stderr, and `resolve` reports failure by returning
     // it (a config error cannot be rendered in the format that failed to parse).
     // Non-serve paths never install a logger; stray `log::` calls are dropped.
-    logging::init(&settings.log);
+    logging::init(&settings.log)?;
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
     let script: PathBuf = settings.pool.entrypoint.clone();

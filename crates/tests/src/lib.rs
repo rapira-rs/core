@@ -173,7 +173,7 @@ pub fn init_log_capture() {
     ONCE.call_once(|| {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        // No filter: everything is captured, like the old set_max_level(Trace).
+        // No filter: every record is captured, down to trace-level masked diagnostics.
         let _ = tracing_subscriber::registry().with(CaptureLayer).try_init();
     });
 }

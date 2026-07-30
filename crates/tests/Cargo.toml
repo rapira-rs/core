@@ -11,7 +11,7 @@ workspace = true
 php_sys = { path = "../php_sys" }
 tokio = { version = "1", features = ["sync", "time"] }
 tracing = "0.1"
-# Capture layer (init_log_capture): a tracing Layer replacing the old log-facade logger.
+# Capture layer (init_log_capture); tracing-log normalizes still-bridged records.
 tracing-subscriber = "0.3"
 tracing-log = "0.2"
 

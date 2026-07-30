@@ -13,16 +13,6 @@ const WARNINGS: u32 = E_WARNING | E_CORE_WARNING | E_COMPILE_WARNING | E_USER_WA
 const NOTICES: u32 = E_NOTICE | E_USER_NOTICE;
 const DEPRECATIONS: u32 = E_DEPRECATED | E_USER_DEPRECATED;
 
-/// Level and label for a `PG(last_error_type)` under the `EG(error_reporting)` mask.
-///
-/// A masked diagnostic drops to `Trace` instead of disappearing. Fatals are exempt: they are
-/// the only account of why a worker recycled.
-///
-/// The mask is sampled at teardown, while `@` restores it at the end of the silenced statement
-/// (Zend/zend_vm_def.h, ZEND_END_SILENCE), so a silenced diagnostic still reports. Worker mode
-/// also never runs `zend_ini_deactivate` per job, so a runtime `error_reporting()` persists to
-/// later jobs of the cycle. Both only ever over-report a non-fatal.
-/// https://www.php.net/manual/en/function.error-reporting.php
 /// Emit to the `php` target at a runtime level. `tracing::event!` needs a const
 /// level (each callsite is a static), so the runtime value fans out over the
 /// five arms; the target must be const too, which pins this macro to `php`.
@@ -39,6 +29,16 @@ macro_rules! php_log {
 }
 pub(crate) use php_log;
 
+/// Level and label for a `PG(last_error_type)` under the `EG(error_reporting)` mask.
+///
+/// A masked diagnostic drops to `Trace` instead of disappearing. Fatals are exempt: they are
+/// the only account of why a worker recycled.
+///
+/// The mask is sampled at teardown, while `@` restores it at the end of the silenced statement
+/// (Zend/zend_vm_def.h, ZEND_END_SILENCE), so a silenced diagnostic still reports. Worker mode
+/// also never runs `zend_ini_deactivate` per job, so a runtime `error_reporting()` persists to
+/// later jobs of the cycle. Both only ever over-report a non-fatal.
+/// https://www.php.net/manual/en/function.error-reporting.php
 pub(crate) fn error_type_to_level(err_type: c_int, mask: c_int) -> (tracing::Level, &'static str) {
     // php-src stores `orig_type & E_ALL`, so both are non-negative; the bindgen-derived E_*
     // are u32

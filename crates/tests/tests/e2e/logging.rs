@@ -24,17 +24,92 @@ fn json_format_shapes_the_log() {
                         .is_some_and(|m| m.starts_with("rapira_core v"))
             })
         });
-        // Negative shape: env_logger's plain look is "[<ts> LEVEL target] msg".
-        let plain = text
-            .lines()
-            .any(|l| l.starts_with('[') && l.as_bytes().get(1).is_some_and(u8::is_ascii_digit));
-        assert!(!plain, "plain-format line in json mode:\n{text}");
+        // Negative shape: every complete line is one JSON object. A trailing
+        // partial line (a write in flight) is the only exclusion.
+        let complete = &text[..text.rfind('\n').map_or(0, |i| i + 1)];
+        for l in complete.lines().filter(|l| !l.is_empty()) {
+            assert!(
+                serde_json::from_str::<serde_json::Value>(l).is_ok(),
+                "non-JSON line in json mode: {l}\n{}",
+                diagnostics(&srv)
+            );
+        }
         if banner {
             return;
         }
         assert!(
             Instant::now() < deadline,
             "no JSON banner line in server.log\n{}",
+            diagnostics(&srv)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Default `[log]`: the plain format on a redirected (non-tty) stderr keeps the
+/// human shape and emits no ANSI escapes.
+#[test]
+fn plain_format_is_uncolored_when_redirected() {
+    let srv = spawn_with_config("echo-worker.php", 1, "");
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let text = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
+        assert!(
+            !text.contains('\u{1b}'),
+            "ANSI escape in a redirected log:\n{text}"
+        );
+        if text
+            .lines()
+            .any(|l| l.contains("INFO") && l.contains("rapira_core v"))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no plain banner line in server.log\n{}",
+            diagnostics(&srv)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// With the implicit php-floor rule gone, `[log.targets] php = "warn"` is what
+/// makes PHP diagnostics visible again: `level = "error"` alone hides them.
+/// Runs without `RUST_LOG` so the config owns the filter.
+#[test]
+fn log_targets_php_restores_php_diagnostics() {
+    let srv = spawn_without_rust_log("warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    // The diagnostic is written during request handling; a short settle covers
+    // the teardown-path record before asserting absence.
+    std::thread::sleep(Duration::from_millis(300));
+    let text = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
+    assert!(
+        !text.contains("WARN-MARK"),
+        "php warning leaked past level = \"error\":\n{text}"
+    );
+    drop(srv);
+
+    let srv = spawn_without_rust_log(
+        "warn-worker.php",
+        1,
+        "[log]\nlevel = \"error\"\n[log.targets]\nphp = \"warn\"\n",
+    );
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let text = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
+        if text.contains("WARN-MARK") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "php = \"warn\" did not surface the diagnostic\n{}",
             diagnostics(&srv)
         );
         std::thread::sleep(Duration::from_millis(50));

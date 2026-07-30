@@ -178,10 +178,19 @@ static void rapira_request_init(void) {
                         sizeof(SAPI_PHP_VERSION_HEADER) - 1, 1);
     }
 
-    // main/main.c php_request_startup(): honor the output INIs per request
+    // main/main.c php_request_startup(): honor the output INIs per request.
+    // 8.6 stores the output_handler ini as zend_string* via OnUpdateStrNotEmpty,
+    // so an empty value is NULL and the [0] emptiness check is gone:
+    // https://github.com/php/php-src/commit/e0221be81e39d5a2a01efc8578569f4a3b6ce4d4
+#if PHP_VERSION_ID >= 80600
+    if (PG(output_handler)) {
+        zval oh;
+        ZVAL_STR_COPY(&oh, PG(output_handler));
+#else
     if (PG(output_handler) && PG(output_handler)[0]) {
         zval oh;
         ZVAL_STRING(&oh, PG(output_handler));
+#endif
         php_output_start_user(&oh, 0, PHP_OUTPUT_HANDLER_STDFLAGS);
         zval_ptr_dtor(&oh);
     } else if (PG(output_buffering)) {

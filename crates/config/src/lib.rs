@@ -483,19 +483,19 @@ fn resolve_supervisor(
 
 fn resolve_log(section: LogSection) -> anyhow::Result<LogSettings> {
     // Target names cannot be checked against a known set — they are open-ended
-    // module paths — so only the filter syntax itself is enforced.
+    // module paths — so validation pins the shape EnvFilter parses as a plain
+    // target. Anything outside it is filter grammar (`[` opens a span clause,
+    // `,`/`=` split directives, a leading symbol is a parse error) and would be
+    // reinterpreted or dropped instead of matched.
     for name in section.targets.keys() {
-        if name.is_empty() {
-            // An empty directive name prefix-matches every target: it would
-            // silently become a second base level.
-            bail!("log.targets has an empty target name");
-        }
-        if name
-            .chars()
-            .any(|c| matches!(c, ',' | '=' | '/') || c.is_whitespace() || c.is_control())
-        {
+        let mut chars = name.chars();
+        let ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-'));
+        if !ok {
             bail!(
-                "log.targets key `{}` is not a log target: `,`, `=`, `/`, whitespace and control characters are reserved by the filter syntax",
+                "log.targets key `{}` is not a log target: use letters, digits and `_` `:` `.` `-`, starting with a letter, digit or `_`",
                 name.escape_default()
             );
         }
@@ -802,6 +802,9 @@ mod tests {
             "\"a b\" = \"info\"",
             "\"a/b\" = \"info\"",
             "\"a\\u001Bb\" = \"info\"",
+            // EnvFilter grammar, not target text: a span clause and a leading symbol.
+            "\"http[request]\" = \"info\"",
+            "\".php\" = \"info\"",
         ] {
             let file = load_str(&format!(
                 "[pool]\nentrypoint = \"a.php\"\n[log.targets]\n{entry}\n"
