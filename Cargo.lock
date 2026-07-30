@@ -1614,6 +1614,7 @@ dependencies = [
  "rapira_pingora",
  "rapira_runtime",
  "rapira_scoreboard",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]

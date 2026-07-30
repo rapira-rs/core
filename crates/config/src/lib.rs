@@ -714,6 +714,54 @@ mod tests {
         assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
     }
 
+    /// The floor is checked on the resolved value, after precedence, so a zero from
+    /// either layer must fail — including a CLI `0` shadowing a usable file value.
+    #[test]
+    fn pool_processes_zero_is_rejected_from_either_layer() {
+        let file = load_str("[pool]\nprocesses = 0\nentrypoint = \"a.php\"\n").unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pool.processes must be at least 1"), "{err}");
+
+        let file = load_str("[pool]\nprocesses = 4\nentrypoint = \"a.php\"\n").unwrap();
+        let err = merge(
+            file,
+            Overrides {
+                processes: Some(0),
+                ..Default::default()
+            },
+            Some(Path::new("/w")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("pool.processes must be at least 1"), "{err}");
+    }
+
+    /// `ondemand` and `static` share one match arm: the arm still has to tell them
+    /// apart, and both reject the dynamic-only spare keys.
+    #[test]
+    fn pool_ondemand_and_static_modes_resolve() {
+        for (key, want) in [
+            ("ondemand", PoolMode::Ondemand),
+            ("static", PoolMode::Static),
+        ] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\nmode = \"{key}\"\n"
+            ))
+            .unwrap();
+            let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+            assert_eq!(s.pool.mode, want, "{key}");
+        }
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"ondemand\"\nmax_spare = 2\n")
+            .unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("only valid with pool.mode"), "{err}");
+    }
+
     #[test]
     fn pool_dynamic_requires_valid_spares() {
         let merged = |keys: &str, cli: Overrides| {

@@ -115,3 +115,27 @@ fn log_targets_php_restores_php_diagnostics() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// `RUST_LOG` replaces the configured filter wholesale — the one env-beats-config
+/// knob. The same `level = "error"` that hides the PHP warning in
+/// [`log_targets_php_restores_php_diagnostics`] lets it through under `RUST_LOG=info`.
+#[test]
+fn rust_log_replaces_the_config_filter() {
+    let srv = spawn_with_config("warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let text = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
+        if text.contains("WARN-MARK") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "RUST_LOG=info did not override level = \"error\"\n{}",
+            diagnostics(&srv)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

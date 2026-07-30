@@ -61,3 +61,6 @@ rapira_pingora = { workspace = true }
 mimalloc = "0.1"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }
+
+[dev-dependencies]
+serde_json = "1"

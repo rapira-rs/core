@@ -1186,4 +1186,114 @@ mod tests {
         assert_eq!(m.table.slots[0].respawn_at, None, "suppression lifted");
         assert!(m.table.procs.is_empty(), "expiry must not fork");
     }
+
+    // ---- pool maintenance ticks ----------------------------------------
+
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Counts WARN events on the `master` target; the crate depends only on
+    /// the `tracing` facade, so the subscriber is hand-rolled.
+    #[derive(Clone, Default)]
+    struct WarnCounter(Arc<AtomicUsize>);
+
+    impl tracing::Subscriber for WarnCounter {
+        fn enabled(&self, md: &tracing::Metadata) -> bool {
+            md.target() == "master" && *md.level() == tracing::Level::WARN
+        }
+        fn event(&self, _: &tracing::Event) {
+            self.0.fetch_add(1, Relaxed);
+        }
+        fn new_span(&self, _: &tracing::span::Attributes) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn dynamic_ceiling_warns_once_and_never_spawns() {
+        let mut m = test_master(
+            4,
+            PoolMode::Dynamic {
+                min_spare: 2,
+                max_spare: 4,
+            },
+        );
+        m.cfg.processes = 2;
+        let t0 = Instant::now();
+        // Both workers busy at the ceiling: idle(0) < min_spare(2) with zero
+        // headroom ⇒ ReachedMaxChildren, never Spawn.
+        for (i, &pid) in [P_OLD0, P_OLD1].iter().enumerate() {
+            push_proc(&mut m, pid, i, 0, t0);
+            set_slot(&m, i, SLOT_ACTIVE);
+        }
+
+        // Two saturated ticks: the latch must hold the second warning back —
+        // one per saturation episode, not one per second.
+        let warns = WarnCounter::default();
+        tracing::subscriber::with_default(warns.clone(), || {
+            m.maintenance_tick(t0);
+            m.maintenance_tick(t0 + Duration::from_secs(1));
+        });
+        assert_eq!(warns.0.load(Relaxed), 1, "ceiling warning must fire once");
+        assert!(m.warned_max_children);
+        assert_eq!(m.table.procs.len(), 2, "the ceiling ticks must not spawn");
+    }
+
+    #[test]
+    fn static_refill_counts_pending_respawn_as_committed() {
+        // A slot holding a respawn deadline is already committed to the target,
+        // so refill must not spawn a second worker into the spare free slot.
+        let mut m = test_master(2, PoolMode::Static);
+        let t0 = Instant::now();
+        m.cfg.processes = 1;
+        m.table.slots[0].schedule_immediate(t0);
+
+        m.maintenance_tick(t0);
+        assert!(
+            m.table.procs.is_empty(),
+            "the pending respawn already covers the target"
+        );
+        assert_eq!(m.table.slots[0].respawn_at, Some(t0), "deadline untouched");
+    }
+
+    // ---- ondemand listener arming --------------------------------------
+
+    use crate::signals::SIG_TERM;
+
+    #[test]
+    fn ondemand_arms_only_when_a_fork_can_land() {
+        let mut m = test_master(2, PoolMode::Ondemand);
+        // Nothing running, no idle worker to take the connection, a spawnable
+        // slot: the listeners are worth polling.
+        assert!(m.compute_armed());
+
+        // Every slot in crash backoff ⇒ no fork can land, and a readable
+        // level-triggered listener would spin poll for the whole window.
+        let t0 = Instant::now();
+        for s in &mut m.table.slots {
+            s.schedule_backoff(Duration::ZERO, t0);
+        }
+        assert!(!m.compute_armed());
+    }
+
+    #[test]
+    fn ondemand_disarms_while_stopping() {
+        // Draining down: a late connection must not fork a fresh worker.
+        let mut m = test_master(2, PoolMode::Ondemand);
+        assert!(m.compute_armed());
+        m.pctl.on_signal(SIG_TERM);
+        assert!(!m.compute_armed());
+    }
+
+    #[test]
+    fn non_ondemand_never_arms_listeners() {
+        // Static/dynamic workers accept in the children; the master watches only
+        // its self-pipe however spawnable the pool looks.
+        let m = test_master(2, PoolMode::Static);
+        assert!(!m.compute_armed());
+    }
 }

@@ -75,3 +75,99 @@ pub(crate) fn syslog_to_level(syslog_lev: c_int) -> tracing::Level {
         _ => tracing::Level::INFO,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing::Level;
+
+    // E_ERROR is outside the bindgen allowlist; it is the lowest bit of php-src's fatal group.
+    // Taking that bit rather than the whole group keeps E_CORE_ERROR out of the mask cases.
+    const E_ERROR: u32 = 1 << E_FATAL_ERRORS.trailing_zeros();
+
+    fn level_of(err_type: u32, mask: u32) -> (Level, &'static str) {
+        error_type_to_level(err_type as c_int, mask as c_int)
+    }
+
+    /// The fatal arm is matched before the warning arm, and the mask clause skips fatals: the
+    /// reason a worker recycled has to survive even an `error_reporting(0)`.
+    #[test]
+    fn fatals_outrank_a_warning_bit_and_ignore_the_mask() {
+        assert_eq!(
+            level_of(E_ERROR | E_WARNING, E_WARNING),
+            (Level::ERROR, "Fatal error")
+        );
+        assert_eq!(level_of(E_ERROR, 0), (Level::ERROR, "Fatal error"));
+    }
+
+    /// A masked non-fatal drops to `Trace` with its label intact, so raising the level shows
+    /// what was silenced instead of an unlabelled line.
+    #[test]
+    fn a_masked_warning_drops_to_trace_with_its_label() {
+        assert_eq!(level_of(E_USER_WARNING, 0), (Level::TRACE, "Warning"));
+        assert_eq!(
+            level_of(E_USER_WARNING, E_USER_WARNING),
+            (Level::WARN, "Warning")
+        );
+    }
+
+    /// `mask | E_CORE` exempts core diagnostics, which the sampled `EG(error_reporting)` does
+    /// not describe, so an empty mask must not demote them.
+    #[test]
+    fn core_warnings_survive_an_empty_mask() {
+        assert_eq!(level_of(E_CORE_WARNING, 0), (Level::WARN, "Warning"));
+    }
+
+    /// A type no arm recognizes reports at `Warn`, and is still subject to the mask — the
+    /// unknown arm is not itself an exemption.
+    #[test]
+    fn an_unknown_error_type_still_obeys_the_mask() {
+        let unknown = 1 << 20; // above E_ALL, so no arm and no reporting bit overlaps it
+        assert_eq!(level_of(unknown, unknown), (Level::WARN, "Unknown error"));
+        assert_eq!(level_of(unknown, 0), (Level::TRACE, "Unknown error"));
+    }
+
+    /// `err_type == 0` has no bit to test against the mask, so without the `err_type != 0`
+    /// guard every unknown type would test as masked and report at `Trace`.
+    #[test]
+    fn a_zero_error_type_reports_unknown_at_warn() {
+        assert_eq!(level_of(0, 0), (Level::WARN, "Unknown error"));
+    }
+
+    /// The severity boundaries are a contract with `[log] level`: LOG_ERR and below are errors,
+    /// LOG_WARNING is the last priority a `warn` filter shows, and LOG_INFO has to land below
+    /// `Info` because php-src reports deprecations at that priority.
+    #[test]
+    fn syslog_severities_keep_their_boundaries() {
+        for (priority, want) in [
+            (0, Level::ERROR),
+            (1, Level::ERROR),
+            (2, Level::ERROR),
+            (3, Level::ERROR),
+            (4, Level::WARN),
+            (5, Level::INFO),
+            (6, Level::DEBUG),
+            (7, Level::DEBUG),
+        ] {
+            assert_eq!(syslog_to_level(priority), want, "priority {priority}");
+        }
+    }
+
+    /// The callback takes whatever int php-src passes it; a priority off the scale reports at
+    /// `Info` rather than being dropped or raised to an error.
+    #[test]
+    fn an_out_of_range_syslog_priority_falls_back_to_info() {
+        assert_eq!(syslog_to_level(8), Level::INFO);
+        assert_eq!(syslog_to_level(-1), Level::INFO);
+    }
+
+    /// The agreement the two tables exist together for: both sort a deprecation below `Info`,
+    /// so `[log] level = "info"` does not turn deprecations into ordinary traffic.
+    #[test]
+    fn both_paths_sort_deprecations_below_info() {
+        let (level, label) = level_of(E_DEPRECATED, E_DEPRECATED);
+        assert_eq!(label, "Deprecated");
+        assert!(level > Level::INFO);
+        assert!(syslog_to_level(6) > Level::INFO);
+    }
+}
