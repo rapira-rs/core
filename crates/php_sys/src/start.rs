@@ -1,9 +1,9 @@
-use log::{error, info, trace};
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::thread;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tracing::{error, info, trace};
 use types::Job;
 
 use crate::quota::{self, WorkerHooks};

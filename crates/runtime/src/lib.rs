@@ -117,8 +117,8 @@ impl ExtensionRuntime {
                 async move {
                     let outcome = fut.await;
                     match &outcome {
-                        Ok(()) => log::info!(target: "ext", "{name} finished"),
-                        Err(msg) => log::error!(target: "ext", "{name}: {msg}"),
+                        Ok(()) => tracing::info!(target: "ext", "{name} finished"),
+                        Err(msg) => tracing::error!(target: "ext", "{name}: {msg}"),
                     }
                     outcome
                 },
@@ -212,10 +212,10 @@ fn combine_field_lines(lines: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> 
             continue;
         };
         let Some(separator) = extension_api::field_line_separator(&name) else {
-            log::warn!("dropped a repeated {name} field line: not a list field");
+            tracing::warn!("dropped a repeated {name} field line: not a list field");
             continue;
         };
-        log::warn!("combined a repeated {name} field line; extensions should submit one entry");
+        tracing::warn!("combined a repeated {name} field line; extensions should submit one entry");
         let combined: &mut Vec<u8> = &mut out[i].1;
         combined.extend_from_slice(separator);
         combined.extend_from_slice(&value);
@@ -360,10 +360,10 @@ impl Running {
             .name("rapira-worker-signal".into())
             .spawn(move || {
                 let sig = wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
-                log::info!(target: "rapira", "signal {sig} received; draining worker");
+                tracing::info!(target: "rapira", "signal {sig} received; draining worker");
                 let _ = stop_tx.send(true);
                 let _ = wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
-                log::warn!(target: "rapira", "second signal; forcing worker exit");
+                tracing::warn!(target: "rapira", "second signal; forcing worker exit");
                 std::process::exit(131);
             })
             .expect("spawn worker signal thread");

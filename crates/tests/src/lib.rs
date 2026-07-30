@@ -112,10 +112,10 @@ fn init_php_env() {
     });
 }
 
-/// One captured `log` record. PHP diagnostics are asserted on level and target, not just text.
+/// One captured record. PHP diagnostics are asserted on level and target, not just text.
 #[derive(Debug)]
 pub struct Captured {
-    pub level: log::Level,
+    pub level: tracing::Level,
     pub target: String,
     pub message: String,
 }
@@ -129,27 +129,51 @@ pub fn captured() -> sync::MutexGuard<'static, Vec<Captured>> {
     LOG_CAPTURE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-struct CaptureLogger;
-impl log::Log for CaptureLogger {
-    fn enabled(&self, _: &log::Metadata) -> bool {
-        true
+/// Collects the `message` field; any `log.*` metadata fields from still-bridged
+/// records are ignored.
+#[derive(Default)]
+struct Msg(String);
+
+impl tracing::field::Visit for Msg {
+    fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
+        if f.name() == "message" {
+            self.0 = v.to_owned();
+        }
     }
-    fn log(&self, record: &log::Record) {
-        captured().push(Captured {
-            level: record.level(),
-            target: record.target().to_owned(),
-            message: record.args().to_string(),
-        });
+    fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+        if f.name() == "message" {
+            self.0 = format!("{v:?}");
+        }
     }
-    fn flush(&self) {}
 }
 
-/// Install the capturing logger once (records all `log` output into `LOG_CAPTURE`).
+struct CaptureLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        // A record still arriving over the log bridge carries its real
+        // target/level in `log.*` fields; normalization recovers them so both
+        // sources land identically.
+        let norm = tracing_log::NormalizeEvent::normalized_metadata(event);
+        let meta = norm.as_ref().unwrap_or_else(|| event.metadata());
+        let mut msg = Msg::default();
+        event.record(&mut msg);
+        captured().push(Captured {
+            level: *meta.level(),
+            target: meta.target().to_owned(),
+            message: msg.0,
+        });
+    }
+}
+
+/// Install the capturing subscriber once (records all `tracing` output — plus
+/// anything still on the `log` facade — into `LOG_CAPTURE`).
 pub fn init_log_capture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let _ = log::set_boxed_logger(Box::new(CaptureLogger));
-        // Trace: masked diagnostics and deprecations log below Info.
-        log::set_max_level(log::LevelFilter::Trace);
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        // No filter: everything is captured, like the old set_max_level(Trace).
+        let _ = tracing_subscriber::registry().with(CaptureLayer).try_init();
     });
 }

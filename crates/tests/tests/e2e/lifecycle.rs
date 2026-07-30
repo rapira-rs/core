@@ -70,8 +70,8 @@ fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
     }
 }
 
-// Stop budget: past process_control_timeout (30s) the master escalates a stuck
-// worker QUIT → TERM → KILL and still exits 0, so the wait must outlast it.
+// Stop budget: past supervisor.process_control_timeout (30s) the master escalates
+// a stuck worker QUIT → TERM → KILL and still exits 0, so the wait must outlast it.
 const STOP_BUDGET: Duration = Duration::from_secs(45);
 
 #[test]
@@ -98,7 +98,7 @@ fn sigterm_master_stops() {
 
 #[test]
 fn max_requests_recycles() {
-    let srv = spawn_with_config("echo-worker.php", 1, "[pm]\nmax_requests = 5\n");
+    let srv = spawn_with_config("echo-worker.php", 1, "max_requests = 5\n");
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
     let pid0 = pids0[0];
     // The backlog covers the swap gap: the master never closes the listen fd, so
@@ -122,11 +122,7 @@ fn max_requests_recycles() {
 
 #[test]
 fn request_timeout_kills_and_replaces_worker() {
-    let srv = spawn_with_config(
-        "hang-worker.php",
-        1,
-        "[pm]\nrequest_terminate_timeout_secs = 2\n",
-    );
+    let srv = spawn_with_config("hang-worker.php", 1, "request_terminate_timeout_secs = 2\n");
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
     // Sanity: the worker serves before it is asked to hang.
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");

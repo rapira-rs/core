@@ -28,7 +28,7 @@ pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
 /// watchdog hits ACTIVE ones — so one field holds whichever is under way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KillIntent {
-    /// pm idle trim: QUIT sent.
+    /// Idle trim: QUIT sent.
     Idle,
     /// `request_terminate_timeout` breach: TERM sent.
     Timeout,
@@ -91,7 +91,7 @@ pub(crate) enum ExitVerdict {
     Recycle,
     /// Unhealthy exit: respawn with backoff (and gen-0 failboot check).
     Unhealthy,
-    /// pm idle-kill (QUIT, or KILL after QUIT): trimmed, not respawned.
+    /// Idle-kill (QUIT, or KILL after QUIT): trimmed, not respawned.
     IdleKill,
     /// `request_terminate_timeout` kill: replaced immediately, no backoff.
     TimeoutKill,
@@ -174,7 +174,7 @@ impl ProcTable {
                     let verdict = classify(status, w.kill_intent);
                     buried.push((w, verdict));
                 }
-                None => log::warn!(target: "master", "reaped unknown child {pid}"),
+                None => tracing::warn!(target: "master", "reaped unknown child {pid}"),
             }
         }
         buried
@@ -215,12 +215,13 @@ pub(crate) fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
             // SAFETY: all calls below are async-signal-safe or operate on fds we
             // own; no Rust allocation touches shared locks before hygiene is done.
             unsafe {
-                // 1. Drop the master's control plane so it cannot leak/hold EOF.
+                // Close the master's control fds: a child holding lifeline.wr
+                // would keep every sibling's EOF from ever firing.
                 libc::close(self_pipe.rd.as_raw_fd());
                 libc::close(self_pipe.wr.as_raw_fd());
                 libc::close(lifeline.wr.as_raw_fd());
 
-                // 2. Neutralize inherited master dispositions: all → SIG_DFL.
+                // Inherited master dispositions all reset to SIG_DFL.
                 let mut dfl: libc::sigaction = std::mem::zeroed();
                 dfl.sa_sigaction = libc::SIG_DFL;
                 libc::sigemptyset(&mut dfl.sa_mask);
@@ -250,12 +251,12 @@ pub(crate) fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
                     }
                 }
 
-                // 3. Final mask: exactly {QUIT, INT} blocked for the worker's
-                //    sigwait watcher (graceful drain); everything else unblocked,
-                //    TERM = SIG_DFL fast kill. SETMASK (not unblock-all then
-                //    re-block) keeps QUIT blocked throughout, so a QUIT already
-                //    pending stays queued for the watcher instead of being
-                //    delivered under SIG_DFL during an unblock window.
+                // Final mask: exactly {QUIT, INT} blocked for the worker's
+                // sigwait watcher (graceful drain); everything else unblocked,
+                // TERM = SIG_DFL fast kill. SETMASK (not unblock-all then
+                // re-block) keeps QUIT blocked throughout, so a QUIT already
+                // pending stays queued for the watcher instead of being
+                // delivered under SIG_DFL during an unblock window.
                 let hold = sigset(&[libc::SIGQUIT, libc::SIGINT]);
                 libc::sigprocmask(libc::SIG_SETMASK, &hold, std::ptr::null_mut());
             }
@@ -280,7 +281,7 @@ pub(crate) fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
                 Err(_) => {
                     // Panic already unwound inside the closure; the default hook
                     // printed it. Match Rust's own panic exit code (101).
-                    log::error!(target: "master", "worker child panicked; exiting");
+                    tracing::error!(target: "master", "worker child panicked; exiting");
                     101
                 }
             };

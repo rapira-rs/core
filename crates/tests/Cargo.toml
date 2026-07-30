@@ -10,7 +10,10 @@ workspace = true
 [dependencies]
 php_sys = { path = "../php_sys" }
 tokio = { version = "1", features = ["sync", "time"] }
-log = "0.4"
+tracing = "0.1"
+# Capture layer (init_log_capture): a tracing Layer replacing the old log-facade logger.
+tracing-subscriber = "0.3"
+tracing-log = "0.2"
 
 [dev-dependencies]
 anyhow = "1"
@@ -19,6 +22,8 @@ rapira_runtime = { path = "../runtime" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
 libc = "0.2"
+# E2E log-format assertions (tests/e2e/logging.rs).
+serde_json = "1"
 
 # The spawn-the-binary E2E suite forks worker processes and runs request storms;
 # gated behind a feature so `cargo test --workspace` skips it. Run it isolated

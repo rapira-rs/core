@@ -2,8 +2,8 @@
 //! async, no thread spawns — just `libc` + `std` + the shared-memory scoreboard.
 //!
 //! The master boots PHP once (caller side), then forks workers that inherit the
-//! warm image. It supervises them with configurable process management (static
-//! / dynamic / ondemand), graceful stop escalation, and rolling reload. Children
+//! warm image. It supervises them with configurable pool modes (static /
+//! dynamic / ondemand), graceful stop escalation, and rolling reload. Children
 //! never re-enter master code: the fork bracket runs the worker closure and
 //! `_exit`s, so no Rust drop (pidfile unlink, PHP shutdown) can ever fire in a
 //! worker.
@@ -41,10 +41,10 @@ pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// error (gen-0 worker died unhealthy before handling any request).
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
 
-/// Process-manager mode. `processes` in [`MasterConfig`] is the static count for
+/// Pool mode. `processes` in [`MasterConfig`] is the static count for
 /// `Static`, and the max-children ceiling for `Dynamic`/`Ondemand`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PmMode {
+pub enum PoolMode {
     Static,
     Dynamic { min_spare: usize, max_spare: usize },
     Ondemand,
@@ -56,7 +56,7 @@ pub enum PmMode {
 pub struct MasterConfig {
     /// Static worker count / dynamic-ondemand max_children.
     pub processes: usize,
-    pub pm: PmMode,
+    pub pool_mode: PoolMode,
     /// Ondemand: idle worker lifetime before a QUIT.
     pub process_idle_timeout: Duration,
     /// Stop/reload QUIT→TERM escalation grace.

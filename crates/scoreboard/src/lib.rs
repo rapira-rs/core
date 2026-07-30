@@ -1,7 +1,7 @@
 //! Shared-memory scoreboard: one cache-line slot per worker process, created by
 //! the master via anonymous shared mmap before any fork and inherited by every
-//! worker. Workers write their own slot; the master reads all slots for pm
-//! decisions and writes only STARTING (at fork) and FREE (after reap).
+//! worker. Workers write their own slot; the master reads all slots for pool
+//! scaling decisions and writes only STARTING (at fork) and FREE (after reap).
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
@@ -110,7 +110,7 @@ impl Scoreboard {
         self.slots
     }
 
-    /// Master-side, at fork time: reserve the slot so pm=ondemand suppression
+    /// Master-side, at fork time: reserve the slot so ondemand suppression
     /// and spare-capacity math see the in-flight fork.
     pub fn set_starting(&self, i: usize) {
         if let Some(s) = self.slots.get(i) {

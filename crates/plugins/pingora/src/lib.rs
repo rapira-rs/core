@@ -130,7 +130,8 @@ impl HttpModule for FieldNameFilter {
             req.remove_header(name.as_str());
             // warn, not debug: the default filter prints errors only, so a debug line here
             // makes a dropped client field indistinguishable from one never sent.
-            log::warn!(
+            tracing::warn!(
+                target: "http",
                 "dropped request header {name}: name aliases a CGI variable \
                  (unsafe_field_names = \"drop\"; use \"reject\" to answer 400 instead)"
             );
@@ -186,10 +187,7 @@ impl Extension for HttpServer {
             Listen::Tcp(addr) => ctx.bind_tcp(*addr)?,
             Listen::Unix(path) => ctx.bind_unix(path)?,
         };
-        log::info!(
-            "[rapira-pingora] prepared listener on {}",
-            prepared.addr_string()?
-        );
+        tracing::info!(target: "http", "prepared listener on {}", prepared.addr_string()?);
         self.prepared = Some(prepared);
         Ok(())
     }
@@ -261,8 +259,8 @@ async fn serve(
     prepared: Option<PreparedListener>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let conf = Arc::new(ServerConf::default());
-    let inflight = Arc::new(AtomicUsize::new(0));
+    let conf: Arc<ServerConf> = Arc::new(ServerConf::default());
+    let inflight: Arc<std::sync::atomic::AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let listen = config.listen.clone();
     let mut service = http_proxy_service(
         &conf,
@@ -298,7 +296,7 @@ async fn serve(
         ListenAddr::Tcp(a) => {
             let s = a.to_string();
             service.add_tcp(&s);
-            log::info!("[rapira-pingora] listening on http://{s}");
+            tracing::info!(target: "http", "listening on http://{s}");
         }
         ListenAddr::Unix(path) => {
             // Reject rather than bind a lossy-converted (corrupted) path.
@@ -308,7 +306,7 @@ async fn serve(
             // None → pingora default perms (0o666): the same local accessibility as a
             // loopback TCP bind, and a proxy running as another user can connect.
             service.add_uds(s, None);
-            log::info!("[rapira-pingora] listening on unix:{s}");
+            tracing::info!(target: "http", "listening on unix:{s}");
         }
     }
     // (fds, shutdown, listeners_per_fd). Runs on this runtime via Handle::current().
@@ -329,7 +327,7 @@ async fn serve(
              their responses were cut short"
         ));
     }
-    log::info!("[rapira-pingora] drained cleanly; accept loop stopped");
+    tracing::info!(target: "http", "drained cleanly; accept loop stopped");
     Ok(())
 }
 
@@ -451,7 +449,7 @@ fn build_response_header(
         // no IntoCaseHeaderName impl for a non-'static &str — it cannot be borrowed.
         let logged = name.clone();
         if let Err(e) = header.append_header(name, value) {
-            log::debug!("dropped response header {logged}: {e}");
+            tracing::debug!(target: "http", "dropped response header {logged}: {e}");
         }
     }
     // Rare path only: drop the fields a Connection value named, before our own
@@ -531,7 +529,7 @@ fn combine_headers(header: &RequestHeader) -> PingoraResult<Vec<(String, Vec<u8>
             // two Authorization headers otherwise just sees its credential stop working.
             let dropped = lines.count();
             if dropped > 0 {
-                log::warn!("dropped {dropped} extra {name} field line(s): not a list field");
+                tracing::warn!(target: "http", "dropped {dropped} extra {name} field line(s): not a list field");
             }
         }
         headers.push((name.to_owned(), combined));

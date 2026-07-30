@@ -66,11 +66,11 @@ void rapira_register_classes(void) {
         &rapira_no_ctor_handlers;
 }
 
-/* Every property below is readonly. zend_update_property* performs the write with
-EG(fake_scope) set to the ce handed in (Zend/zend_API.c), so passing the DECLARING
-ce supplies the scope both readonly and the implicit protected(set) on
-`public readonly` require. The write lands only while the slot is uninitialized, so
-each runs once. */
+// Every property below is readonly. zend_update_property* performs the write with
+// EG(fake_scope) set to the ce handed in (Zend/zend_API.c), so passing the DECLARING
+// ce supplies the scope both readonly and the implicit protected(set) on
+// `public readonly` require. The write lands only while the slot is uninitialized, so
+// each runs once.
 
 ZEND_METHOD(Rapira_Plugin_Http_HttpHandlerConfig, __construct) {
     ZEND_PARSE_PARAMETERS_NONE();

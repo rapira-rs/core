@@ -8,7 +8,7 @@ fn dynamic_scales_up_down() {
     let srv = spawn_with_config(
         "sleep-worker.php",
         4,
-        "[pm]\nmode = \"dynamic\"\nmin_spare = 1\nmax_spare = 2\n",
+        "mode = \"dynamic\"\nmin_spare = 1\nmax_spare = 2\n",
     );
     let storm = storm(srv.addr, 4);
     wait_workers(
@@ -31,7 +31,7 @@ fn ondemand_spawns_on_connect() {
     let srv = spawn_with_config(
         "echo-worker.php",
         2,
-        "[pm]\nmode = \"ondemand\"\nprocess_idle_timeout_secs = 2\n",
+        "mode = \"ondemand\"\nprocess_idle_timeout_secs = 2\n",
     );
     // The master binds the listener pre-fork, so the harness readiness probe
     // connects — which is itself a demand event that forks one worker. Wait for

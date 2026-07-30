@@ -106,6 +106,12 @@ fn rapira_bin() -> PathBuf {
 /// Boot a master with a generated config, retrying the ephemeral port up to 3
 /// times to survive the bind :0 -> spawn TOCTOU race. Panics with the log tail
 /// if the master never accepts a connection.
+///
+/// `extra_toml` is appended inside the `[pool]` table, so bare keys are pool
+/// keys. Any other section (`[supervisor]`, `[log]`) needs its own header and
+/// must come after all bare pool keys — a header closes `[pool]` for everything
+/// that follows. A misplaced key is a boot error that surfaces here as the
+/// generic "never accepted a connection" panic.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
     spawn_with_extras(fixture, processes, "", extra_toml)
 }

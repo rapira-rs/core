@@ -3,5 +3,6 @@
 
 mod harness;
 mod lifecycle;
+mod logging;
 mod reload;
 mod scaling;

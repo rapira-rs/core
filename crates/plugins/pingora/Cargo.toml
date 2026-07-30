@@ -14,4 +14,4 @@ pingora = { version = "0.8", features = ["proxy"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"] }
 async-trait = "0.1"
 anyhow = { workspace = true }
-log = { workspace = true }
+tracing = { workspace = true }

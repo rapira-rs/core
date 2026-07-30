@@ -225,7 +225,7 @@ impl Context {
                 Some(code) => status = code,
                 // Dropped either way, so without this the app sees its 404 silently served
                 // as a 200 with nothing logged anywhere.
-                None => log::warn!(
+                None => tracing::warn!(
                     target: "php",
                     "ignored malformed Status field {:?}; status stays {status}",
                     String::from_utf8_lossy(value)
