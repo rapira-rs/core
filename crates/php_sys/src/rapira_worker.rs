@@ -1,4 +1,4 @@
-use log::error;
+use tracing::error;
 
 use crate::{
     callbacks::*, diagnostics::error_type_to_level, scoreboard::sb_update, start::pull_job,
@@ -271,10 +271,10 @@ fn log_and_clear_last_error() {
             // https://www.php.net/manual/en/errorfunc.configuration.php#ini.error-reporting
             let (level, label) =
                 error_type_to_level((*pg).last_error_type, (*rapira_eg()).error_reporting);
-            // the conversions stay inline: log! evaluates its arguments inside the level check,
-            // and this runs on every request
-            log::log!(
-                target: "php", level,
+            // the conversions stay inline: event! evaluates its arguments inside
+            // the level check, and this runs on every request
+            crate::diagnostics::php_log!(
+                level,
                 "last error: {label}: {} in {}:{}",
                 zstr_lossy(&*msg),
                 zstr_lossy(&*(*pg).last_error_file),

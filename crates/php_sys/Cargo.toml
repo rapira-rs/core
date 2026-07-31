@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-log = { workspace = true, features = ["std"] }
+tracing = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }

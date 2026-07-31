@@ -4,7 +4,7 @@
 
 use std::cell::RefCell;
 
-use log::info;
+use tracing::info;
 
 use crate::scoreboard::{Event, sb_update};
 

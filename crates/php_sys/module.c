@@ -72,22 +72,21 @@ PHP_MINIT_FUNCTION(rapira) {
 zend_module_entry rapira_module_entry = {
     STANDARD_MODULE_HEADER,
     "rapira",
-    NULL, /* functions: installed by rapira_process_init */
+    NULL, // functions: installed by rapira_process_init
     PHP_MINIT(rapira),
     NULL,
     NULL,
     NULL,
-    NULL, /* MSHUTDOWN, RINIT, RSHUTDOWN, MINFO */
+    NULL, // MSHUTDOWN, RINIT, RSHUTDOWN, MINFO
     "0.1.0",
     STANDARD_MODULE_PROPERTIES};
 
-/* ext/filter caches raw input copies in its module globals; only its RSHUTDOWN
-frees them (filter.c:190-196), and sapi_activate()'s input_filter_init()
-UNDEFs them WITHOUT freeing (filter.c:232-240, wired via SAPI.c:484). The
-worker path runs sapi_activate per job but RSHUTDOWN only at cycle end, so
-each job would orphan the previous job's arrays - run the module's own
-request cycle per job.
-*/
+// ext/filter caches raw input copies in its module globals; only its RSHUTDOWN
+// frees them (filter.c:190-196), and sapi_activate()'s input_filter_init()
+// UNDEFs them WITHOUT freeing (filter.c:232-240, wired via SAPI.c:484). The
+// worker path runs sapi_activate per job but RSHUTDOWN only at cycle end, so
+// each job would orphan the previous job's arrays - run the module's own
+// request cycle per job.
 static const char *RELOAD_MODULES[] = {"filter", NULL};
 
 // Run the per-request startup (startup=true) or shutdown hook of each RELOAD_MODULE.
@@ -99,9 +98,9 @@ static void rapira_modules_request(bool startup) {
             continue;
         }
         if (startup && module->request_startup_func) {
-            /* engine contract: RINIT failure is fatal (zend_activate_modules warns and
-            exit(1)s). Bail instead - the zend_try in rapira_request_activate contains
-            it, failing the job and recycling the worker. */
+            // engine contract: RINIT failure is fatal (zend_activate_modules warns and
+            // exit(1)s). Bail instead - the zend_try in rapira_request_activate contains
+            // it, failing the job and recycling the worker.
             if (module->request_startup_func(module->type, module->module_number) == FAILURE) {
                 zend_error(E_WARNING, "request_startup() for %s module failed", module->name);
                 zend_bailout();
@@ -129,16 +128,16 @@ static void rapira_observer_end_to(zend_execute_data *base) {
     EG(current_execute_data) = orig;
 }
 
-/* Per-job execution budget, captured once per cycle. EG(timeout_seconds) is
-runtime-mutable (set_time_limit()/ini_set() go through OnUpdateTimeout) and the
-worker path never restores INI per job, so re-arming straight from it would let
-one job's set_time_limit(0) disable the timer for every later job. The first
-rapira_request_init of a cycle runs after the bootstrap top-level, so the capture
-honors the bootstrap's own set_time_limit; rapira_request_shutdown resets it at
-cycle end. -1 = not captured yet. */
+// Per-job execution budget, captured once per cycle. EG(timeout_seconds) is
+// runtime-mutable (set_time_limit()/ini_set() go through OnUpdateTimeout) and the
+// worker path never restores INI per job, so re-arming straight from it would let
+// one job's set_time_limit(0) disable the timer for every later job. The first
+// rapira_request_init of a cycle runs after the bootstrap top-level, so the capture
+// honors the bootstrap's own set_time_limit; rapira_request_shutdown resets it at
+// cycle end. -1 = not captured yet.
 static zend_long rapira_job_timeout = -1;
 
-/* Per-request state php_request_startup() resets that the worker path skips. */
+// Per-request state php_request_startup() resets that the worker path skips.
 static void rapira_request_init(void) {
     PG(connection_status) = PHP_CONNECTION_NORMAL;
     PG(header_is_being_sent) = 0;
@@ -179,10 +178,19 @@ static void rapira_request_init(void) {
                         sizeof(SAPI_PHP_VERSION_HEADER) - 1, 1);
     }
 
-    /* main/main.c php_request_startup(): honor the output INIs per request */
+    // main/main.c php_request_startup(): honor the output INIs per request.
+    // 8.6 stores the output_handler ini as zend_string* via OnUpdateStrNotEmpty,
+    // so an empty value is NULL and the [0] emptiness check is gone:
+    // https://github.com/php/php-src/commit/e0221be81e39860e83867fadd67115e1d2c992c1
+#if PHP_VERSION_ID >= 80600
+    if (PG(output_handler)) {
+        zval oh;
+        ZVAL_STR_COPY(&oh, PG(output_handler));
+#else
     if (PG(output_handler) && PG(output_handler)[0]) {
         zval oh;
         ZVAL_STRING(&oh, PG(output_handler));
+#endif
         php_output_start_user(&oh, 0, PHP_OUTPUT_HANDLER_STDFLAGS);
         zval_ptr_dtor(&oh);
     } else if (PG(output_buffering)) {
@@ -460,19 +468,19 @@ void rapira_process_init(void) {
     zend_signal_startup();
 }
 
-/* Once per forked worker, before any PHP runs in the child. The Zend MM heap
-   was created by the master's MINIT; 8.5+ requires the child to re-key it
-   (debug builds assert getpid() == heap->pid in zend_mm_shutdown) and re-arm
-   the per-process execution timer, which fork does not inherit. */
+// Once per forked worker, before any PHP runs in the child. The Zend MM heap
+// was created by the master's MINIT; 8.5+ requires the child to re-key it
+// (debug builds assert getpid() == heap->pid in zend_mm_shutdown) and re-arm
+// the per-process execution timer, which fork does not inherit.
 void rapira_child_init(void) {
 #if PHP_VERSION_ID >= 80500
     php_child_init();
 #endif
 }
 
-/* Temp streams (POST request_body) are only NULLed by sapi_deactivate_module();
-  nothing reclaims the resource in a resident request, so sweep dead ones
-  before serving the next job. Safe here: the previous request is finished. */
+// Temp streams (POST request_body) are only NULLed by sapi_deactivate_module();
+// nothing reclaims the resource in a resident request, so sweep dead ones
+// before serving the next job. Safe here: the previous request is finished.
 void rapira_release_temporary_streams(void) {
     zend_resource *val = NULL;
     int stream_type = php_file_le_stream();

@@ -106,14 +106,26 @@ fn rapira_bin() -> PathBuf {
 /// Boot a master with a generated config, retrying the ephemeral port up to 3
 /// times to survive the bind :0 -> spawn TOCTOU race. Panics with the log tail
 /// if the master never accepts a connection.
+///
+/// `extra_toml` is appended inside the `[pool]` table, so bare keys are pool
+/// keys. Any other section (`[supervisor]`, `[log]`) needs its own header and
+/// must come after all bare pool keys — a header closes `[pool]` for everything
+/// that follows. A misplaced key is a boot error that surfaces here as the
+/// generic "never accepted a connection" panic.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
-    spawn_with_extras(fixture, processes, "", extra_toml)
+    spawn_with_extras(fixture, processes, "", extra_toml, Some("info"))
 }
 
 /// [`spawn_with_config`] for keys that belong inside the `[http]` table, which the
 /// trailing `extra_toml` cannot reach without redeclaring the table.
 pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
-    spawn_with_extras(fixture, processes, http_extra, "")
+    spawn_with_extras(fixture, processes, http_extra, "", Some("info"))
+}
+
+/// [`spawn_with_config`] without the pinned `RUST_LOG`, so the `[log]` section
+/// owns the filter — for tests asserting config-driven filtering.
+pub fn spawn_without_rust_log(fixture: &str, processes: usize, extra_toml: &str) -> Server {
+    spawn_with_extras(fixture, processes, "", extra_toml, None)
 }
 
 fn spawn_with_extras(
@@ -121,6 +133,7 @@ fn spawn_with_extras(
     processes: usize,
     http_extra: &str,
     extra_toml: &str,
+    rust_log: Option<&str>,
 ) -> Server {
     let dir = scratch_dir();
     std::fs::copy(fixture_path(fixture), dir.join(fixture))
@@ -135,10 +148,16 @@ fn spawn_with_extras(
         )
         .expect("write config");
         let log = File::create(dir.join("server.log")).expect("create server.log");
-        let mut child = Command::new(rapira_bin())
-            .args(["serve", "--config"])
-            .arg(dir.join("rapira.toml"))
-            .env("RUST_LOG", "info")
+        let mut cmd = Command::new(rapira_bin());
+        cmd.args(["serve", "--config"]).arg(dir.join("rapira.toml"));
+        match rust_log {
+            // Pinned by default so worker/scaling activity lands in the failure
+            // diagnostics regardless of the config under test.
+            Some(v) => cmd.env("RUST_LOG", v),
+            // Cleared, not just unpinned: the developer's shell may set it.
+            None => cmd.env_remove("RUST_LOG"),
+        };
+        let mut child = cmd
             .stdout(Stdio::from(log.try_clone().expect("clone log fd")))
             .stderr(Stdio::from(log))
             .spawn()

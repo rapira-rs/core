@@ -53,7 +53,7 @@ impl SapiHeader {
         }
         let line: &[u8] = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
         let Some(field) = split_header_line(line) else {
-            log::debug!(
+            tracing::debug!(
                 target: "php",
                 "dropped unrepresentable response header: {}",
                 String::from_utf8_lossy(line)
@@ -189,7 +189,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
         let ctx = unsafe {
             let Some(c) = ctx() else {
                 let data = slice::from_raw_parts(buf.cast::<u8>(), len);
-                log::info!(target: "php", "{}", String::from_utf8_lossy(data));
+                tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
                 return len;
             };
             c
@@ -405,7 +405,7 @@ pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type:
         }
 
         let s = unsafe { CStr::from_ptr(message).to_string_lossy() };
-        log::log!(target: "php", syslog_to_level(syslog_type), "{s}");
+        crate::diagnostics::php_log!(syslog_to_level(syslog_type), "{s}");
     })
 }
 pub(crate) fn send_error_head(c: &mut Context, status: u16) {

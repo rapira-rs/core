@@ -66,7 +66,7 @@ pub fn spawn_lifeline_watch(lifeline: OwnedFd) {
                 // SAFETY: reads into a 1-byte stack buffer on an fd we own.
                 let n = unsafe { libc::read(lifeline.as_raw_fd(), (&raw mut byte).cast(), 1) };
                 if n == 0 {
-                    log::warn!(target: "rapira", "master died (lifeline EOF); draining");
+                    tracing::warn!(target: "rapira", "master died (lifeline EOF); draining");
                     // Process-directed (kill self), not raise(): raise is
                     // thread-directed, so a blocked SIGQUIT would sit in this
                     // thread's private pending set where the worker's sigwait

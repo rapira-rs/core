@@ -21,9 +21,7 @@ sudo pacman -S php php-embed                  # Arch
 sudo apk add php84-dev php84-embed            # Alpine
 ```
 
-macOS: Homebrew's `php` has no embed SAPI — build from source with the flags file.
-Debian/Ubuntu ship only a versioned `libphpX.Y.so`; `make test` and CI symlink it to the
-plain `libphp.so` the linker wants, a direct `cargo build` needs the same symlink.
+macOS: Homebrew's `php` has no embed SAPI — build from source with the flags file. Debian/Ubuntu ship only a versioned `libphpX.Y.so`; `make test` and CI symlink it to the plain `libphp.so` the linker wants, a direct `cargo build` needs the same symlink.
 
 PHP is discovered through `php-config`. If it is not the one on `PATH`, point to it explicitly:
 
@@ -44,14 +42,13 @@ DYLD_LIBRARY_PATH=$HOME/.local/php-nts/lib ./target/release/rapira serve worker.
 rapira serve [OPTIONS] [SCRIPT]
 ```
 
-Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml`
-(`--config`) or turnkey flags. Precedence is **CLI flags > config file > defaults**.
+Bare `rapira` prints help. `serve` boots the server from either a `rapira.toml` (`--config`) or turnkey flags. Precedence is **CLI flags > config file > defaults**.
 
 | Option            | Default          | Description                                                                                      |
 | ----------------- | ---------------- | ------------------------------------------------------------------------------------------------ |
 | `--config <PATH>` | none             | Load settings from a `rapira.toml`.                                                              |
 | `--listen <ADDR>` | `127.0.0.1:8000` | Bind address: `host:port`, `:port` (all interfaces), or `unix:<path>`. A bare port is rejected.  |
-| `--processes <N>` | CPU count        | Worker processes to fork (static count / max_children for dynamic & ondemand).                   |
+| `--processes <N>` | CPU count        | Worker processes to fork (static count / max_children for `pool.mode` dynamic & ondemand).       |
 | `--classic`       | off              | Re-include the script for every request (front-controller style) instead of keeping it resident. |
 | `SCRIPT`          | required¹        | PHP entry script. Overrides `pool.entrypoint`.                                                   |
 
@@ -69,29 +66,32 @@ curl http://127.0.0.1:8000/
 ```toml
 [http]
 listen = "127.0.0.1:8000"
-server_name = "localhost"    # optional; SERVER_NAME reported to PHP
-server_port = 8000           # optional; defaults to the listen TCP port (80 for unix:)
-max_body_size_mb = 8         # optional; larger request bodies get a 413
-unsafe_field_names = "drop"  # optional; drop (default) | reject
+server_name = "localhost"             # optional; SERVER_NAME reported to PHP
+server_port = 8000                    # optional; defaults to the listen TCP port (80 for unix:)
+max_body_size_mb = 8                  # optional; larger request bodies get a 413
+unsafe_field_names = "drop"           # optional; drop (default) | reject
 
 [pool]
-processes = 4                # worker processes to fork (max_children for pm = dynamic/ondemand)
-entrypoint = "index.php"     # relative → resolved against this file's directory
-classic = false              # optional; default false
+entrypoint = "index.php"              # relative → resolved against this file's directory
+processes = 4                         # worker processes to fork (max_children for mode = dynamic/ondemand)
+classic = false                       # optional; default false
+mode = "dynamic"                      # static (default) | dynamic | ondemand
+min_spare = 1                         # dynamic only: keep at least this many idle workers
+max_spare = 3                         # dynamic only: trim to at most this many idle workers (rejected under other modes)
+max_requests = 0                      # recycle a worker after N requests (+jitter); 0 = unlimited
+process_idle_timeout_secs = 10        # ondemand: retire an idle worker after this long
+request_terminate_timeout_secs = 0    # kill a worker whose single request runs longer (wall clock); 0 = off
 
-[pm]                         # optional; process-manager policy
-mode = "dynamic"             # static (default) | dynamic | ondemand
-min_spare = 1                # dynamic only: keep at least this many idle workers
-max_spare = 3                # dynamic only: trim to at most this many idle workers (rejected under other modes)
-max_requests = 0             # recycle a worker after N requests (+jitter); 0 = unlimited
-process_idle_timeout_secs = 10   # ondemand: retire an idle worker after this long
-process_control_timeout_secs = 30 # graceful-stop budget before QUIT → TERM → KILL
-request_terminate_timeout_secs = 0 # kill a worker whose single request runs longer (wall clock); 0 = off
-pidfile = "/run/rapira.pid"  # optional; relative paths resolve against this file's dir
+[supervisor]                          # optional; master-process policy
+pidfile = "/run/rapira.pid"           # optional; relative paths resolve against this file's dir
+process_control_timeout_secs = 30     # graceful-stop budget before QUIT → TERM → KILL
+
+[log]                                 # optional; see Logging below
+level = "error"                       # error (default) | warn | info | debug | trace
+format = "plain"                      # plain (default) | json
 ```
 
-Unknown keys are rejected. A relative `SCRIPT` on the command line resolves against the
-current directory; a relative `pool.entrypoint` resolves against the config file's directory.
+Unknown keys are rejected. A relative `SCRIPT` on the command line resolves against the current directory; a relative `pool.entrypoint` resolves against the config file's directory.
 
 ### Request field names
 
@@ -108,15 +108,7 @@ Two other request-field rules follow from the same mapping: a field sent more th
 
 ### Process model
 
-rapira runs a **single-threaded master** that binds the listen socket(s), starts PHP once
-(`MINIT`, so OPcache's SHM is shared with every worker), then forks worker processes — a
-pre-fork process model. Each worker runs one NTS PHP interpreter behind its own async
-HTTP runtime and accepts on the inherited socket. The master itself never serves requests;
-it supervises: it reaps and respawns crashed workers (with backoff), recycles workers after
-`max_requests`, kills workers whose request exceeds `request_terminate_timeout_secs`,
-scales the pool for `pm = dynamic`/`ondemand`, and reloads on `SIGUSR2` by
-rolling the pool one worker at a time with no dropped connections. `SIGINT`/`SIGTERM` drains
-gracefully (a second one forces exit). Send signals to the master pid (see `pidfile`).
+rapira runs a **single-threaded master** that binds the listen socket(s), starts PHP once (`MINIT`, so OPcache's SHM is shared with every worker), then forks worker processes — a pre-fork process model. Each worker runs one NTS PHP interpreter behind its own async HTTP runtime and accepts on the inherited socket. The master itself never serves requests; it supervises: it reaps and respawns crashed workers (with backoff), recycles workers after `pool.max_requests`, kills workers whose request exceeds `pool.request_terminate_timeout_secs`, scales the pool for `pool.mode = "dynamic"`/`"ondemand"`, and reloads on `SIGUSR2` by rolling the pool one worker at a time with no dropped connections. `SIGINT`/`SIGTERM` drains gracefully (a second one forces exit). Send signals to the master pid (see `supervisor.pidfile`).
 
 ```sh
 rapira serve --config /etc/rapira/rapira.toml
@@ -176,27 +168,47 @@ rapira serve --classic public/index.php
 
 ## Logging
 
-Logging is `env_logger`-based and configured with the `RUST_LOG` environment variable. Without it PHP diagnostics print from `warn` up and everything else from `error` up.
+Logging is configured in the `[log]` section:
+
+```toml
+[log]
+level = "error"   # error (default) | warn | info | debug | trace
+format = "plain"  # plain (default) | json
+
+[log.targets]     # optional; per-target overrides
+php = "debug"
+pingora_core = "warn"
+```
+
+`level` applies to every target; `[log.targets]` raises or lowers individual ones. A key matches by prefix, so `php_sys` covers `php_sys::callbacks` and everything under it.
 
 Log targets:
 
 - `rapira` — server lifecycle: boot, worker lifecycle, shutdown
+- `master` — supervision: forks, reaps, respawns, reloads, pool scaling
+- `http` — the HTTP front: listeners, request/response field handling, drain
 - `ext` — extension task outcomes
 - `php` — output and diagnostics coming from PHP itself
-- dependencies log under their module paths (`pingora`, `tokio`, …)
+- dependencies log under their module paths (`pingora_core`, `tokio`, …)
 
 PHP diagnostics take their level from the error type: fatal errors (`E_ERROR`, `E_PARSE`, `E_CORE_ERROR`, `E_COMPILE_ERROR`, `E_USER_ERROR`, `E_RECOVERABLE_ERROR`) log at `error`, warnings at `warn`, notices at `info`, deprecations at `debug`. A diagnostic excluded by the script's [`error_reporting`](https://www.php.net/manual/en/function.error-reporting.php) mask drops to `trace`, so `error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED)` keeps vendor deprecations out of the log. Fatals are never demoted — they explain why a worker recycled — and `E_CORE_ERROR`/`E_CORE_WARNING` are raised before a script can set a mask at all.
 
-Examples:
+Diagnostics go to the log, not into responses: rapira defaults [`display_errors`](https://www.php.net/manual/en/errorfunc.configuration.php#ini.display-errors) to `0` and [`log_errors`](https://www.php.net/manual/en/errorfunc.configuration.php#ini.log-errors) to `1`. These are defaults, not overrides — a php.ini that sets either wins.
+
+Formats, all written to stderr in one write per record, so master and worker output never interleaves mid-record:
+
+- `plain` — `2026-07-30T09:12:34.567890Z ERROR php: …`; colored when stderr is a terminal (`NO_COLOR` turns that off).
+- `json` — one object per line: `{"timestamp":…,"level":"ERROR","message":…,"target":…}`. `timestamp` is RFC 3339 UTC with milliseconds, and newlines inside a message are escaped so a record is always one line. Records from the bundled proxy engine add `log.*` caller fields. Never colored.
+
+### `RUST_LOG` (debugging override)
+
+`RUST_LOG`, when set to a non-empty value, replaces `level` and `[log.targets]` entirely — the whole filter, not a merge — so a debugging session needs no config edit. It does not affect `format`.
 
 ```sh
 RUST_LOG=info rapira serve worker.php            # info+ for everything
 RUST_LOG=rapira=debug,php=info rapira serve worker.php
-RUST_LOG=info,php=debug rapira serve worker.php     # include PHP deprecations
 RUST_LOG=warn,rapira=trace rapira serve worker.php  # quiet deps, trace the server
 ```
-
-Levels: `error`, `warn`, `info`, `debug`, `trace`. `RUST_LOG_STYLE=never` disables colored output.
 
 ## Tests
 
@@ -204,5 +216,4 @@ Levels: `error`, `warn`, `info`, `debug`, `trace`. `RUST_LOG_STYLE=never` disabl
 make test   # PHP from php-config on PATH; override with PHP_CONFIG=/path/to/php-config
 ```
 
-The embed library is located under the `php-config` prefix automatically (`lib`, `lib64`,
-`lib/phpXX`; plain or versioned `libphp*.so`, `libphp.dylib` on macOS).
+The embed library is located under the `php-config` prefix automatically (`lib`, `lib64`, `lib/phpXX`; plain or versioned `libphp*.so`, `libphp.dylib` on macOS).

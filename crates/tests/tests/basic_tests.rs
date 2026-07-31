@@ -506,17 +506,17 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
 /// Levels of the worker's teardown last-error records carrying `mark`. Anchored on that line's
 /// own prefix so each logging path is asserted separately, and so a `php`-target record that
 /// only quotes the marker — a stack frame, say — is never counted as a diagnostic.
-fn last_error_levels(logged: &[tests::Captured], mark: &str) -> Vec<log::Level> {
+fn last_error_levels(logged: &[tests::Captured], mark: &str) -> Vec<tracing::Level> {
     php_levels(logged, mark, true)
 }
 
 /// Levels of the SAPI log-callback records carrying `mark` — the `php` target minus the
 /// teardown line.
-fn log_callback_levels(logged: &[tests::Captured], mark: &str) -> Vec<log::Level> {
+fn log_callback_levels(logged: &[tests::Captured], mark: &str) -> Vec<tracing::Level> {
     php_levels(logged, mark, false)
 }
 
-fn php_levels(logged: &[tests::Captured], mark: &str, teardown: bool) -> Vec<log::Level> {
+fn php_levels(logged: &[tests::Captured], mark: &str, teardown: bool) -> Vec<tracing::Level> {
     logged
         .iter()
         .filter(|c| {
@@ -548,17 +548,17 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
     let logged = captured();
     assert_eq!(
         last_error_levels(&logged, "MASKED-DEPRECATION"),
-        vec![log::Level::Trace],
+        vec![tracing::Level::TRACE],
         "a diagnostic the script masked must not reach error (captured: {logged:?})"
     );
     assert_eq!(
         last_error_levels(&logged, "REPORTED-WARNING"),
-        vec![log::Level::Warn],
+        vec![tracing::Level::WARN],
         "an unmasked E_USER_WARNING logs at warn (captured: {logged:?})"
     );
     assert_eq!(
         last_error_levels(&logged, "REPORTED-FATAL"),
-        vec![log::Level::Error],
+        vec![tracing::Level::ERROR],
         "an uncaught throw stays an error-level diagnostic (captured: {logged:?})"
     );
     Ok(())
@@ -582,7 +582,7 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     let logged = captured();
     assert_eq!(
         last_error_levels(&logged, "SILENCED-FATAL"),
-        vec![log::Level::Error],
+        vec![tracing::Level::ERROR],
         "a fatal stays visible however the script masks it (captured: {logged:?})"
     );
     Ok(())
@@ -606,12 +606,12 @@ fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
     let logged = captured();
     assert_eq!(
         log_callback_levels(&logged, "LOGGED-DEPRECATION"),
-        vec![log::Level::Debug],
+        vec![tracing::Level::DEBUG],
         "the log callback reports a deprecation at debug (captured: {logged:?})"
     );
     assert_eq!(
         last_error_levels(&logged, "LOGGED-DEPRECATION"),
-        vec![log::Level::Debug],
+        vec![tracing::Level::DEBUG],
         "so does the teardown slot (captured: {logged:?})"
     );
     Ok(())

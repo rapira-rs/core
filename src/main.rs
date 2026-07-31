@@ -1,8 +1,7 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use extension_api::PrepareCtx;
-use log::info;
 use php_sys::{Mode, Rapira};
-use rapira_config::{Listen, Overrides, PmMode, Settings, UnsafeFieldNames};
+use rapira_config::{Listen, Overrides, PoolMode, Settings, UnsafeFieldNames};
 use rapira_pingora::{
     Config as HttpConfig, HttpServer, Listen as HttpListen,
     UnsafeFieldNames as HttpUnsafeFieldNames,
@@ -10,6 +9,9 @@ use rapira_pingora::{
 use rapira_runtime::ExtensionRuntime;
 use rapira_scoreboard::Scoreboard;
 use std::path::PathBuf;
+use tracing::info;
+
+mod logging;
 
 mod worker;
 
@@ -39,8 +41,8 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Worker processes to fork (static count; max_children for dynamic/ondemand).
-    /// Defaults to the CPU count.
+    /// Worker processes to fork (static count; max_children for `pool.mode`
+    /// dynamic/ondemand). Defaults to the CPU count.
     #[arg(long)]
     processes: Option<usize>,
 
@@ -61,12 +63,6 @@ fn main() -> anyhow::Result<()> {
     // First statement: USR1/USR2/HUP default to terminate, and no handler
     // exists until the master installs its own. Harmless on non-serve paths.
     rapira_master::block_early_signals();
-
-    // PHP diagnostics carry the level of their error type, so the `php` target starts a notch
-    // above the rest: warnings and fatals print without RUST_LOG, notices and deprecations don't.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error,php=warn"))
-        .init();
-    info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
     match Cli::parse().command {
         Some(Commands::Serve(args)) => serve(args),
@@ -92,6 +88,16 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             entrypoint: args.script,
         },
     )?;
+
+    // The logger goes up the moment the config exists, and not before: the
+    // config owns both the filter and the format, and the global logger installs
+    // only once. Nothing earlier logs — signal blocking is syscalls, clap writes
+    // its own usage/errors to stderr, and `resolve` reports failure by returning
+    // it (a config error cannot be rendered in the format that failed to parse).
+    // Non-serve paths never install a logger; stray `log::` calls are dropped.
+    logging::init(&settings.log)?;
+    info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
+
     let script: PathBuf = settings.pool.entrypoint.clone();
 
     // rapira_config::Listen and rapira_pingora::Listen are distinct types on purpose: the
@@ -151,24 +157,24 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {
         processes: settings.pool.processes,
-        pm: match settings.pm.mode {
-            PmMode::Static => rapira_master::PmMode::Static,
-            PmMode::Dynamic {
+        pool_mode: match settings.pool.mode {
+            PoolMode::Static => rapira_master::PoolMode::Static,
+            PoolMode::Dynamic {
                 min_spare,
                 max_spare,
-            } => rapira_master::PmMode::Dynamic {
+            } => rapira_master::PoolMode::Dynamic {
                 min_spare,
                 max_spare,
             },
-            PmMode::Ondemand => rapira_master::PmMode::Ondemand,
+            PoolMode::Ondemand => rapira_master::PoolMode::Ondemand,
         },
-        process_idle_timeout: settings.pm.process_idle_timeout,
-        process_control_timeout: settings.pm.process_control_timeout,
-        request_terminate_timeout: settings.pm.request_terminate_timeout,
-        pidfile: settings.pm.pidfile.clone(),
+        process_idle_timeout: settings.pool.process_idle_timeout,
+        process_control_timeout: settings.supervisor.process_control_timeout,
+        request_terminate_timeout: settings.pool.request_terminate_timeout,
+        pidfile: settings.supervisor.pidfile.clone(),
         listeners,
     };
-    let max_requests: u64 = settings.pm.max_requests;
+    let max_requests: u64 = settings.pool.max_requests;
 
     // The closure runs ONLY in freshly-forked children: each child's COW copy
     // of `host_cell` is Some, taken exactly once per child. The parent's copy
@@ -187,7 +193,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         }
         Ok(rapira_master::StopReason::Forced) => std::process::exit(130),
         Err(e) => {
-            log::error!(target: "rapira", "master failed: {e:#}");
+            tracing::error!(target: "rapira", "master failed: {e:#}");
             std::process::exit(rapira_master::MASTER_EXIT_FAILBOOT);
         }
     }

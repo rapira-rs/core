@@ -1,9 +1,8 @@
-use log::{error, info, trace};
 use std::cell::RefCell;
-use std::marker::PhantomData;
 use std::thread;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tracing::{error, info, trace};
 use types::Job;
 
 use crate::quota::{self, WorkerHooks};
@@ -19,15 +18,12 @@ thread_local! {
 }
 
 /// Proof that sapi_startup + php_module_startup (MINIT) succeeded in THIS
-/// process. `!Send`: created and dropped on the module-startup thread. Drop
-/// runs the module teardown, so exactly one place holds it:
+/// process. Drop runs the module teardown, so exactly one place holds it:
 /// - fused path: inside `Rapira` (single-process semantics);
 /// - fork mode: the master, for its whole life (opcache SHM mmap'd at MINIT is
 ///   shared by every fork). Forked workers NEVER drop it — they leave via
 ///   process exit, which skips Drop; the master owns the single engine teardown.
-pub struct PhpModule {
-    _not_send: PhantomData<*const ()>,
-}
+pub struct PhpModule {}
 
 impl Drop for PhpModule {
     fn drop(&mut self) {
@@ -45,7 +41,6 @@ pub struct Rapira {
     board: Option<rapira_scoreboard::Scoreboard>,
     /// Some = this value owns module teardown (fused path); None = worker flavor.
     module: Option<PhpModule>,
-    _not_send: PhantomData<*const ()>, // !Send + !Sync, to prevent dropping from a foreign thread (which would be UB)
 }
 
 impl Rapira {
@@ -69,9 +64,7 @@ impl Rapira {
             }
             return Err(anyhow::anyhow!("php_module_startup failed"));
         }
-        Ok(PhpModule {
-            _not_send: PhantomData,
-        })
+        Ok(PhpModule {})
     }
 
     /// Worker-side (post-fork) start: job channel + the single PHP worker
@@ -107,7 +100,6 @@ impl Rapira {
             worker: Some(worker),
             board,
             module: None,
-            _not_send: PhantomData,
         })
     }
 

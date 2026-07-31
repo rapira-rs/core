@@ -242,8 +242,6 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Rapira is !Send (PhantomData<*const ()>): tearing it down from a foreign thread does not compile.
-
 #[test]
 fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
