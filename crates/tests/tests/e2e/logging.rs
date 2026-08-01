@@ -19,11 +19,12 @@ fn json_format_shapes_the_log() {
         let banner = text.lines().any(|l| {
             serde_json::from_str::<serde_json::Value>(l).is_ok_and(|v| {
                 v["target"] == "rapira"
-                    && v["message"]
+                    && v["fields"]["message"]
                         .as_str()
                         .is_some_and(|m| m.starts_with("rapira_core v"))
             })
         });
+
         // Negative shape: every complete line is one JSON object. A trailing
         // partial line (a write in flight) is the only exclusion.
         let complete = &text[..text.rfind('\n').map_or(0, |i| i + 1)];
