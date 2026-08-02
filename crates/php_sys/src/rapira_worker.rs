@@ -275,7 +275,7 @@ fn log_and_clear_last_error() {
             // the level check, and this runs on every request
             crate::diagnostics::php_log!(
                 level,
-                "last error: {label}: {} in {}:{}",
+                "{label}: {} in {}:{}",
                 zstr_lossy(&*msg),
                 zstr_lossy(&*(*pg).last_error_file),
                 (*pg).last_error_lineno

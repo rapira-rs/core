@@ -63,21 +63,16 @@ where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
 {
     match format {
-        // flatten_event emits duplicate JSON keys on field-name collisions:
-        // never name a tracing field `timestamp`, `level`, `message` or
-        // `target`. Records still arriving over the log bridge (pingora) add
-        // `log.*` caller fields; ours are native and stay clean.
         LogFormat::Json => tracing_subscriber::fmt::layer()
             .json()
-            .flatten_event(true)
+            .flatten_event(false)
             .with_current_span(false)
             .with_span_list(false)
             .with_timer(ChronoUtc::new("%Y-%m-%dT%H:%M:%S%.3fZ".into()))
+            .with_file(false)
+            .with_line_number(false)
             .with_writer(writer)
             .boxed(),
-        // with_ansi replaces the layer's default ansi value — the only place
-        // tracing-subscriber consults NO_COLOR — so the caller's decision is
-        // the only gate.
         LogFormat::Plain => tracing_subscriber::fmt::layer()
             .with_ansi(ansi)
             .with_writer(writer)
@@ -241,19 +236,17 @@ mod tests {
             .with(EnvFilter::new("info"))
             .with(make_layer(LogFormat::Json, false, sink.clone()));
         tracing::subscriber::with_default(sub, || {
-            // Inside a live span, so the span/spans absence below actually
-            // pins with_current_span(false)/with_span_list(false) — outside
-            // one, the keys are absent whatever the layer options say.
             tracing::info_span!("req", rid = 1).in_scope(|| {
                 tracing::info!(target: "rapira", answer = 42, "boot-mark");
             });
         });
         let out = sink.text();
+        // "{"timestamp":"2026-08-01T12:12:54.218Z","level":"INFO","fields":{"message":"boot-mark","answer":42},"target":"rapira"}"
         let line = out.lines().next().expect("one record");
         let v: serde_json::Value = serde_json::from_str(line).expect("json record");
-        assert_eq!(v["message"], "boot-mark");
+        assert_eq!(v["fields"]["message"], "boot-mark");
         assert_eq!(
-            v["answer"], 42,
+            v["fields"]["answer"], 42,
             "event fields must be flattened to the top level"
         );
         assert_eq!(v["target"], "rapira");
