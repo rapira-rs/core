@@ -1,11 +1,14 @@
 #include "rapira_classes.h"
 
 #include "ext/json/php_json.h"
+#include "zend_operators.h"
+#include "zend_portability.h"
 #include "zend_smart_str.h"
 
 #include "zend_API.h"
 #include "zend_enum.h"
 #include "zend_hash.h"
+#include "zend_string.h"
 
 // rust glue
 extern const char *rapira_rs_version(size_t *len);
@@ -19,6 +22,43 @@ enum {
     RAPIRA_LOG_DEBUG,
     RAPIRA_LOG_TRACE,
 };
+
+// zend_read_property borrows the value, so to satisfy ownership, we copy it
+// this method is a shortland for reading a property and copying its value into
+// a zval
+static void add_property(zval *dst, zend_class_entry *scope, zend_object *ex,
+                         const char *name, size_t len) {
+    zval rv, copy;
+    ZVAL_COPY(&copy, zend_read_property(scope, ex, name, len, 1, &rv));
+    add_assoc_zval_ex(dst, name, len, &copy);
+}
+
+// this is a special case for throwable objects.
+// they have a private fields, which if passed in context (log),
+// we'll lose them, since they are private (and we're using json)
+static void throwable(zval *dst, zend_object *ex, int depth) {
+    zend_class_entry *base = zend_get_exception_base(ex);
+    array_init(dst);
+
+    add_assoc_str(dst, "class", zend_string_copy(ex->ce->name));
+    add_property(dst, base, ex, ZEND_STRL("message"));
+    add_property(dst, base, ex, ZEND_STRL("code"));
+    add_property(dst, base, ex, ZEND_STRL("file"));
+    add_property(dst, base, ex, ZEND_STRL("line"));
+
+    // depth used to check if we should recursively add stack trace
+    if (depth <= 0) {
+        return;
+    }
+
+    zval rv;
+    zval *prev = zend_read_property(base, ex, ZEND_STRL("previous"), true, &rv);
+    if (prev != NULL && Z_TYPE_P(prev) == IS_OBJECT) {
+        zval flat;
+        throwable(&flat, Z_OBJ_P(prev), depth - 1);
+        add_assoc_zval_ex(dst, ZEND_STRL("previous"), &flat);
+    }
+}
 
 ZEND_FUNCTION(Rapira_get_version) {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -40,7 +80,7 @@ static int level_from_case(zend_object *level) {
     if (zend_string_equals_literal(name, "Error")) {
         return RAPIRA_LOG_ERROR;
     }
-    if (zend_string_equals_literal(name, "Warninig")) {
+    if (zend_string_equals_literal(name, "Warning")) {
         return RAPIRA_LOG_WARN;
     }
     if (zend_string_equals_literal(name, "Info")) {
@@ -74,7 +114,21 @@ ZEND_FUNCTION(Rapira_log) {
 
     if (context != NULL && zend_hash_num_elements(context) > 0) {
         zval tmp;
-        ZVAL_ARR(&tmp, context);
+        // dup to avoid modifying the original context
+        ZVAL_ARR(&tmp, zend_array_dup(context));
+
+        zval *val = NULL;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL(tmp), val) {
+            if (Z_TYPE_P(val) == IS_OBJECT &&
+                instanceof_function(Z_OBJCE_P(val), zend_ce_throwable)) {
+                zval flat;
+                throwable(&flat, Z_OBJ_P(val), 4);
+                zval_ptr_dtor(val);
+                ZVAL_COPY_VALUE(val, &flat);
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+
         php_json_encode(&json, &tmp, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR);
         smart_str_0(&json);
     }

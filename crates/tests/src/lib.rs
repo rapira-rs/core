@@ -6,9 +6,6 @@ use tokio::sync::mpsc;
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
 static PHP_ENV: Once = Once::new();
-// async sibling of PHP_LOCK for the #[tokio::test] suite — a std guard held across
-// .await trips clippy::await_holding_lock, so the async tests serialize on a tokio mutex.
-// https://rust-lang.github.io/rust-clippy/master/index.html#await_holding_lock
 static PHP_LOCK_ASYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Absolute path to a PHP fixture shipped with this crate (robust to the test's cwd).
@@ -23,9 +20,6 @@ pub fn php_lock() -> sync::MutexGuard<'static, ()> {
     PHP_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Point PHP at `ini`. PHPRC is process-global and read once per php_module_startup, so a binary
-/// that overrides it must not share its process with tests expecting the suite's php.ini. Taking
-/// the guard by reference proves no other test thread is inside php_module_startup.
 pub fn set_phprc(_php: &sync::MutexGuard<'static, ()>, ini: &Path) {
     // SAFETY: PHP_LOCK is held for as long as `_php` lives, so nothing reads the environment
     // concurrently.
@@ -92,11 +86,6 @@ pub async fn drain_async(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
     }
 }
 
-/// Point the embedded PHP at the test php.ini so request-level compile/fatal errors
-/// render into the response body. CI's php.ini-production defaults display_errors
-/// off, which routes the error to the log and leaves the body empty (failboot_classic).
-/// PHPRC replaces the ambient php.ini; the suite uses only core/standard, so nothing
-/// is dropped. Runs once, before the first Rapira::start in the process.
 fn init_php_env() {
     PHP_ENV.call_once(|| {
         // SAFETY: the Once runs this exactly once, before any Rapira::start /
@@ -118,6 +107,9 @@ pub struct Captured {
     pub level: tracing::Level,
     pub target: String,
     pub message: String,
+    /// The `context` field, empty when the record carries none. Rapira\log()
+    /// puts its JSON-encoded context array here.
+    pub context: String,
 }
 
 static LOG_CAPTURE: Mutex<Vec<Captured>> = Mutex::new(Vec::new());
@@ -129,20 +121,35 @@ pub fn captured() -> sync::MutexGuard<'static, Vec<Captured>> {
     LOG_CAPTURE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Collects the `message` field; any `log.*` metadata fields from still-bridged
-/// records are ignored.
+/// Collects the `message` and `context` fields; any `log.*` metadata fields from
+/// still-bridged records are ignored.
 #[derive(Default)]
-struct Msg(String);
+struct Msg {
+    message: String,
+    context: String,
+}
+
+impl Msg {
+    fn slot(&mut self, name: &str) -> Option<&mut String> {
+        match name {
+            "message" => Some(&mut self.message),
+            "context" => Some(&mut self.context),
+            _ => None,
+        }
+    }
+}
 
 impl tracing::field::Visit for Msg {
     fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
-        if f.name() == "message" {
-            self.0 = v.to_owned();
+        if let Some(slot) = self.slot(f.name()) {
+            *slot = v.to_owned();
         }
     }
+    // A `%value` field arrives here: tracing records Display through record_debug,
+    // wrapped in a format_args! whose Debug forwards to Display.
     fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-        if f.name() == "message" {
-            self.0 = format!("{v:?}");
+        if let Some(slot) = self.slot(f.name()) {
+            *slot = format!("{v:?}");
         }
     }
 }
@@ -151,9 +158,6 @@ struct CaptureLayer;
 
 impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        // A record still arriving over the log bridge carries its real
-        // target/level in `log.*` fields; normalization recovers them so both
-        // sources land identically.
         let norm = tracing_log::NormalizeEvent::normalized_metadata(event);
         let meta = norm.as_ref().unwrap_or_else(|| event.metadata());
         let mut msg = Msg::default();
@@ -161,7 +165,8 @@ impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLaye
         captured().push(Captured {
             level: *meta.level(),
             target: meta.target().to_owned(),
-            message: msg.0,
+            message: msg.message,
+            context: msg.context,
         });
     }
 }
