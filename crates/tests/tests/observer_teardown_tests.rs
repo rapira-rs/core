@@ -18,14 +18,14 @@ use tests::{drain, fixture, php_lock_with_ini, req};
 fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()> {
     let _guard = php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/observer-quiet.ini"
+        "/fixtures/ini/observer_teardown_tests/observer-quiet.ini"
     )));
-    let r = Rapira::start(Mode::Worker(fixture("session-bailout-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/session-bailout-worker.php")))?;
     let h = r.handle()?;
 
     // each job bails in teardown and recycles; the cycle end walks the observer chain
     for _ in 0..3 {
-        let (_, body) = drain(h.handle_blocking(req("/", "session-bailout-worker.php"))?);
+        let (_, body) = drain(h.handle_blocking(req("/", "shared/session-bailout-worker.php"))?);
         assert!(
             body.contains("sid="),
             "worker must keep serving (got {body:?})"

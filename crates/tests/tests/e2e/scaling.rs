@@ -7,7 +7,7 @@ fn dynamic_scales_up_down() {
     // `pool.processes` is the ceiling (max children); dynamic keeps
     // min_spare..max_spare idle.
     let srv = spawn_with_config(
-        "sleep-worker.php",
+        "scaling/sleep-worker.php",
         4,
         "mode = \"dynamic\"\nmin_spare = 1\nmax_spare = 2\n",
     );
@@ -31,7 +31,7 @@ fn dynamic_scales_up_down() {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn ondemand_spawns_on_connect() {
     let srv = spawn_with_config(
-        "echo-worker.php",
+        "shared/echo-worker.php",
         2,
         "mode = \"ondemand\"\nprocess_idle_timeout_secs = 2\n",
     );

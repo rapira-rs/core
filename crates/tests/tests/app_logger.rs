@@ -1,36 +1,13 @@
 //! `\Rapira\log()`: the userland path onto the host's `app` tracing target.
 
-use php_sys::{Mode, Rapira};
-use tests::{Captured, captured, drain, init_log_capture, php_lock, req};
+use tests::app_records;
 use tracing::Level;
-
-/// The `app`-target records left by one run of `script`, in emission order.
-fn app_records(script: &str) -> Vec<(Level, String, String)> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear(); // drop anything captured by earlier tests
-
-    let r = Rapira::start(Mode::Classic).expect("classic boot");
-    let h = r.handle().expect("handle");
-    let (status, body) = drain(h.handle_blocking(req("/", script)).expect("dispatch"));
-    drop(h);
-    r.shutdown();
-
-    assert_eq!(status, 200, "{script} must run clean (body: {body:?})");
-    assert!(body.contains("logged"), "{script} ran to the end: {body:?}");
-
-    captured()
-        .iter()
-        .filter(|c: &&Captured| c.target == "app")
-        .map(|c| (c.level, c.message.clone(), c.context.clone()))
-        .collect()
-}
 
 /// Every LogLevel case must reach the host at the matching tracing level, and an
 /// omitted argument must land on Info.
 #[test]
 fn log_levels_map_onto_tracing_levels() {
-    let records = app_records("app-logger-levels.php");
+    let records = app_records("app_logger/app-logger-levels.php");
 
     let got: Vec<(Level, &str)> = records
         .iter()
@@ -56,7 +33,7 @@ fn log_levels_map_onto_tracing_levels() {
 /// carry no field at all rather than an empty object.
 #[test]
 fn log_context_is_json_encoded() {
-    let records = app_records("app-logger-context.php");
+    let records = app_records("app_logger/app-logger-context.php");
     let find = |needle: &str| {
         records
             .iter()
@@ -85,7 +62,7 @@ fn log_context_is_json_encoded() {
 /// Exception/Error, so nothing that only walks public properties can see it.
 #[test]
 fn log_context_carries_a_throwable() {
-    let records = app_records("app-logger-exception.php");
+    let records = app_records("app_logger/app-logger-exception.php");
     let (level, _, ctx) = records.first().expect("one record");
     assert_eq!(*level, Level::ERROR);
 
@@ -117,7 +94,7 @@ fn log_context_carries_a_throwable() {
 /// down with it. The substitute value is php-src's business; presence is ours.
 #[test]
 fn log_context_tolerates_unencodable_values() {
-    let records = app_records("app-logger-unencodable.php");
+    let records = app_records("app_logger/app-logger-unencodable.php");
     let (level, msg, ctx) = records.first().expect("the record must survive");
 
     assert_eq!(*level, Level::ERROR);
@@ -138,7 +115,7 @@ fn log_context_tolerates_unencodable_values() {
 /// objects, backed enums, nulls and nested arrays.
 #[test]
 fn log_context_encodes_common_php_values() {
-    let records = app_records("app-logger-values.php");
+    let records = app_records("app_logger/app-logger-values.php");
     let (_, _, ctx) = records.first().expect("one record");
 
     for fragment in [
@@ -166,7 +143,7 @@ fn log_context_encodes_common_php_values() {
 /// string it was parsed from, so a consumer cannot treat the two alike.
 #[test]
 fn app_logger_dateinterval_easy() {
-    let records = app_records("app-logger-dateinterval.php");
+    let records = app_records("app_logger/app-logger-dateinterval.php");
     let (level, msg, ctx) = records.first().expect("one record");
 
     assert_eq!(*level, Level::ERROR);

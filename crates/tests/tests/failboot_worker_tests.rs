@@ -17,9 +17,11 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
     // thread only enforces a deadline so a regression fails loudly instead of
     // hanging the whole suite.
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
-        let r = Rapira::start(Mode::Worker(fixture("failboot-worker.php")))?;
+        let r = Rapira::start(Mode::Worker(fixture(
+            "failboot_worker_tests/failboot-worker.php",
+        )))?;
         let h = r.handle()?;
-        let rx = h.handle_blocking(req("/", "failboot-worker.php"))?;
+        let rx = h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php"))?;
         drop(h); // last non-Rapira intake sender — lets the channel close on drop(r)
         let (status, body) = drain(rx); // pre-fix: blocks forever (no 503 ever sent)
         drop(r); // pre-fix: joins a worker stuck in the retry loop -> hangs
@@ -45,11 +47,14 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
     let (done_tx, done_rx) = mpsc::sync_channel::<(usize, Vec<u16>)>(1);
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
-        let r = Rapira::start(Mode::Worker(fixture("failboot-worker.php")))?;
+        let r = Rapira::start(Mode::Worker(fixture(
+            "failboot_worker_tests/failboot-worker.php",
+        )))?;
         let h = r.handle()?;
         let mut statuses = Vec::new();
         for _ in 0..5 {
-            let (s, _) = drain(h.handle_blocking(req("/", "failboot-worker.php"))?);
+            let (s, _) =
+                drain(h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php"))?);
             statuses.push(s);
         }
         let unhealthy = r.scoreboard().unhealthy;

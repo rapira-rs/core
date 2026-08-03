@@ -1,4 +1,4 @@
-use php_sys::{Frame, Request};
+use php_sys::{Frame, Mode, Rapira, Request};
 use std::env::set_var;
 use std::path::{Path, PathBuf};
 use std::sync::{self, Mutex, Once, PoisonError};
@@ -95,7 +95,7 @@ fn init_php_env() {
             set_var(
                 // https://www.php.net/manual/en/configuration.file.php
                 "PHPRC",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/php.ini"),
+                concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/ini/shared/php.ini"),
             );
         }
     });
@@ -169,6 +169,33 @@ impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLaye
             context: msg.context,
         });
     }
+}
+
+/// One `app`-target record left by `\Rapira\log()`: level, message, context JSON.
+pub type AppRecord = (tracing::Level, String, String);
+
+/// Run `script` in classic mode and return the `app`-target records it left, in
+/// emission order. The fixture must echo `logged` as its last act, so a script
+/// that died half way cannot masquerade as one that logged nothing.
+pub fn app_records(script: &str) -> Vec<AppRecord> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear(); // drop anything captured by earlier tests
+
+    let r = Rapira::start(Mode::Classic).expect("classic boot");
+    let h = r.handle().expect("handle");
+    let (status, body) = drain(h.handle_blocking(req("/", script)).expect("dispatch"));
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200, "{script} must run clean (body: {body:?})");
+    assert!(body.contains("logged"), "{script} ran to the end: {body:?}");
+
+    captured()
+        .iter()
+        .filter(|c| c.target == "app")
+        .map(|c| (c.level, c.message.clone(), c.context.clone()))
+        .collect()
 }
 
 /// Install the capturing subscriber once (records all `tracing` output — plus

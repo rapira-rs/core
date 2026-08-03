@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 #[test]
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn json_format_shapes_the_log() {
-    let srv = spawn_with_config("echo-worker.php", 1, "[log]\nformat = \"json\"\n");
+    let srv = spawn_with_config("shared/echo-worker.php", 1, "[log]\nformat = \"json\"\n");
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
@@ -53,7 +53,7 @@ fn json_format_shapes_the_log() {
 #[test]
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn plain_format_is_uncolored_when_redirected() {
-    let srv = spawn_with_config("echo-worker.php", 1, "");
+    let srv = spawn_with_config("shared/echo-worker.php", 1, "");
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
@@ -85,7 +85,7 @@ fn plain_format_is_uncolored_when_redirected() {
 #[test]
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn log_targets_php_restores_php_diagnostics() {
-    let srv = spawn_without_rust_log("warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
+    let srv = spawn_without_rust_log("logging/warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     // The diagnostic is written during request handling; a short settle covers
@@ -99,7 +99,7 @@ fn log_targets_php_restores_php_diagnostics() {
     drop(srv);
 
     let srv = spawn_without_rust_log(
-        "warn-worker.php",
+        "logging/warn-worker.php",
         1,
         "[log]\nlevel = \"error\"\n[log.targets]\nphp = \"warn\"\n",
     );
@@ -126,7 +126,7 @@ fn log_targets_php_restores_php_diagnostics() {
 #[test]
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn rust_log_replaces_the_config_filter() {
-    let srv = spawn_with_config("warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
+    let srv = spawn_with_config("logging/warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
