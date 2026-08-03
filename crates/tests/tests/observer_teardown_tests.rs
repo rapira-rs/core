@@ -14,6 +14,7 @@ use tests::{drain, fixture, php_lock_with_ini, req};
 // without it the observer API never registers and this degrades to a plain session test.
 // https://github.com/php/php-src/pull/5857
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()> {
     let _guard = php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),

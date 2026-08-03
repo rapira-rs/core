@@ -4,82 +4,75 @@
 
 namespace {
     /**
-     * Flush the response to the client early; the handler may keep working
-     * after it. Same contract as fastcgi_finish_request().
+     * Classic mode only. Flush the response to the client early; the script may keep
+     * working after it. Same contract as fastcgi_finish_request().
      */
     function rapira_finish_request(): bool {}
 }
 
 namespace Rapira {
-    /**
-     * Identity of the plugin a handler config targets; the concrete config fills it in.
-     */
-    final readonly class PluginInfo
+    enum LogLevel
     {
-        public string $name;
-        public string $description;
+        case Error;
+        case Warning;
+        case Info;
+        case Debug;
+        case Trace;
     }
 
     /**
-     * Base for every plugin handler config. The concrete subclass names the
-     * plugin it targets.
+     * A unit of work from a dispatcher. Host-created; the finalizing verbs live on the
+     * concrete type.
      */
-    abstract readonly class PluginHandlerConfig
+    interface Work
     {
-        public PluginInfo $info;
+        public function isFinalized(): bool;
+
+        public function isCancelled(): bool;
     }
 
-    /**
-     * Base for every plugin handler. Only $config is guaranteed; the per-plugin
-     * API lives on the concrete handler. Obtain one from create_plugin_handler().
-     */
-    abstract class PluginHandler
+    /** Immutable counter snapshot. Observability only. */
+    interface DispatcherInfo
     {
-        public readonly PluginHandlerConfig $config;
+        public function pendingCount(): int;
+
+        public function activeCount(): int;
     }
 
-    class RapiraException extends \Exception {}
-
-    /**
-     * Create the handler for the plugin named by $config.
-     *
-     * @throws RapiraException outside worker mode, or when no plugin matches.
-     */
-    function create_plugin_handler(PluginHandlerConfig $config): PluginHandler {}
-}
-
-namespace Rapira\Plugin\Http {
-    /** Declares that this worker serves HTTP. Pass it to create_plugin_handler(). */
-    final readonly class HttpHandlerConfig extends \Rapira\PluginHandlerConfig
+    /** The plugin surface this worker's pool serves. Plugins narrow every method. */
+    interface Dispatcher
     {
-        public function __construct() {}
-    }
+        public function name(): string;
 
-    /**
-     * Live worker counters. Obtain one from HttpHandler::getInfo().
-     */
-    final readonly class RuntimeInfo
-    {
-        /** One of: starting, idle, active, draining, free. */
-        public string $state;
-        public int $pid;
-        /** Depth of this worker's job intake right now, not a running total. */
-        public int $queued;
-        public int $handled;
-        public int $errors;
-        public int $recycles;
-        public int $restarts;
-    }
-
-    final class HttpHandler extends \Rapira\PluginHandler
-    {
         /**
-         * Block until a request arrives, run $handler for it, and return true.
-         * False means the server is shutting down: leave the loop.
+         * Never blocks. Null means nothing available right now.
+         *
+         * @throws Exception\ClosedException
          */
-        public function handleRequest(callable $handler): bool {}
+        public function tryReceive(): ?Work;
 
-        /** This worker's live counters, read at call time. */
-        public function getInfo(): RuntimeInfo {}
+        /**
+         * @param int $timeout Microseconds; -1 waits indefinitely, 0 does not wait at all.
+         * @throws Exception\TimeoutException
+         * @throws Exception\ClosedException
+         */
+        public function receive(int $timeout = -1): Work;
+
+        public function getInfo(): DispatcherInfo;
     }
+
+    /**
+     * The same instance for the life of the process.
+     *
+     * @throws Exception\NotInWorkerModeError Called outside worker mode.
+     */
+    function get_dispatcher(): Dispatcher {}
+
+    function get_version(): string {}
+
+    /**
+     * Queued to the host under the `app` target. Never blocks, never throws.
+     * The `exception` key of $context is special: a \Throwable, serialized structurally.
+     */
+    function log(string $message, LogLevel $level = LogLevel::Info, array $context = []): void {}
 }

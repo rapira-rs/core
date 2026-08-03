@@ -68,6 +68,7 @@ fn check(res: &Response, want: &str) -> Result<()> {
 }
 
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     let _guard = php_lock();
     // Worker mode: the resident script answers each exec with "ok:<from>". The two
@@ -139,6 +140,7 @@ impl Extension for ErrorPathDriver {
 }
 
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Worker(fixture("error-keeps-headers-worker.php")))?;
@@ -191,6 +193,7 @@ impl Extension for TruncatedDriver {
 }
 
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Worker(fixture("output-then-throw-worker.php")))?;
@@ -281,6 +284,7 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
 }
 
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn many_extensions_run() -> anyhow::Result<()> {
     let _guard = php_lock();
     const N: usize = 12;

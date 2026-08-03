@@ -1,5 +1,5 @@
+#include "rapira_classes.h"
 #include "wrapper.h"
-#include "plugin_handler.h"
 
 extern void rapira_rs_finish_response(void); // Rust: ctx.finish()
 
@@ -89,7 +89,8 @@ zend_module_entry rapira_module_entry = {
 // request cycle per job.
 static const char *RELOAD_MODULES[] = {"filter", NULL};
 
-// Run the per-request startup (startup=true) or shutdown hook of each RELOAD_MODULE.
+// Run the per-request startup (startup=true) or shutdown hook of each
+// RELOAD_MODULE.
 static void rapira_modules_request(bool startup) {
     zend_module_entry *module = NULL;
     for (const char **name = RELOAD_MODULES; *name; name++) {
@@ -98,11 +99,14 @@ static void rapira_modules_request(bool startup) {
             continue;
         }
         if (startup && module->request_startup_func) {
-            // engine contract: RINIT failure is fatal (zend_activate_modules warns and
-            // exit(1)s). Bail instead - the zend_try in rapira_request_activate contains
-            // it, failing the job and recycling the worker.
-            if (module->request_startup_func(module->type, module->module_number) == FAILURE) {
-                zend_error(E_WARNING, "request_startup() for %s module failed", module->name);
+            // engine contract: RINIT failure is fatal (zend_activate_modules
+            // warns and exit(1)s). Bail instead - the zend_try in
+            // rapira_request_activate contains it, failing the job and
+            // recycling the worker.
+            if (module->request_startup_func(
+                    module->type, module->module_number) == FAILURE) {
+                zend_error(E_WARNING, "request_startup() for %s module failed",
+                           module->name);
                 zend_bailout();
             }
         } else if (!startup && module->request_shutdown_func) {
@@ -129,12 +133,12 @@ static void rapira_observer_end_to(zend_execute_data *base) {
 }
 
 // Per-job execution budget, captured once per cycle. EG(timeout_seconds) is
-// runtime-mutable (set_time_limit()/ini_set() go through OnUpdateTimeout) and the
-// worker path never restores INI per job, so re-arming straight from it would let
-// one job's set_time_limit(0) disable the timer for every later job. The first
-// rapira_request_init of a cycle runs after the bootstrap top-level, so the capture
-// honors the bootstrap's own set_time_limit; rapira_request_shutdown resets it at
-// cycle end. -1 = not captured yet.
+// runtime-mutable (set_time_limit()/ini_set() go through OnUpdateTimeout) and
+// the worker path never restores INI per job, so re-arming straight from it
+// would let one job's set_time_limit(0) disable the timer for every later job.
+// The first rapira_request_init of a cycle runs after the bootstrap top-level,
+// so the capture honors the bootstrap's own set_time_limit;
+// rapira_request_shutdown resets it at cycle end. -1 = not captured yet.
 static zend_long rapira_job_timeout = -1;
 
 // Per-request state php_request_startup() resets that the worker path skips.
@@ -154,17 +158,17 @@ static void rapira_request_init(void) {
     CG(unclean_shutdown) = 0;
 
     // The request body is read (in Rust) as the handler runs, so the handler is
-    // the execution phase: bound it by max_execution_time (the per-cycle capture
-    // above), not max_input_time. Teardown unsets it, so time spent blocked on
-    // the job queue is never counted.
+    // the execution phase: bound it by max_execution_time (the per-cycle
+    // capture above), not max_input_time. Teardown unsets it, so time spent
+    // blocked on the job queue is never counted.
     //
     // reset_signals=0: with reset_signals, zend_set_timeout reinstalls the
     // SIGRTMIN handler + unblocks it on every call (an rt_sigaction +
-    // rt_sigprocmask syscall per job). Both are already in place for this thread:
-    // php_request_startup runs zend_set_timeout(..., 1) at cycle boot, the
-    // disposition is process-wide, and nothing re-blocks SIGRTMIN between jobs
-    // (rapira only blocks INT/TERM). Same per-request re-arm as php_execute_script
-    // (main.c:2630).
+    // rt_sigprocmask syscall per job). Both are already in place for this
+    // thread: php_request_startup runs zend_set_timeout(..., 1) at cycle boot,
+    // the disposition is process-wide, and nothing re-blocks SIGRTMIN between
+    // jobs (rapira only blocks INT/TERM). Same per-request re-arm as
+    // php_execute_script (main.c:2630).
     // https://man7.org/linux/man-pages/man7/signal.7.html
     // https://man7.org/linux/man-pages/man2/sigaction.2.html
     // https://man7.org/linux/man-pages/man2/sigprocmask.2.html
@@ -179,8 +183,9 @@ static void rapira_request_init(void) {
     }
 
     // main/main.c php_request_startup(): honor the output INIs per request.
-    // 8.6 stores the output_handler ini as zend_string* via OnUpdateStrNotEmpty,
-    // so an empty value is NULL and the [0] emptiness check is gone:
+    // 8.6 stores the output_handler ini as zend_string* via
+    // OnUpdateStrNotEmpty, so an empty value is NULL and the [0] emptiness
+    // check is gone:
     // https://github.com/php/php-src/commit/e0221be81e39860e83867fadd67115e1d2c992c1
 #if PHP_VERSION_ID >= 80600
     if (PG(output_handler)) {
@@ -283,11 +288,13 @@ static void rapira_reset_super_global(void) {
     zval *files = &PG(http_globals)[TRACK_VARS_FILES];
     zval_ptr_dtor(files);
     ZVAL_UNDEF(files);
-    // A top-level $_SESSION is an IS_INDIRECT symbol-table entry aliasing the main frame's CV slot;
-    // plain zend_hash_str_del rips the bucket out without decref'ing through the indirection,
-    // orphaning the live slot. _del_ind follows the indirection (and is a plain delete for a direct
-    // entry), matching the engine's own zend_delete_global_variable.
-    zend_hash_str_del_ind(&EG(symbol_table), "_SESSION", sizeof("_SESSION") - 1);
+    // A top-level $_SESSION is an IS_INDIRECT symbol-table entry aliasing the
+    // main frame's CV slot; plain zend_hash_str_del rips the bucket out without
+    // decref'ing through the indirection, orphaning the live slot. _del_ind
+    // follows the indirection (and is a plain delete for a direct entry),
+    // matching the engine's own zend_delete_global_variable.
+    zend_hash_str_del_ind(&EG(symbol_table), "_SESSION",
+                          sizeof("_SESSION") - 1);
 }
 // Runs per-request PHP work under a zend_bailout guard. exit()/die() in
 // PHP 8.4+ are not bailouts - they land in EG(exception) as an unwind-exit
@@ -391,8 +398,8 @@ int rapira_request_teardown(void) {
     // a bailout here abandons the observer frames of everything it longjmps
     // over. php_request_shutdown's zend_observer_fcall_end_all() only reaches
     // them while the VM stack still holds them, and the PHP worker loop pops
-    // that stack the moment HttpHandler::handleRequest returns - close them here,
-    // where they're intact
+    // that stack the moment HttpHandler::handleRequest returns - close them
+    // here, where they're intact
     zend_execute_data *observed_base = EG(current_observed_frame);
 
     RAPIRA_GUARD(php_output_end_all(), bailed, observed_base);
@@ -443,23 +450,23 @@ void rapira_clear_last_error(void) {
         zval_ptr_dtor(&EG(last_fatal_error_backtrace));
         ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
     }
-    zend_catch { 
-        ZVAL_UNDEF(&EG(last_fatal_error_backtrace)); 
-    }
+    zend_catch { ZVAL_UNDEF(&EG(last_fatal_error_backtrace)); }
     zend_end_try();
 #endif
 }
 
 // once per process, before sapi_startup
 void rapira_process_init(void) {
-    // ext_functions[] is static to plugin_handler.c and .functions needs a constant
-    // initializer, so wire it up here - before php_module_startup reads the entry.
+    // ext_functions[] is static to plugin_handler.c and .functions needs a
+    // constant initializer, so wire it up here - before php_module_startup
+    // reads the entry.
     rapira_module_entry.functions = rapira_php_functions();
 
 #if defined(SIGPIPE) && defined(SIG_IGN)
-    // Ignore SIGPIPE so writes to a hung-up client return EPIPE instead of killing
-    // the worker. signal() only fails with EINVAL, which SIGPIPE/SIG_IGN cannot hit;
-    // abort rather than run a worker any client could kill.
+    // Ignore SIGPIPE so writes to a hung-up client return EPIPE instead of
+    // killing the worker. signal() only fails with EINVAL, which
+    // SIGPIPE/SIG_IGN cannot hit; abort rather than run a worker any client
+    // could kill.
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
         perror("rapira: signal(SIGPIPE, SIG_IGN)");
         abort();

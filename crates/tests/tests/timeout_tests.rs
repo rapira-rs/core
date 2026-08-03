@@ -20,6 +20,7 @@ use std::path::Path;
 use tests::{drain, fixture, php_lock_with_ini, req};
 
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     let _guard = php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),

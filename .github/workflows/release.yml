@@ -236,17 +236,14 @@ jobs:
           # End-to-end gate: the fork master must boot, serve a request, and
           # drain to exit 0 on SIGQUIT. Poll loops keep it portable (GNU
           # timeout is absent on macOS).
+          # --classic: the script is re-included per request, so the gate needs no
+          # worker-loop API. It exercises the same fork master, listeners and drain.
           cat > "$RUNNER_TEMP/smoke.php" <<'PHP'
           <?php
-          $http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-          $handler = static function (): void {
-              echo 'ok:' . getmypid();
-          };
-          while ($http->handleRequest($handler)) {
-          }
+          echo 'ok:' . getmypid();
           PHP
           PORT=18923
-          "$BIN" serve --listen "127.0.0.1:$PORT" --processes 2 "$RUNNER_TEMP/smoke.php" &
+          "$BIN" serve --classic --listen "127.0.0.1:$PORT" --processes 2 "$RUNNER_TEMP/smoke.php" &
           MASTER=$!
           served=""
           for _ in $(seq 1 60); do

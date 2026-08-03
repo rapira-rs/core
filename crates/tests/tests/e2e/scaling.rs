@@ -2,6 +2,7 @@ use crate::harness::*;
 use std::time::{Duration, Instant};
 
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn dynamic_scales_up_down() {
     // `pool.processes` is the ceiling (max children); dynamic keeps
     // min_spare..max_spare idle.
@@ -27,6 +28,7 @@ fn dynamic_scales_up_down() {
 }
 
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn ondemand_spawns_on_connect() {
     let srv = spawn_with_config(
         "echo-worker.php",

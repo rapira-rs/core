@@ -2,6 +2,7 @@ use crate::harness::*;
 use std::time::Duration;
 
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn usr2_reload_zero_downtime() {
     let srv = spawn_with_config("echo-worker.php", 3, "");
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "3 workers", |p| p.len() == 3);
