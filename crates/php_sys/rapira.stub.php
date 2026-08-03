@@ -39,7 +39,10 @@ namespace Rapira {
         public function activeCount(): int;
     }
 
-    /** The plugin surface this worker's pool serves. Plugins narrow every method. */
+    /**
+     * The plugin surface this worker's pool serves. Plugins narrow receive(),
+     * tryReceive() and getInfo() to their own types.
+     */
     interface Dispatcher
     {
         public function name(): string;
