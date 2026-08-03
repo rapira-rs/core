@@ -160,3 +160,23 @@ fn log_context_encodes_common_php_values() {
         "non-public properties must not leak: {ctx:?}"
     );
 }
+
+/// A worked example of how much an internal class's JSON shape depends on how it
+/// was built: the createFromDateString() form carries no y/m/d at all, only the
+/// string it was parsed from, so a consumer cannot treat the two alike.
+#[test]
+fn app_logger_dateinterval_easy() {
+    let records = app_records("app-logger-dateinterval.php");
+    let (level, msg, ctx) = records.first().expect("one record");
+
+    assert_eq!(*level, Level::ERROR);
+    assert_eq!(msg, "date-interval");
+    assert_eq!(
+        ctx.as_str(),
+        concat!(
+            r#"{"fromSpec":{"y":0,"m":1,"d":2,"h":0,"i":0,"s":0,"f":0,"#,
+            r#""invert":0,"days":false,"from_string":false},"#,
+            r#""fromDateString":{"from_string":true,"date_string":"1 month 2 days"}}"#,
+        )
+    );
+}
