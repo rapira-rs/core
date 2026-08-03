@@ -72,7 +72,8 @@ namespace Rapira {
 
     /**
      * Queued to the host under the `app` target. Never blocks, never throws.
-     * The `exception` key of $context is special: a \Throwable, serialized structurally.
+     * A \Throwable under any key of $context is serialized structurally: json_encode()
+     * sees only public state, and an exception keeps all of its own in private ones.
      */
     function log(string $message, LogLevel $level = LogLevel::Info, array $context = []): void {}
 }

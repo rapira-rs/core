@@ -4,7 +4,7 @@
 //! The `#[ignore]`d tests assert Monolog's guarantees, not ours. Each one names a
 //! value that today either loses its type or vanishes outright.
 
-use tests::app_records;
+use tests::app_record;
 use tracing::Level;
 
 /// Monolog testFormat: INF, -INF and NAN normalize to the strings "INF", "-INF"
@@ -13,8 +13,7 @@ use tracing::Level;
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn special_floats_keep_their_meaning() {
-    let records = app_records("app_logger/types-scalars.php");
-    let (_, _, ctx) = records.first().expect("one record");
+    let (_, _, ctx) = app_record("app_logger/types-scalars.php");
 
     for fragment in [r#""inf":"INF""#, r#""ninf":"-INF""#, r#""nan":"NaN""#] {
         assert!(
@@ -30,8 +29,7 @@ fn special_floats_keep_their_meaning() {
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn invalid_utf8_is_substituted_not_dropped() {
-    let records = app_records("app_logger/types-scalars.php");
-    let (_, _, ctx) = records.first().expect("one record");
+    let (_, _, ctx) = app_record("app_logger/types-scalars.php");
 
     assert!(
         ctx.contains(r#""bad_utf8":"\u{fffd}1""#) || ctx.contains(r#""bad_utf8":"\\ufffd1""#),
@@ -45,8 +43,7 @@ fn invalid_utf8_is_substituted_not_dropped() {
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn objects_keep_their_class_name() {
-    let records = app_records("app_logger/types-objects.php");
-    let (_, _, ctx) = records.first().expect("one record");
+    let (_, _, ctx) = app_record("app_logger/types-objects.php");
 
     assert!(
         ctx.contains(r#""plain":{"PlainNorm":{"foo":"fooValue"}}"#),
@@ -59,8 +56,7 @@ fn objects_keep_their_class_name() {
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn stringable_objects_use_their_string_form() {
-    let records = app_records("app_logger/types-objects.php");
-    let (_, _, ctx) = records.first().expect("one record");
+    let (_, _, ctx) = app_record("app_logger/types-objects.php");
 
     assert!(
         ctx.contains(r#""stringable":"bar""#),
@@ -73,8 +69,7 @@ fn stringable_objects_use_their_string_form() {
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn resources_render_as_a_type_marker() {
-    let records = app_records("app_logger/types-objects.php");
-    let (_, _, ctx) = records.first().expect("one record");
+    let (_, _, ctx) = app_record("app_logger/types-objects.php");
 
     assert!(
         ctx.contains(r#""res":"[resource(stream)]""#),
@@ -88,10 +83,9 @@ fn resources_render_as_a_type_marker() {
 /// is exactly why it is not ignored.
 #[test]
 fn a_throwing_tostring_cannot_break_logging() {
-    let records = app_records("app_logger/types-objects.php");
-    let (level, msg, ctx) = records.first().expect("the record must survive");
+    let (level, msg, ctx) = app_record("app_logger/types-objects.php");
 
-    assert_eq!(*level, Level::ERROR);
+    assert_eq!(level, Level::ERROR);
     assert_eq!(msg, "objects");
     assert!(
         ctx.contains(r#""boom""#),

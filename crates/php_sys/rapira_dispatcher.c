@@ -47,7 +47,7 @@ static void throwable(zval *dst, zend_object *ex, int depth) {
     add_property(dst, base, ex, ZEND_STRL("file"));
     add_property(dst, base, ex, ZEND_STRL("line"));
 
-    // depth used to check if we should recursively add stack trace
+    // depth bounds the walk down the previous-exception chain
     if (depth <= 0) {
         return;
     }

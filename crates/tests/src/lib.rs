@@ -198,6 +198,19 @@ pub fn app_records(script: &str) -> Vec<AppRecord> {
         .collect()
 }
 
+/// The one `app` record `script` was expected to leave. Asserting the count
+/// rather than taking the first means a stray extra record fails the test
+/// instead of going unnoticed.
+pub fn app_record(script: &str) -> AppRecord {
+    let records = app_records(script);
+    assert_eq!(
+        records.len(),
+        1,
+        "{script} must log exactly one app record (got {records:?})"
+    );
+    records.into_iter().next().expect("checked above")
+}
+
 /// Install the capturing subscriber once (records all `tracing` output — plus
 /// anything still on the `log` facade — into `LOG_CAPTURE`).
 pub fn init_log_capture() {

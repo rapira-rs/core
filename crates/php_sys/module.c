@@ -457,7 +457,7 @@ void rapira_clear_last_error(void) {
 
 // once per process, before sapi_startup
 void rapira_process_init(void) {
-    // ext_functions[] is static to plugin_handler.c and .functions needs a
+    // ext_functions[] is static to rapira_classes.c and .functions needs a
     // constant initializer, so wire it up here - before php_module_startup
     // reads the entry.
     rapira_module_entry.functions = rapira_php_functions();

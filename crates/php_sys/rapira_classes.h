@@ -13,9 +13,9 @@ extern zend_class_entry *rapira_ce_dispatcher;
 
 // types in rapira.stub.php
 // called from PHP_MINIT_FUNCTION
-void rapira_register_classes();
+void rapira_register_classes(void);
 
 // ext_functions[] - needs const initialization
-const zend_function_entry *rapira_php_functions();
+const zend_function_entry *rapira_php_functions(void);
 
 #endif // RAPIRA_CLASSES_H

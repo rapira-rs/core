@@ -6,7 +6,7 @@
 //! executable spec for that missing pass — they assert the behaviour we want, not
 //! the behaviour we have.
 
-use tests::app_records;
+use tests::{app_record, app_records};
 use tracing::Level;
 
 /// Monolog: testIgnoresRecursiveObjectReferences, testCanNormalizeReferences.
@@ -14,10 +14,9 @@ use tracing::Level;
 /// "no warning raised" is part of the contract, not just "no crash".
 #[test]
 fn cycles_are_broken_without_a_diagnostic() {
-    let records = app_records("app_logger/limits-cycles.php");
-    let (level, _, ctx) = records.first().expect("one record");
+    let (level, _, ctx) = app_record("app_logger/limits-cycles.php");
 
-    assert_eq!(*level, Level::ERROR);
+    assert_eq!(level, Level::ERROR);
     // The back-edge becomes null; everything up to it survives.
     assert!(
         ctx.contains(r#""objects":{"bar":{"foo":null}}"#),
@@ -92,8 +91,7 @@ fn large_arrays_are_capped_and_marked() {
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn huge_strings_are_capped() {
-    let records = app_records("app_logger/limits-huge-string.php");
-    let (_, _, ctx) = records.first().expect("one record");
+    let (_, _, ctx) = app_record("app_logger/limits-huge-string.php");
 
     assert!(
         ctx.len() < 128 * 1024,
@@ -114,8 +112,7 @@ fn huge_strings_are_capped() {
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn deep_nesting_is_marked_not_silently_cut() {
-    let records = app_records("app_logger/limits-deep.php");
-    let (_, _, ctx) = records.first().expect("one record");
+    let (_, _, ctx) = app_record("app_logger/limits-deep.php");
 
     assert!(
         ctx.contains("levels deep, aborting normalization"),

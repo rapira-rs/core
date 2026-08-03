@@ -37,56 +37,60 @@ pub unsafe extern "C" fn rapira_rs_log(
     ctx: *const c_char,
     ctx_len: usize,
 ) {
-    let message = String::from_utf8_lossy(unsafe { from_raw_parts(msg.cast::<u8>(), msg_len) });
-    let context = if ctx.is_null() {
-        std::borrow::Cow::Borrowed("")
-    } else {
-        String::from_utf8_lossy(unsafe { from_raw_parts(ctx.cast::<u8>(), ctx_len) })
-    };
+    // event! dispatches into the installed subscriber, which is arbitrary code;
+    // an unwind out of an extern "C" frame aborts the process.
+    guard((), || {
+        let message = String::from_utf8_lossy(unsafe { from_raw_parts(msg.cast::<u8>(), msg_len) });
+        let context = if ctx.is_null() {
+            std::borrow::Cow::Borrowed("")
+        } else {
+            String::from_utf8_lossy(unsafe { from_raw_parts(ctx.cast::<u8>(), ctx_len) })
+        };
 
-    // to macros
-    match level {
-        0 => {
-            if context.is_empty() {
-                event!(target: "app", tracing::Level::ERROR, "{message}");
-            } else {
-                event!(target: "app", tracing::Level::ERROR, context=%context, "{message}");
+        // to macros
+        match level {
+            0 => {
+                if context.is_empty() {
+                    event!(target: "app", tracing::Level::ERROR, "{message}");
+                } else {
+                    event!(target: "app", tracing::Level::ERROR, context=%context, "{message}");
+                }
+            }
+            1 => {
+                if context.is_empty() {
+                    event!(target: "app", tracing::Level::WARN, "{message}");
+                } else {
+                    event!(target: "app", tracing::Level::WARN, context=%context, "{message}");
+                }
+            }
+            2 => {
+                if context.is_empty() {
+                    event!(target: "app", tracing::Level::INFO, "{message}");
+                } else {
+                    event!(target: "app", tracing::Level::INFO, context=%context, "{message}");
+                }
+            }
+            3 => {
+                if context.is_empty() {
+                    event!(target: "app", tracing::Level::DEBUG, "{message}");
+                } else {
+                    event!(target: "app", tracing::Level::DEBUG, context=%context, "{message}");
+                }
+            }
+            4 => {
+                if context.is_empty() {
+                    event!(target: "app", tracing::Level::TRACE, "{message}");
+                } else {
+                    event!(target: "app", tracing::Level::TRACE, context=%context, "{message}");
+                }
+            }
+            _ => {
+                if context.is_empty() {
+                    event!(target: "app", tracing::Level::INFO, "{message}");
+                } else {
+                    event!(target: "app", tracing::Level::INFO, context=%context, "{message}");
+                }
             }
         }
-        1 => {
-            if context.is_empty() {
-                event!(target: "app", tracing::Level::WARN, "{message}");
-            } else {
-                event!(target: "app", tracing::Level::WARN, context=%context, "{message}");
-            }
-        }
-        2 => {
-            if context.is_empty() {
-                event!(target: "app", tracing::Level::INFO, "{message}");
-            } else {
-                event!(target: "app", tracing::Level::INFO, context=%context, "{message}");
-            }
-        }
-        3 => {
-            if context.is_empty() {
-                event!(target: "app", tracing::Level::DEBUG, "{message}");
-            } else {
-                event!(target: "app", tracing::Level::DEBUG, context=%context, "{message}");
-            }
-        }
-        4 => {
-            if context.is_empty() {
-                event!(target: "app", tracing::Level::TRACE, "{message}");
-            } else {
-                event!(target: "app", tracing::Level::TRACE, context=%context, "{message}");
-            }
-        }
-        _ => {
-            if context.is_empty() {
-                event!(target: "app", tracing::Level::INFO, "{message}");
-            } else {
-                event!(target: "app", tracing::Level::INFO, context=%context, "{message}");
-            }
-        }
-    }
+    })
 }

@@ -1,6 +1,6 @@
 //! `\Rapira\log()`: the userland path onto the host's `app` tracing target.
 
-use tests::app_records;
+use tests::{app_record, app_records};
 use tracing::Level;
 
 /// Every LogLevel case must reach the host at the matching tracing level, and an
@@ -62,9 +62,8 @@ fn log_context_is_json_encoded() {
 /// Exception/Error, so nothing that only walks public properties can see it.
 #[test]
 fn log_context_carries_a_throwable() {
-    let records = app_records("app_logger/app-logger-exception.php");
-    let (level, _, ctx) = records.first().expect("one record");
-    assert_eq!(*level, Level::ERROR);
+    let (level, _, ctx) = app_record("app_logger/app-logger-exception.php");
+    assert_eq!(level, Level::ERROR);
 
     for fragment in [
         "LogicException",           // which class failed
@@ -94,10 +93,9 @@ fn log_context_carries_a_throwable() {
 /// down with it. The substitute value is php-src's business; presence is ours.
 #[test]
 fn log_context_tolerates_unencodable_values() {
-    let records = app_records("app_logger/app-logger-unencodable.php");
-    let (level, msg, ctx) = records.first().expect("the record must survive");
+    let (level, msg, ctx) = app_record("app_logger/app-logger-unencodable.php");
 
-    assert_eq!(*level, Level::ERROR);
+    assert_eq!(level, Level::ERROR);
     assert_eq!(msg, "hostile");
     assert!(
         ctx.contains(r#""keep":"visible""#),
@@ -115,8 +113,7 @@ fn log_context_tolerates_unencodable_values() {
 /// objects, backed enums, nulls and nested arrays.
 #[test]
 fn log_context_encodes_common_php_values() {
-    let records = app_records("app_logger/app-logger-values.php");
-    let (_, _, ctx) = records.first().expect("one record");
+    let (_, _, ctx) = app_record("app_logger/app-logger-values.php");
 
     for fragment in [
         // Only public state crosses the boundary.
@@ -143,10 +140,9 @@ fn log_context_encodes_common_php_values() {
 /// string it was parsed from, so a consumer cannot treat the two alike.
 #[test]
 fn app_logger_dateinterval_easy() {
-    let records = app_records("app_logger/app-logger-dateinterval.php");
-    let (level, msg, ctx) = records.first().expect("one record");
+    let (level, msg, ctx) = app_record("app_logger/app-logger-dateinterval.php");
 
-    assert_eq!(*level, Level::ERROR);
+    assert_eq!(level, Level::ERROR);
     assert_eq!(msg, "date-interval");
     assert_eq!(
         ctx.as_str(),
