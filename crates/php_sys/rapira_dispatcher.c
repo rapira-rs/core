@@ -3,6 +3,7 @@
 #include "ext/json/php_json.h"
 #include "zend_operators.h"
 #include "zend_portability.h"
+#include "zend_ptr_stack.h"
 #include "zend_smart_str.h"
 
 #include "zend_API.h"
@@ -131,6 +132,7 @@ ZEND_FUNCTION(Rapira_log) {
 
         php_json_encode(&json, &tmp, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR);
         smart_str_0(&json);
+        zval_ptr_dtor(&tmp);
     }
 
     rapira_rs_log(ZSTR_VAL(message), ZSTR_LEN(message), lvl,
