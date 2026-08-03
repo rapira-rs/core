@@ -1,6 +1,7 @@
 #include "rapira_classes.h"
 
 #include "ext/json/php_json.h"
+#include "zend.h"
 #include "zend_operators.h"
 #include "zend_portability.h"
 #include "zend_ptr_stack.h"
@@ -71,7 +72,9 @@ ZEND_FUNCTION(Rapira_get_version) {
 
 ZEND_FUNCTION(Rapira_get_dispatcher) {
     ZEND_PARSE_PARAMETERS_NONE();
-    zend_throw_error(NULL, "no dispatcher");
+    zend_throw_error(
+        rapira_ce_not_in_worker_mode_error,
+        "nothing dispatches work to this process outside worker mode");
     RETURN_THROWS();
 }
 

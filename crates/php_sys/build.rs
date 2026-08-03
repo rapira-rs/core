@@ -88,6 +88,8 @@ fn main() -> anyhow::Result<()> {
         "rapira_classes.h",
         "rapira_dispatcher.c",
         "rapira.stub.php",
+        "rapira_exception_arginfo.h",
+        "rapira_exception.stub.php",
     ] {
         println!("cargo:rerun-if-changed={f}");
     }
