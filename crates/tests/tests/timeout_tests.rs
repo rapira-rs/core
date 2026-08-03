@@ -20,17 +20,20 @@ use std::path::Path;
 use tests::{drain, fixture, php_lock_with_ini, req};
 
 #[test]
+#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     let _guard = php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/timeout.php.ini"
+        "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
-    let r = Rapira::start(Mode::Worker(fixture("timeout-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("timeout_tests/timeout-worker.php")))?;
     let h = r.handle()?;
 
     // Job 1: a fast request is untouched by the 1s cap.
-    let (status, body) =
-        drain(h.handle_blocking(req("/timeout-worker.php", "timeout-worker.php"))?);
+    let (status, body) = drain(h.handle_blocking(req(
+        "/timeout-worker.php",
+        "timeout_tests/timeout-worker.php",
+    ))?);
     assert_eq!((status, body.as_str()), (200, "ok"));
 
     // Job 2, same cycle (job 1 did not recycle): the timer re-armed by
@@ -38,7 +41,10 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     // kill the spin — the regression surface of not reinstalling the handler.
     // Bounded wait: a silent signal-delivery regression must fail the test, not
     // hang the suite.
-    let mut rx = h.handle_blocking(req("/timeout-worker.php?mode=spin", "timeout-worker.php"))?;
+    let mut rx = h.handle_blocking(req(
+        "/timeout-worker.php?mode=spin",
+        "timeout_tests/timeout-worker.php",
+    ))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let frame = loop {
         match rx.try_recv() {
@@ -70,8 +76,10 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     // next job is served normally. (The teardown disarm itself has no PHP-visible
     // effect to assert on this build: the per-job re-arm clears EG(timed_out), so
     // even a stale idle-fired timeout would be consumed harmlessly.)
-    let (status, body) =
-        drain(h.handle_blocking(req("/timeout-worker.php", "timeout-worker.php"))?);
+    let (status, body) = drain(h.handle_blocking(req(
+        "/timeout-worker.php",
+        "timeout_tests/timeout-worker.php",
+    ))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "ok"),

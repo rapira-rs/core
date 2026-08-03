@@ -45,7 +45,8 @@ fn main() -> anyhow::Result<()> {
     c.flag_if_supported("-Wno-unused-parameter");
     c.file("wrapper.c")
         .file("module.c")
-        .file("plugin_handler.c");
+        .file("rapira_classes.c")
+        .file("rapira_dispatcher.c");
     for d in &php.includes {
         c.include(d);
     }
@@ -81,10 +82,12 @@ fn main() -> anyhow::Result<()> {
         "wrapper.h",
         "module.c",
         "wrapper.c",
-        "plugin_handler.c",
-        "plugin_handler.h",
         "rapira_arginfo.h",
         "allowed_bindings.rs",
+        "rapira_classes.c",
+        "rapira_classes.h",
+        "rapira_dispatcher.c",
+        "rapira.stub.php",
     ] {
         println!("cargo:rerun-if-changed={f}");
     }

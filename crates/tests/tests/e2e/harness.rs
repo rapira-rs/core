@@ -136,15 +136,21 @@ fn spawn_with_extras(
     rust_log: Option<&str>,
 ) -> Server {
     let dir = scratch_dir();
-    std::fs::copy(fixture_path(fixture), dir.join(fixture))
+    // `fixture` is grouped by owning test module (e.g. "lifecycle/echo-worker.php"),
+    // but the scratch dir is flat: copy to the bare name and point the config at that.
+    let name = Path::new(fixture)
+        .file_name()
+        .unwrap_or_else(|| panic!("fixture {fixture} has no file name"));
+    std::fs::copy(fixture_path(fixture), dir.join(name))
         .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
+    let entrypoint = name.to_str().expect("fixture name is utf-8");
     let mut last_log = String::new();
     for _ in 0..3 {
         let port = free_port();
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         std::fs::write(
             dir.join("rapira.toml"),
-            render_config(port, processes, fixture, http_extra, extra_toml),
+            render_config(port, processes, entrypoint, http_extra, extra_toml),
         )
         .expect("write config");
         let log = File::create(dir.join("server.log")).expect("create server.log");

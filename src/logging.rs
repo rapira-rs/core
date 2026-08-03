@@ -30,18 +30,10 @@ pub fn init(log: &LogSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Color only on a tty — a redirected log file must not fill with ANSI
-/// sequences — and only with NO_COLOR unset or empty: any non-empty value
-/// disables color, an empty one counts as unset. https://no-color.org/
 fn ansi_enabled(stderr_is_tty: bool, no_color: Option<&std::ffi::OsStr>) -> bool {
     stderr_is_tty && no_color.is_none_or(|v| v.is_empty())
 }
 
-/// A non-blank `RUST_LOG` replaces the config filter wholesale, parsed lossily
-/// (a bad directive is dropped, as in env_logger). The config spec parses
-/// strictly: a directive the validator accepted must never be silently
-/// ignored, and parse_lossy reports drops with a raw eprintln! that the json
-/// format never shapes.
 fn build_filter(rust_log: Option<&str>, log: &LogSettings) -> anyhow::Result<EnvFilter> {
     match rust_log {
         Some(s) if !s.trim().is_empty() => Ok(EnvFilter::new(s)),

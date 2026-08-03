@@ -22,7 +22,9 @@ stubs:
 	@test -x "$(PHP_BIN)" || { echo "php not found at $(PHP_BIN); set PHP_BIN=/path/to/php"; exit 1; }
 	@mkdir -p target/stubgen
 	@cp "$(GEN_STUB)" target/stubgen/gen_stub.php
-	@$(PHP_BIN) target/stubgen/gen_stub.php crates/php_sys/rapira.stub.php
+	@for stub in crates/php_sys/*.stub.php; do \
+		$(PHP_BIN) target/stubgen/gen_stub.php "$$stub" || exit 1; \
+	done
 
 # Sequential recipe (not prerequisites) so `make -j` cannot run the suites
 # concurrently; the e2e servers must not overlap the in-process PHP tests.

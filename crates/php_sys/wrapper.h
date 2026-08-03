@@ -8,6 +8,8 @@
 #include <Zend/zend_compile.h>
 #include <Zend/zend_globals.h>
 #include <Zend/zend_exceptions.h>
+#include <Zend/zend_enum.h>
+#include <Zend/zend_interfaces.h>
 #include <main/php.h>
 #include <ext/standard/basic_functions.h>
 #include <main/SAPI.h>
@@ -19,6 +21,7 @@
 #include <ext/session/php_session.h>
 #endif
 #include <Zend/zend_observer.h>
+#include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
 #include <main/php_memory_streams.h>
 #include <main/php_streams.h>
