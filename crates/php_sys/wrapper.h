@@ -26,6 +26,7 @@
 #include <main/php_memory_streams.h>
 #include <main/php_streams.h>
 
+extern bool rapira_worker_mode;
 sapi_globals_struct *rapira_sg(void);
 zend_executor_globals *rapira_eg(void);
 php_core_globals *rapira_pg(void);

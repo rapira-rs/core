@@ -17,12 +17,6 @@ thread_local! {
     static JOB_RX: RefCell<Option<Receiver<Job>>> = const { RefCell::new(None) };
 }
 
-/// Proof that sapi_startup + php_module_startup (MINIT) succeeded in THIS
-/// process. Drop runs the module teardown, so exactly one place holds it:
-/// - fused path: inside `Rapira` (single-process semantics);
-/// - fork mode: the master, for its whole life (opcache SHM mmap'd at MINIT is
-///   shared by every fork). Forked workers NEVER drop it — they leave via
-///   process exit, which skips Drop; the master owns the single engine teardown.
 pub struct PhpModule {}
 
 impl Drop for PhpModule {
@@ -67,9 +61,7 @@ impl Rapira {
         Ok(PhpModule {})
     }
 
-    /// Worker-side (post-fork) start: job channel + the single PHP worker
-    /// thread, against the engine inherited from `boot_master` in the parent.
-    /// No module startup here; the returned value never tears the module down.
+    // worker side part
     pub fn start_worker(mode: Mode, hooks: WorkerHooks) -> anyhow::Result<Self> {
         let WorkerHooks {
             max_requests,
@@ -88,6 +80,12 @@ impl Rapira {
 
         let (intake, intake_rx) = mpsc::channel::<Job>(1024);
 
+        // SAFETY: written before the PHP thread spawns (the spawn is the
+        // happens-before edge) and rewritten by every start, so a test binary
+        // alternating modes self-corrects; concurrent Rapira instances in one
+        // process are unsupported anyway (single PhpModule).
+        unsafe { crate::rapira_worker_mode = matches!(mode, Mode::Worker(_)) };
+
         trace!(target: "rapira", "spawning worker thread");
         let worker: JoinHandle<()> = thread::spawn(move || {
             sb_set(slot);
@@ -103,8 +101,6 @@ impl Rapira {
         })
     }
 
-    /// Fused single-process boot — module + worker in one. The in-process
-    /// integration tests run through here.
     pub fn start(mode: Mode) -> anyhow::Result<Self> {
         info!(target: "rapira", "booting with mode: {mode:?}");
         let module = Self::boot_master()?;
@@ -180,19 +176,10 @@ fn worker_main(mode: Mode, rx: Receiver<Job>) {
         if matches!(exit, WorkerExit::Closed) {
             break;
         }
-        // Restart: loop back on this same OS thread — JOB_RX stays installed and
-        // the worker re-bootstraps with a fresh request cycle.
     }
 }
 
-/// Block for the next job (shutdown-aware): `None` means the intake channel
-/// closed — every `Sender`/`RapiraHandle` was dropped, i.e. Rapira is shutting
-/// down. The single place the receiver is consumed; the classic loop,
-/// worker-mode `next_job`, and the boot-failure drain all go through here.
-/// Also the scoreboard idle/active hinge: parked here = spare capacity.
 pub(crate) fn pull_job() -> Option<Job> {
-    // Holding the RefCell borrow across the blocking recv is safe: the thread is
-    // parked inside it and pull_job is never re-entered on this thread.
     JOB_RX.with_borrow_mut(|rx| {
         let rx = rx.as_mut()?;
         sb_update(Event::Idle);
