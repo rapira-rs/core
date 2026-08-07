@@ -1,32 +1,32 @@
-#include  "rapira_classes.h"
-#include  "zend_API.h"
-#include  "zend_operators.h"
+#include "rapira_classes.h"
+#include "zend_API.h"
+#include "zend_operators.h"
 #include "zend_property_hooks.h"
 #include "zend_types.h"
 
-
-static void set_str_or_null(zend_class_entry *scope, zend_object *obj, const char *name, size_t len, zend_string *val) {
-	if (val != NULL) {
-		zend_update_property_str(scope, obj, name, len, val);
-	} else {
-		zend_update_property_null(scope, obj, name, len);
-	}
+static void set_str_or_null(zend_class_entry *scope, zend_object *obj,
+                            const char *name, size_t len, zend_string *val) {
+    if (val != NULL) {
+        zend_update_property_str(scope, obj, name, len, val);
+    } else {
+        zend_update_property_null(scope, obj, name, len);
+    }
 }
 
 static bool address_arg(zval *arg, uint32_t num) {
     if (Z_TYPE_P(arg) == IS_OBJECT &&
-        (instanceof_function(Z_OBJCE_P(arg), rapira_ce_http_inet_address) ||
-         instanceof_function(Z_OBJCE_P(arg), rapira_ce_http_unix_address))) {
+        (instanceof_function(Z_OBJCE_P(arg), rapira_ce_inet_address) ||
+         instanceof_function(Z_OBJCE_P(arg), rapira_ce_unix_address))) {
         return true;
     }
     zend_argument_type_error(
         num,
-        "must be of type Rapira\\Http\\InetAddress|Rapira\\Http\\UnixAddress, %s given",
+        "must be of type Rapira\\InetAddress|Rapira\\UnixAddress, %s given",
         zend_zval_value_name(arg));
     return false;
 }
 
-ZEND_METHOD(Rapira_Http_InetAddress, __construct) {
+ZEND_METHOD(Rapira_InetAddress, __construct) {
     zend_string *ip;
     zend_long port;
     ZEND_PARSE_PARAMETERS_START(2, 2)
@@ -34,22 +34,22 @@ ZEND_METHOD(Rapira_Http_InetAddress, __construct) {
     Z_PARAM_LONG(port)
     ZEND_PARSE_PARAMETERS_END();
 
-    zend_update_property_str(rapira_ce_http_inet_address, Z_OBJ_P(ZEND_THIS),
+    zend_update_property_str(rapira_ce_inet_address, Z_OBJ_P(ZEND_THIS),
                              ZEND_STRL("ip"), ip);
     if (EG(exception)) {
         RETURN_THROWS();
     }
-    zend_update_property_long(rapira_ce_http_inet_address, Z_OBJ_P(ZEND_THIS),
+    zend_update_property_long(rapira_ce_inet_address, Z_OBJ_P(ZEND_THIS),
                               ZEND_STRL("port"), port);
 }
 
-ZEND_METHOD(Rapira_Http_UnixAddress, __construct) {
+ZEND_METHOD(Rapira_UnixAddress, __construct) {
     zend_string *path;
     ZEND_PARSE_PARAMETERS_START(1, 1)
     Z_PARAM_STR_OR_NULL(path)
     ZEND_PARSE_PARAMETERS_END();
 
-    set_str_or_null(rapira_ce_http_unix_address, Z_OBJ_P(ZEND_THIS),
+    set_str_or_null(rapira_ce_unix_address, Z_OBJ_P(ZEND_THIS),
                     ZEND_STRL("path"), path);
 }
 
@@ -72,7 +72,8 @@ ZEND_METHOD(Rapira_Http_Tls, __construct) {
     if (EG(exception)) {
         RETURN_THROWS();
     }
-    zend_update_property_str(rapira_ce_http_tls, self, ZEND_STRL("cipher"), cipher);
+    zend_update_property_str(rapira_ce_http_tls, self, ZEND_STRL("cipher"),
+                             cipher);
     if (EG(exception)) {
         RETURN_THROWS();
     }
@@ -90,7 +91,8 @@ ZEND_METHOD(Rapira_Http_Tls, __construct) {
     if (EG(exception)) {
         RETURN_THROWS();
     }
-    set_str_or_null(rapira_ce_http_tls, self, ZEND_STRL("certOrganization"), org);
+    set_str_or_null(rapira_ce_http_tls, self, ZEND_STRL("certOrganization"),
+                    org);
     if (EG(exception)) {
         RETURN_THROWS();
     }

@@ -4,33 +4,6 @@
 
 namespace Rapira\Http {
     /**
-     * An IP endpoint. The other arm of the address union is UnixAddress.
-     *
-     * @strict-properties
-     * @not-serializable
-     */
-    final readonly class InetAddress
-    {
-        public string $ip;
-        public int $port;
-
-        public function __construct(string $ip, int $port) {}
-    }
-
-    /**
-     * A unix domain socket endpoint. $path is null for an unnamed peer.
-     *
-     * @strict-properties
-     * @not-serializable
-     */
-    final readonly class UnixAddress
-    {
-        public ?string $path;
-
-        public function __construct(?string $path) {}
-    }
-
-    /**
      * What the handshake settled. The cert fields describe the client's certificate and
      * are null unless one was presented.
      *
@@ -134,8 +107,8 @@ namespace Rapira\Http {
         /** @var array<string, list<string>> */
         public array $headers;
         public string|Multipart $body;
-        public InetAddress|UnixAddress $remote;
-        public InetAddress|UnixAddress $server;
+        public \Rapira\InetAddress|\Rapira\UnixAddress $remote;
+        public \Rapira\InetAddress|\Rapira\UnixAddress $server;
         public ?Tls $tls;
         public float $receivedAt;
 
@@ -147,8 +120,8 @@ namespace Rapira\Http {
             string $protocol,
             array $headers,
             string|Multipart $body,
-            InetAddress|UnixAddress $remote,
-            InetAddress|UnixAddress $server,
+            \Rapira\InetAddress|\Rapira\UnixAddress $remote,
+            \Rapira\InetAddress|\Rapira\UnixAddress $server,
             ?Tls $tls,
             float $receivedAt,
         ) {}

@@ -65,6 +65,33 @@ namespace Rapira {
     }
 
     /**
+     * An IP endpoint. The other arm of the address union is UnixAddress.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class InetAddress
+    {
+        public string $ip;
+        public int $port;
+
+        public function __construct(string $ip, int $port) {}
+    }
+
+    /**
+     * A unix domain socket endpoint. $path is null for an unnamed peer.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class UnixAddress
+    {
+        public ?string $path;
+
+        public function __construct(?string $path) {}
+    }
+
+    /**
      * The same instance for the life of the process.
      *
      * @throws Exception\NotInWorkerModeError Called outside worker mode.

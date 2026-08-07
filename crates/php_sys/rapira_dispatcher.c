@@ -18,7 +18,9 @@ extern const char *rapira_rs_version(size_t *len);
 extern void rapira_rs_log(const char *msg, size_t msg_len, int level,
                           const char *ctx, size_t ctx_len);
 
-bool rapira_worker_mode = false;
+// rapira mode
+int rapira_mode = RAPIRA_MODE_CLASSIC;
+
 enum {
     RAPIRA_LOG_ERROR = 0,
     RAPIRA_LOG_WARN,
@@ -85,7 +87,7 @@ ZEND_FUNCTION(Rapira_get_version) {
 
 ZEND_FUNCTION(Rapira_get_dispatcher) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (!rapira_worker_mode) {
+    if (rapira_mode != RAPIRA_MODE_WORKER_REQUEST) {
         zend_throw_error(
             rapira_ce_not_in_worker_mode_error,
             "nothing dispatches work to this process outside worker mode");
@@ -93,7 +95,8 @@ ZEND_FUNCTION(Rapira_get_dispatcher) {
     }
 
     if (Z_ISUNDEF(rapira_dispatcher_instance)) {
-    object_init_ex(&rapira_dispatcher_instance, rapira_ce_internal_http_dispatcher);
+        object_init_ex(&rapira_dispatcher_instance,
+                       rapira_ce_internal_http_dispatcher);
     }
 
     RETURN_COPY(&rapira_dispatcher_instance);
@@ -172,7 +175,8 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Dispatcher, __construct) {
-    zend_throw_error(NULL, "host-created; obtain it from \\Rapira\\get_dispatcher()");
+    zend_throw_error(NULL,
+                     "host-created; obtain it from \\Rapira\\get_dispatcher()");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct) {

@@ -26,7 +26,6 @@
 #include <main/php_memory_streams.h>
 #include <main/php_streams.h>
 
-extern bool rapira_worker_mode;
 sapi_globals_struct *rapira_sg(void);
 zend_executor_globals *rapira_eg(void);
 php_core_globals *rapira_pg(void);
@@ -36,4 +35,31 @@ void rapira_release_temporary_streams(void);
 int rapira_request_activate(void);
 int rapira_request_shutdown(void);
 size_t rapira_ub_write(const char *str, size_t len);
+
+// RunMode in start.rs - keep in sync
+enum {
+    RAPIRA_MODE_CLASSIC = 0,
+    RAPIRA_MODE_WORKER_SUPERGLOBALS = 1,
+    RAPIRA_MODE_WORKER_REQUEST = 2,
+    RAPIRA_MODE_WORKER_REQUEST_ASYNC = 3,
+};
+extern int rapira_mode;
+
+enum {
+    RAPIRA_RECV_OK = 0,
+    RAPIRA_RECV_TIMEOUT = 1,
+    RAPIRA_RECV_EMPTY = 2,
+    RAPIRA_RECV_CLOSED = 3,
+};
+
+enum {
+    RAPIRA_VERB_OK = 0,
+    RAPIRA_VERB_FINALIZED = 1,
+    RAPIRA_VERB_DISCARDED = 2,
+    RAPIRA_VERB_HEAD_WRITTEN = 3,
+    RAPIRA_VERB_INTERIM = 4,
+    RAPIRA_VERB_INVALID = 5,
+    RAPIRA_VERB_OVERFLOW = 6,
+};
+
 #endif

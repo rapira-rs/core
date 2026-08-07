@@ -1,12 +1,12 @@
 <?php
 
 use Rapira\Http\FormField;
-use Rapira\Http\InetAddress;
 use Rapira\Http\Multipart;
 use Rapira\Http\Request;
 use Rapira\Http\Tls;
-use Rapira\Http\UnixAddress;
 use Rapira\Http\UploadedFile;
+use Rapira\InetAddress;
+use Rapira\UnixAddress;
 
 $remote = new InetAddress('203.0.113.7', 44123);
 $server = new UnixAddress(null);

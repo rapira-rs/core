@@ -1,14 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: eb586fcf93f42822f5fbd5561946367eab392e1e */
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_InetAddress___construct, 0, 0, 2)
-	ZEND_ARG_TYPE_INFO(0, ip, IS_STRING, 0)
-	ZEND_ARG_TYPE_INFO(0, port, IS_LONG, 0)
-ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_UnixAddress___construct, 0, 0, 1)
-	ZEND_ARG_TYPE_INFO(0, path, IS_STRING, 1)
-ZEND_END_ARG_INFO()
+ * Stub hash: 8370adb65344d4ebdb3244943303cc8db3e6c6d2 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Tls___construct, 0, 0, 7)
 	ZEND_ARG_TYPE_INFO(0, version, IS_STRING, 0)
@@ -48,8 +39,8 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Request___construct, 0, 0, 11)
 	ZEND_ARG_TYPE_INFO(0, protocol, IS_STRING, 0)
 	ZEND_ARG_TYPE_INFO(0, headers, IS_ARRAY, 0)
 	ZEND_ARG_OBJ_TYPE_MASK(0, body, Rapira\\Http\\Multipart, MAY_BE_STRING, NULL)
-	ZEND_ARG_OBJ_TYPE_MASK(0, remote, Rapira\\Http\\InetAddress|Rapira\\Http\\\125nixAddress, 0, NULL)
-	ZEND_ARG_OBJ_TYPE_MASK(0, server, Rapira\\Http\\InetAddress|Rapira\\Http\\\125nixAddress, 0, NULL)
+	ZEND_ARG_OBJ_TYPE_MASK(0, remote, Rapira\\InetAddress|Rapira\\\125nixAddress, 0, NULL)
+	ZEND_ARG_OBJ_TYPE_MASK(0, server, Rapira\\InetAddress|Rapira\\\125nixAddress, 0, NULL)
 	ZEND_ARG_OBJ_INFO(0, tls, Rapira\\Http\\Tls, 1)
 	ZEND_ARG_TYPE_INFO(0, receivedAt, IS_DOUBLE, 0)
 ZEND_END_ARG_INFO()
@@ -129,8 +120,6 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_Rapira_Internal_Http_Exchange_flush arginfo_class_Rapira_Http_Exchange_flush
 
-ZEND_METHOD(Rapira_Http_InetAddress, __construct);
-ZEND_METHOD(Rapira_Http_UnixAddress, __construct);
 ZEND_METHOD(Rapira_Http_Tls, __construct);
 ZEND_METHOD(Rapira_Http_FormField, __construct);
 ZEND_METHOD(Rapira_Http_UploadedFile, __construct);
@@ -153,16 +142,6 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, flush);
-
-static const zend_function_entry class_Rapira_Http_InetAddress_methods[] = {
-	ZEND_ME(Rapira_Http_InetAddress, __construct, arginfo_class_Rapira_Http_InetAddress___construct, ZEND_ACC_PUBLIC)
-	ZEND_FE_END
-};
-
-static const zend_function_entry class_Rapira_Http_UnixAddress_methods[] = {
-	ZEND_ME(Rapira_Http_UnixAddress, __construct, arginfo_class_Rapira_Http_UnixAddress___construct, ZEND_ACC_PUBLIC)
-	ZEND_FE_END
-};
 
 static const zend_function_entry class_Rapira_Http_Tls_methods[] = {
 	ZEND_ME(Rapira_Http_Tls, __construct, arginfo_class_Rapira_Http_Tls___construct, ZEND_ACC_PUBLIC)
@@ -234,40 +213,6 @@ static const zend_function_entry class_Rapira_Internal_Http_Exchange_methods[] =
 	ZEND_ME(Rapira_Internal_Http_Exchange, flush, arginfo_class_Rapira_Internal_Http_Exchange_flush, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
-
-static zend_class_entry *register_class_Rapira_Http_InetAddress(void)
-{
-	zend_class_entry ce, *class_entry;
-
-	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Http", "InetAddress", class_Rapira_Http_InetAddress_methods);
-	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE|ZEND_ACC_READONLY_CLASS);
-
-	zval property_ip_default_value;
-	ZVAL_UNDEF(&property_ip_default_value);
-	zend_string *property_ip_name = zend_string_init("ip", sizeof("ip") - 1, 1);
-	zend_declare_typed_property(class_entry, property_ip_name, &property_ip_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING));
-	zend_string_release(property_ip_name);
-
-	zval property_port_default_value;
-	ZVAL_UNDEF(&property_port_default_value);
-	zend_declare_typed_property(class_entry, ZSTR_KNOWN(ZEND_STR_PORT), &property_port_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
-
-	return class_entry;
-}
-
-static zend_class_entry *register_class_Rapira_Http_UnixAddress(void)
-{
-	zend_class_entry ce, *class_entry;
-
-	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Http", "UnixAddress", class_Rapira_Http_UnixAddress_methods);
-	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE|ZEND_ACC_READONLY_CLASS);
-
-	zval property_path_default_value;
-	ZVAL_UNDEF(&property_path_default_value);
-	zend_declare_typed_property(class_entry, ZSTR_KNOWN(ZEND_STR_PATH), &property_path_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
-
-	return class_entry;
-}
 
 static zend_class_entry *register_class_Rapira_Http_Tls(void)
 {
@@ -464,12 +409,12 @@ static zend_class_entry *register_class_Rapira_Http_Request(void)
 	zval property_remote_default_value;
 	ZVAL_UNDEF(&property_remote_default_value);
 	zend_string *property_remote_name = zend_string_init("remote", sizeof("remote") - 1, 1);
-	zend_string *property_remote_class_Rapira_Http_InetAddress = zend_string_init("Rapira\\Http\\InetAddress", sizeof("Rapira\\Http\\InetAddress") - 1, 1);
-	zend_string *property_remote_class_Rapira_Http_UnixAddress = zend_string_init("Rapira\\Http\\\125nixAddress", sizeof("Rapira\\Http\\\125nixAddress") - 1, 1);
+	zend_string *property_remote_class_Rapira_InetAddress = zend_string_init("Rapira\\InetAddress", sizeof("Rapira\\InetAddress") - 1, 1);
+	zend_string *property_remote_class_Rapira_UnixAddress = zend_string_init("Rapira\\\125nixAddress", sizeof("Rapira\\\125nixAddress") - 1, 1);
 	zend_type_list *property_remote_type_list = malloc(ZEND_TYPE_LIST_SIZE(2));
 	property_remote_type_list->num_types = 2;
-	property_remote_type_list->types[0] = (zend_type) ZEND_TYPE_INIT_CLASS(property_remote_class_Rapira_Http_InetAddress, 0, 0);
-	property_remote_type_list->types[1] = (zend_type) ZEND_TYPE_INIT_CLASS(property_remote_class_Rapira_Http_UnixAddress, 0, 0);
+	property_remote_type_list->types[0] = (zend_type) ZEND_TYPE_INIT_CLASS(property_remote_class_Rapira_InetAddress, 0, 0);
+	property_remote_type_list->types[1] = (zend_type) ZEND_TYPE_INIT_CLASS(property_remote_class_Rapira_UnixAddress, 0, 0);
 	zend_type property_remote_type = ZEND_TYPE_INIT_UNION(property_remote_type_list, 0);
 	zend_declare_typed_property(class_entry, property_remote_name, &property_remote_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, property_remote_type);
 	zend_string_release(property_remote_name);
@@ -477,12 +422,12 @@ static zend_class_entry *register_class_Rapira_Http_Request(void)
 	zval property_server_default_value;
 	ZVAL_UNDEF(&property_server_default_value);
 	zend_string *property_server_name = zend_string_init("server", sizeof("server") - 1, 1);
-	zend_string *property_server_class_Rapira_Http_InetAddress = zend_string_init("Rapira\\Http\\InetAddress", sizeof("Rapira\\Http\\InetAddress") - 1, 1);
-	zend_string *property_server_class_Rapira_Http_UnixAddress = zend_string_init("Rapira\\Http\\\125nixAddress", sizeof("Rapira\\Http\\\125nixAddress") - 1, 1);
+	zend_string *property_server_class_Rapira_InetAddress = zend_string_init("Rapira\\InetAddress", sizeof("Rapira\\InetAddress") - 1, 1);
+	zend_string *property_server_class_Rapira_UnixAddress = zend_string_init("Rapira\\\125nixAddress", sizeof("Rapira\\\125nixAddress") - 1, 1);
 	zend_type_list *property_server_type_list = malloc(ZEND_TYPE_LIST_SIZE(2));
 	property_server_type_list->num_types = 2;
-	property_server_type_list->types[0] = (zend_type) ZEND_TYPE_INIT_CLASS(property_server_class_Rapira_Http_InetAddress, 0, 0);
-	property_server_type_list->types[1] = (zend_type) ZEND_TYPE_INIT_CLASS(property_server_class_Rapira_Http_UnixAddress, 0, 0);
+	property_server_type_list->types[0] = (zend_type) ZEND_TYPE_INIT_CLASS(property_server_class_Rapira_InetAddress, 0, 0);
+	property_server_type_list->types[1] = (zend_type) ZEND_TYPE_INIT_CLASS(property_server_class_Rapira_UnixAddress, 0, 0);
 	zend_type property_server_type = ZEND_TYPE_INIT_UNION(property_server_type_list, 0);
 	zend_declare_typed_property(class_entry, property_server_name, &property_server_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, property_server_type);
 	zend_string_release(property_server_name);
