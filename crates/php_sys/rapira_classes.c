@@ -125,19 +125,20 @@ void rapira_register_classes(void) {
         register_class_Rapira_Exception_AlreadyFinalizedError(zend_ce_error,
                                                               throwable);
 
-    rapira_ce_http_form_field = register_class_Rapira_Http_FormField();
-    rapira_ce_http_uploaded_file = register_class_Rapira_Http_UploadedFile();
-    rapira_ce_http_multipart = register_class_Rapira_Http_Multipart();
-    rapira_ce_http_request = register_class_Rapira_Http_Request();
+    // log
+    rapira_ce_log_level = register_class_Rapira_LogLevel();
+    rapira_ce_work = register_class_Rapira_Work();
+    rapira_ce_dispatcher_info = register_class_Rapira_DispatcherInfo();
+    rapira_ce_dispatcher = register_class_Rapira_Dispatcher();
 
     // http stuff
     rapira_ce_inet_address = register_class_Rapira_InetAddress();
     rapira_ce_unix_address = register_class_Rapira_UnixAddress();
     rapira_ce_http_tls = register_class_Rapira_Http_Tls();
-    register_class_Rapira_Http_FormField();
-    register_class_Rapira_Http_UploadedFile();
+    rapira_ce_http_form_field = register_class_Rapira_Http_FormField();
+    rapira_ce_http_uploaded_file = register_class_Rapira_Http_UploadedFile();
     rapira_ce_http_multipart = register_class_Rapira_Http_Multipart();
-    register_class_Rapira_Http_Request();
+    rapira_ce_http_request = register_class_Rapira_Http_Request();
 
     zend_class_entry *http_info = register_class_Rapira_Http_HttpDispatcherInfo(
         rapira_ce_dispatcher_info);
