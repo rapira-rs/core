@@ -3,6 +3,11 @@
 #include "wrapper.h"
 #include "zend_types.h"
 
+// injected by build.rs
+#ifndef RAPIRA_VERSION
+#define RAPIRA_VERSION "0.0.0-dev"
+#endif
+
 extern void rapira_rs_finish_response(void); // Rust: ctx.finish()
 
 // ub_write's client-abort raise (php_handle_aborted_connection,
@@ -72,8 +77,8 @@ PHP_MINIT_FUNCTION(rapira) {
 }
 
 PHP_RSHUTDOWN_FUNCTION(rapira) {
-	rapira_dispatcher_release();
-	return SUCCESS;
+    rapira_dispatcher_release();
+    return SUCCESS;
 }
 
 zend_module_entry rapira_module_entry = {
@@ -85,7 +90,7 @@ zend_module_entry rapira_module_entry = {
     NULL,
     PHP_RSHUTDOWN(rapira),
     NULL, // MSHUTDOWN, RINIT, RSHUTDOWN, MINFO
-    "0.1.0",
+    RAPIRA_VERSION,
     STANDARD_MODULE_PROPERTIES};
 
 // ext/filter caches raw input copies in its module globals; only its RSHUTDOWN

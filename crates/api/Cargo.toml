@@ -1,7 +1,7 @@
 [package]
 name = "extension_api"
-version = "0.2.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 publish = false
 license = "MIT"
 description = "Native rapira extension contract - the API every extension implements to drive PHP"

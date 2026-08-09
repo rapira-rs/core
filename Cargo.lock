@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "extension_api"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "php_sys"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_config"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_master"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_runtime"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "extension_api",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_scoreboard"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "libc",

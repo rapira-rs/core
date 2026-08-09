@@ -1,7 +1,7 @@
 [package]
 name = "rapira_core"
-version = "0.6.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "PHP application server: embeds NTS PHP via the embed SAPI and serves HTTP directly"
 homepage = "https://rapira.rs"
 documentation = "https://rapira.rs/docs/"
@@ -27,6 +27,11 @@ members = [
     "crates/scoreboard",
     "crates/plugins/*",
 ]
+
+[workspace.package]
+edition = "2024"
+version = "0.6.0"
+
 
 [workspace.dependencies]
 anyhow = "1"

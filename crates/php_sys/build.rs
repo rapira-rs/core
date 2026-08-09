@@ -38,11 +38,13 @@ fn main() -> anyhow::Result<()> {
         println!("cargo:rustc-cfg=php84");
     }
 
+    let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     let mut c = cc::Build::new();
     // Zend fixes the parameter list of every entry point it declares through a
     // macro (INTERNAL_FUNCTION_PARAMETERS' `return_value`, PHP_MINIT_FUNCTION's
     // INIT_FUNC_ARGS `type`/`module_number`), so an unused one is never actionable here.
     c.flag_if_supported("-Wno-unused-parameter");
+    c.define("RAPIRA_VERSION", format!("\"{version}\"").as_str());
     c.file("wrapper.c")
         .file("module.c")
         .file("rapira_classes.c")
