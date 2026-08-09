@@ -50,8 +50,14 @@ void rapira_dispatcher_release(void);
 // ext_functions[] - needs const initialization
 const zend_function_entry *rapira_php_functions(void);
 
+// https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
+// +---------------------+  <- true allocation start
+// | void *job           |     invisible to PHP
+// +---------------------+  <- +RAPIRA_STD_OFFSET(rapira_exchange_obj)
+// | zend_object std     |  <- THE pointer everyone else holds
+// +---------------------+
 typedef struct {
-    void *job; // Box<ExchangeState> -> owned by Rustttt, NULLing when released
+    void *job; // Box<ExchangeState> -> owned by Rust, NULLing when released
     zend_object std;
 } rapira_exchange_obj;
 

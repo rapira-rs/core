@@ -60,12 +60,15 @@ static zend_object_handlers rapira_host_handlers;
 // -> to inform the engine about special object layout
 static zend_always_inline rapira_exchange_obj *
 rapira_exchange_from(zend_object *obj) {
+    // here we need to apply that offset logic to return an zend_object, but not
+    // our own struct see: the comment on the rapira_classes.h struct definition
     return (rapira_exchange_obj *)((char *)obj -
                                    RAPIRA_STD_OFFSET(rapira_exchange_obj));
 }
 
 static zend_always_inline rapira_dispatcher_info_obj *
 rapira_dispatcher_info_from(zend_object *obj) {
+    // same as above, but for the dispatcher info object
     return (rapira_dispatcher_info_obj *)((char *)obj -
                                           RAPIRA_STD_OFFSET(
                                               rapira_dispatcher_info_obj));
@@ -185,6 +188,7 @@ void rapira_register_classes(void) {
            sizeof(rapira_exchange_handlers));
     rapira_exchange_handlers.clone_obj = NULL;
     rapira_exchange_handlers.offset = RAPIRA_STD_OFFSET(rapira_exchange_obj);
+    // we need our own free function to handle the job pointer free
     rapira_exchange_handlers.free_obj = rapira_exchange_free;
     rapira_ce_internal_http_exchange->create_object = rapira_exchange_create;
     rapira_ce_internal_http_exchange->default_object_handlers =
