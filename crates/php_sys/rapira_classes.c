@@ -39,15 +39,30 @@ static zend_object_handlers rapira_host_handlers;
 // -> to inform the engine about special object layout
 static zend_always_inline rapira_exchange_obj *
 rapira_exchange_from(zend_object *obj) {
+    // https://github.com/php/php-src/pull/21899
+    // https://github.com/php/php-src/blob/7114314c5a96c362b95663f7e7c9184586721f58/UPGRADING.INTERNALS#L99-L100
+    // probably offsetof can be used on both, pre 8.6 and post 8.6
+    // but just to be safe, use XtOffsetOf on pre 8.6
+#if PHP_VERSION_ID >= 80600
+    return (rapira_exchange_obj *)((char *)obj -
+                                   offsetof(rapira_exchange_obj, std));
+#else
     return (rapira_exchange_obj *)((char *)obj -
                                    XtOffsetOf(rapira_exchange_obj, std));
+#endif
 }
 
 static zend_always_inline rapira_dispatcher_info_obj *
 rapira_dispatcher_info_from(zend_object *obj) {
+#if PHP_VERSION_ID >= 80600
+    return (rapira_dispatcher_info_obj *)((char *)obj -
+                                          offsetof(rapira_dispatcher_info_obj,
+                                                   std));
+#else
     return (rapira_dispatcher_info_obj *)((char *)obj -
                                           XtOffsetOf(rapira_dispatcher_info_obj,
                                                      std));
+#endif
 }
 
 // don't know if it is a good idea to have that big method.
