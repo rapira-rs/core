@@ -6,6 +6,8 @@
 #include "zend_API.h"
 #include "zend_exceptions.h"
 #include "zend_object_handlers.h"
+#include "zend_objects.h"
+#include "zend_objects_API.h"
 #include "zend_portability.h"
 #include "zend_property_hooks.h"
 #include "zend_types.h"
@@ -29,6 +31,25 @@ zend_class_entry *rapira_ce_unix_address;
 zend_class_entry *rapira_ce_http_tls;
 zend_class_entry *rapira_ce_http_multipart;
 zend_class_entry *rapira_ce_internal_http_dispatcher;
+zend_class_entry *rapira_ce_http_form_field;
+zend_class_entry *rapira_ce_http_uploaded_file;
+zend_class_entry *rapira_ce_http_request;
+zend_class_entry *rapira_ce_internal_http_exchange;
+zend_class_entry *rapira_ce_internal_http_dispatcher_info;
+zend_class_entry *rapira_ce_http_head_already_written_error;
+zend_class_entry *rapira_ce_http_head_not_written_error;
+zend_class_entry *rapira_ce_http_content_length_exceeded_error;
+zend_class_entry *rapira_ce_http_file_not_sendable_exception;
+
+// https://github.com/php/php-src/pull/21899
+// https://github.com/php/php-src/blob/7114314c5a96c362b95663f7e7c9184586721f58/UPGRADING.INTERNALS#L99-L100
+// probably offsetof can be used on both, pre 8.6 and post 8.6
+// but just to be safe, use XtOffsetOf on pre 8.6
+#if PHP_VERSION_ID >= 80600
+#define RAPIRA_STD_OFFSET(type) offsetof(type, std)
+#else
+#define RAPIRA_STD_OFFSET(type) XtOffsetOf(type, std)
+#endif
 
 // return ext_functions from rapira_arginfo.h
 const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
@@ -39,30 +60,47 @@ static zend_object_handlers rapira_host_handlers;
 // -> to inform the engine about special object layout
 static zend_always_inline rapira_exchange_obj *
 rapira_exchange_from(zend_object *obj) {
-    // https://github.com/php/php-src/pull/21899
-    // https://github.com/php/php-src/blob/7114314c5a96c362b95663f7e7c9184586721f58/UPGRADING.INTERNALS#L99-L100
-    // probably offsetof can be used on both, pre 8.6 and post 8.6
-    // but just to be safe, use XtOffsetOf on pre 8.6
-#if PHP_VERSION_ID >= 80600
     return (rapira_exchange_obj *)((char *)obj -
-                                   offsetof(rapira_exchange_obj, std));
-#else
-    return (rapira_exchange_obj *)((char *)obj -
-                                   XtOffsetOf(rapira_exchange_obj, std));
-#endif
+                                   RAPIRA_STD_OFFSET(rapira_exchange_obj));
 }
 
 static zend_always_inline rapira_dispatcher_info_obj *
 rapira_dispatcher_info_from(zend_object *obj) {
-#if PHP_VERSION_ID >= 80600
     return (rapira_dispatcher_info_obj *)((char *)obj -
-                                          offsetof(rapira_dispatcher_info_obj,
-                                                   std));
-#else
-    return (rapira_dispatcher_info_obj *)((char *)obj -
-                                          XtOffsetOf(rapira_dispatcher_info_obj,
-                                                     std));
-#endif
+                                          RAPIRA_STD_OFFSET(
+                                              rapira_dispatcher_info_obj));
+}
+
+static zend_object_handlers rapira_exchange_handlers;
+static zend_object_handlers rapira_info_handlers;
+
+static zend_object *rapira_exchange_create(zend_class_entry *ce) {
+    rapira_exchange_obj *obj = zend_object_alloc(sizeof(*obj), ce);
+    obj->job = NULL;
+    zend_object_std_init(&obj->std, ce);
+    object_properties_init(&obj->std, ce);
+    return &obj->std;
+}
+
+// the job here is a rust owned box
+// a php release should pass it to rust, safe rust :)
+static void rapira_exchange_free(zend_object *std) {
+    rapira_exchange_obj *obj = rapira_exchange_from(std);
+    if (obj->job != NULL) {
+        rapira_rs_exchange_drop(obj->job);
+        obj->job = NULL;
+    }
+
+    zend_object_std_dtor(std);
+}
+
+static zend_object *rapira_dispatcher_info_create(zend_class_entry *ce) {
+    rapira_dispatcher_info_obj *obj = zend_object_alloc(sizeof(*obj), ce);
+    obj->pending = 0;
+    obj->active = 0;
+    zend_object_std_init(&obj->std, ce);
+    object_properties_init(&obj->std, ce);
+    return &obj->std;
 }
 
 // don't know if it is a good idea to have that big method.
@@ -87,10 +125,10 @@ void rapira_register_classes(void) {
         register_class_Rapira_Exception_AlreadyFinalizedError(zend_ce_error,
                                                               throwable);
 
-    rapira_ce_log_level = register_class_Rapira_LogLevel();
-    rapira_ce_work = register_class_Rapira_Work();
-    rapira_ce_dispatcher_info = register_class_Rapira_DispatcherInfo();
-    rapira_ce_dispatcher = register_class_Rapira_Dispatcher();
+    rapira_ce_http_form_field = register_class_Rapira_Http_FormField();
+    rapira_ce_http_uploaded_file = register_class_Rapira_Http_UploadedFile();
+    rapira_ce_http_multipart = register_class_Rapira_Http_Multipart();
+    rapira_ce_http_request = register_class_Rapira_Http_Request();
 
     // http stuff
     rapira_ce_inet_address = register_class_Rapira_InetAddress();
@@ -109,20 +147,24 @@ void rapira_register_classes(void) {
         register_class_Rapira_Http_HttpDispatcher(rapira_ce_dispatcher);
 
     // exceptions
-    register_class_Rapira_Http_Exception_ContentLengthExceededError(
-        zend_ce_error, throwable);
-    register_class_Rapira_Http_Exception_HeadAlreadyWrittenError(zend_ce_error,
+    rapira_ce_http_content_length_exceeded_error =
+        register_class_Rapira_Http_Exception_ContentLengthExceededError(
+            zend_ce_error, throwable);
+    rapira_ce_http_head_already_written_error =
+        register_class_Rapira_Http_Exception_HeadAlreadyWrittenError(
+            zend_ce_error, throwable);
+    rapira_ce_http_head_not_written_error =
+        register_class_Rapira_Http_Exception_HeadNotWrittenError(zend_ce_error,
                                                                  throwable);
-    register_class_Rapira_Http_Exception_HeadNotWrittenError(zend_ce_error,
-                                                             throwable);
-    register_class_Rapira_Http_Exception_FileNotSendableException(
-        spl_ce_RuntimeException, throwable);
+    rapira_ce_http_file_not_sendable_exception =
+        register_class_Rapira_Http_Exception_FileNotSendableException(
+            spl_ce_RuntimeException, throwable);
 
     rapira_ce_internal_http_dispatcher =
         register_class_Rapira_Internal_Http_Dispatcher(http_dispatcher);
-    zend_class_entry *internal_info =
+    rapira_ce_internal_http_dispatcher_info =
         register_class_Rapira_Internal_Http_DispatcherInfo(http_info);
-    zend_class_entry *internal_exchange =
+    rapira_ce_internal_http_exchange =
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
 
     // preventing cloning of internal objects
@@ -137,6 +179,22 @@ void rapira_register_classes(void) {
     rapira_host_handlers.clone_obj = NULL;
     rapira_ce_internal_http_dispatcher->default_object_handlers =
         &rapira_host_handlers;
-    internal_info->default_object_handlers = &rapira_host_handlers;
-    internal_exchange->default_object_handlers = &rapira_host_handlers;
+
+    memcpy(&rapira_exchange_handlers, &std_object_handlers,
+           sizeof(rapira_exchange_handlers));
+    rapira_exchange_handlers.clone_obj = NULL;
+    rapira_exchange_handlers.offset = RAPIRA_STD_OFFSET(rapira_exchange_obj);
+    rapira_exchange_handlers.free_obj = rapira_exchange_free;
+    rapira_ce_internal_http_exchange->create_object = rapira_exchange_create;
+    rapira_ce_internal_http_exchange->default_object_handlers =
+        &rapira_exchange_handlers;
+
+    memcpy(&rapira_info_handlers, &std_object_handlers,
+           sizeof(rapira_info_handlers));
+    rapira_info_handlers.clone_obj = NULL;
+    rapira_info_handlers.offset = RAPIRA_STD_OFFSET(rapira_dispatcher_info_obj);
+    rapira_ce_internal_http_dispatcher_info->create_object =
+        rapira_dispatcher_info_create;
+    rapira_ce_internal_http_dispatcher_info->default_object_handlers =
+        &rapira_info_handlers;
 }

@@ -6,6 +6,9 @@
 #include "zend_long.h"
 #include "zend_property_hooks.h"
 
+// rust glue
+extern void rapira_rs_exchange_drop(void *job);
+
 // rapira.stub.php
 // log
 extern zend_class_entry *rapira_ce_log_level;
@@ -34,13 +37,15 @@ extern zend_class_entry *rapira_ce_http_head_already_written_error;
 extern zend_class_entry *rapira_ce_http_head_not_written_error;
 extern zend_class_entry *rapira_ce_http_content_length_exceeded_error;
 extern zend_class_entry *rapira_ce_http_file_not_sendable_exception;
+extern zend_class_entry *rapira_ce_http_form_field;
+extern zend_class_entry *rapira_ce_http_uploaded_file;
+extern zend_class_entry *rapira_ce_http_request;
 
 // types in rapira.stub.php
 // called from PHP_MINIT_FUNCTION
 void rapira_register_classes(void);
 // aka drop
 void rapira_dispatcher_release(void);
-void rapira_receive_budget_reset(void);
 
 // ext_functions[] - needs const initialization
 const zend_function_entry *rapira_php_functions(void);

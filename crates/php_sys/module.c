@@ -89,7 +89,7 @@ zend_module_entry rapira_module_entry = {
     NULL,
     NULL,
     PHP_RSHUTDOWN(rapira),
-    NULL, // MSHUTDOWN, RINIT, RSHUTDOWN, MINFO
+    NULL,
     RAPIRA_VERSION,
     STANDARD_MODULE_PROPERTIES};
 
