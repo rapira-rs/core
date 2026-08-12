@@ -54,6 +54,7 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
         content_type: None,
         content_length: 0,
         body: Box::new(std::io::empty()),
+        received_at: 0.0,
     }
 }
 

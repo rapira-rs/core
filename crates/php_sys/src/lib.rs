@@ -6,6 +6,7 @@ pub mod classic_worker;
 pub mod context;
 pub mod diagnostics;
 pub mod dispatcher;
+pub mod exchange;
 pub mod executor;
 pub mod handler;
 pub mod module;
@@ -43,6 +44,11 @@ unsafe extern "C" {
     pub fn rapira_release_temporary_streams();
     pub fn rapira_request_activate() -> c_int;
     pub fn rapira_request_shutdown() -> c_int;
+    // Receive-loop wall-timer discipline (module.c): disarm while parked in
+    // receive(), re-arm the captured per-cycle budget on unit handout. Plain
+    // zend timer calls - no bailout path, safe to call from Rust.
+    pub fn rapira_receive_untimed();
+    pub fn rapira_receive_timed();
     // C shim (module.c) over rapira_rs_ub_write; raises the client-abort bailout from
     // C so the longjmp doesn't cross the Rust catch_unwind frame.
     // https://man7.org/linux/man-pages/man3/setjmp.3.html

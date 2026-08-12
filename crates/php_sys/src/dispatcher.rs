@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CStr, c_char, c_int, c_void},
+    ffi::{CStr, c_char, c_int},
     ptr::null_mut,
     slice::from_raw_parts,
 };
@@ -93,11 +93,4 @@ pub unsafe extern "C" fn rapira_rs_log(
             }
         }
     })
-}
-
-/// # Safety
-/// Generally safe. job must be null atm.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
-    debug_assert!(job.is_null());
 }

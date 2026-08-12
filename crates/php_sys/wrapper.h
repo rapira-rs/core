@@ -39,9 +39,9 @@ size_t rapira_ub_write(const char *str, size_t len);
 // RunMode in start.rs - keep in sync
 enum {
     RAPIRA_MODE_CLASSIC = 0,
-    RAPIRA_MODE_WORKER_SUPERGLOBALS = 1,
-    RAPIRA_MODE_WORKER_REQUEST = 2,
-    RAPIRA_MODE_WORKER_REQUEST_ASYNC = 3,
+    RAPIRA_MODE_WORKER = 1,
+    RAPIRA_MODE_DISPATCHER = 2,
+    RAPIRA_MODE_DISPATCHER_ASYNC = 3,
 };
 extern int rapira_mode;
 
@@ -50,6 +50,7 @@ enum {
     RAPIRA_RECV_TIMEOUT = 1,
     RAPIRA_RECV_EMPTY = 2,
     RAPIRA_RECV_CLOSED = 3,
+    RAPIRA_RECV_BUSY = 4,
 };
 
 enum {
@@ -61,5 +62,31 @@ enum {
     RAPIRA_VERB_INVALID = 5,
     RAPIRA_VERB_OVERFLOW = 6,
 };
+
+// Non-owning (ptr,len) view; the bytes belong to whichever side filled it and
+// stay valid only for the current call unless documented otherwise. Keep in
+// sync with RapiraStr / RapiraRequestView in exchange.rs (#[repr(C)]).
+typedef struct {
+    const char *ptr;
+    size_t len;
+} rapira_str;
+
+typedef struct {
+    rapira_str method;
+    rapira_str uri;
+    rapira_str target;
+    rapira_str authority; // ptr NULL: request named none
+    rapira_str protocol;
+    rapira_str body;
+    rapira_str remote_ip;
+    rapira_str server_ip;
+    int32_t remote_port; // 0: not an IP endpoint
+    int32_t server_port;
+    double received_at;
+    size_t header_count;
+} rapira_request_view;
+
+void rapira_receive_untimed(void);
+void rapira_receive_timed(void);
 
 #endif

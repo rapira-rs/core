@@ -1,7 +1,10 @@
 use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
 use std::thread;
 use std::thread::JoinHandle;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 use tracing::{error, info, trace};
 use types::Job;
 
@@ -11,7 +14,17 @@ use crate::scoreboard::{Event, ScoreboardSnapshot, sb_set, sb_update};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 thread_local! {
-    static JOB_RX: RefCell<Option<Receiver<Job>>> = const { RefCell::new(None) };
+    static JOB_RX: RefCell<Option<JobRx>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct Intake {
+    pub(crate) tx: SyncSender<Job>,
+    pub(crate) pending: Arc<AtomicUsize>,
+}
+
+struct JobRx {
+    rx: Receiver<Job>,
+    pending: Arc<AtomicUsize>,
 }
 
 pub struct PhpModule {}
@@ -26,7 +39,7 @@ impl Drop for PhpModule {
 }
 
 pub struct Rapira {
-    pub(crate) intake: Option<Sender<Job>>,
+    pub(crate) intake: Option<Intake>,
     worker: Option<JoinHandle<()>>,
     board: Option<rapira_scoreboard::Scoreboard>,
     module: Option<PhpModule>,
@@ -70,14 +83,18 @@ impl Rapira {
             }
         };
         slot.bind(std::process::id());
-
-        let (intake, intake_rx) = mpsc::channel::<Job>(1024);
+        let pending = Arc::new(AtomicUsize::new(0));
+        let (intake_tx, intake_rx) = sync_channel::<Job>(1024);
+        let intake = Intake {
+            tx: intake_tx,
+            pending: pending.clone(),
+        };
 
         // SAFETY: safe, trust me, I'm a developer
         unsafe {
             crate::rapira_mode = match &mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,
-                Mode::WorkerRequest(_) => RAPIRA_MODE_WORKER_REQUEST,
+                Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
             } as c_int;
         };
 
@@ -85,7 +102,13 @@ impl Rapira {
         let worker: JoinHandle<()> = thread::spawn(move || {
             sb_set(slot);
             quota::install(max_requests, on_quota, on_unhealthy);
-            worker_main(mode, intake_rx)
+            worker_main(
+                mode,
+                JobRx {
+                    rx: intake_rx,
+                    pending,
+                },
+            )
         });
 
         Ok(Self {
@@ -146,7 +169,7 @@ impl Drop for Rapira {
     }
 }
 
-fn worker_main(mode: Mode, rx: Receiver<Job>) {
+fn worker_main(mode: Mode, rx: JobRx) {
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
     loop {
         unsafe {
@@ -160,7 +183,7 @@ fn worker_main(mode: Mode, rx: Receiver<Job>) {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::WorkerRequest(script) => rapira_worker(script.clone()),
+            Mode::Dispatcher(script) => rapira_worker(script.clone()),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;
@@ -169,13 +192,73 @@ fn worker_main(mode: Mode, rx: Receiver<Job>) {
 }
 
 pub(crate) fn pull_job() -> Option<Job> {
-    JOB_RX.with_borrow_mut(|rx| {
-        let rx = rx.as_mut()?;
+    JOB_RX.with_borrow_mut(|slot| {
+        let job_r = slot.as_mut()?;
         sb_update(Event::Idle);
-        let job = rx.blocking_recv();
+        let job = job_r.rx.recv().ok();
         if job.is_some() {
+            job_r.pending.fetch_sub(1, Ordering::Relaxed);
             sb_update(Event::Active);
         }
         job
+    })
+}
+
+pub(crate) enum Pulled {
+    // Boxed: a Job is ~600 bytes and the other variants are empty
+    Job(Box<Job>),
+    Timeout,
+    Empty,
+    Closed,
+}
+
+/// receive(-1) / receive(n): block up to `timeout` (None = forever).
+pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
+    JOB_RX.with_borrow_mut(|slot| {
+        let Some(job_r) = slot.as_mut() else {
+            return Pulled::Closed;
+        };
+        sb_update(Event::Idle);
+        let got = match timeout {
+            None => job_r.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(t) => job_r.rx.recv_timeout(t),
+        };
+        match got {
+            Ok(job) => {
+                job_r.pending.fetch_sub(1, Ordering::Relaxed);
+                sb_update(Event::Active);
+                Pulled::Job(Box::new(job))
+            }
+            Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
+            Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
+        }
+    })
+}
+
+/// tryReceive() / receive(0): never blocks. Idle is reported here too — a
+/// polling worker must refresh last_activity_ms or the master watchdog
+/// TERMs it as a stuck request (master/src/events.rs:509-517).
+pub(crate) fn pull_job_try() -> Pulled {
+    JOB_RX.with_borrow_mut(|slot| {
+        let Some(job_r) = slot.as_mut() else {
+            return Pulled::Closed;
+        };
+        sb_update(Event::Idle);
+        match job_r.rx.try_recv() {
+            Ok(job) => {
+                job_r.pending.fetch_sub(1, Ordering::Relaxed);
+                sb_update(Event::Active);
+                Pulled::Job(Box::new(job))
+            }
+            Err(TryRecvError::Empty) => Pulled::Empty,
+            Err(TryRecvError::Disconnected) => Pulled::Closed,
+        }
+    })
+}
+
+pub(crate) fn pending_depth() -> usize {
+    JOB_RX.with_borrow(|slot| {
+        slot.as_ref()
+            .map_or(0, |job_r| job_r.pending.load(Ordering::Relaxed))
     })
 }

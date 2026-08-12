@@ -153,6 +153,33 @@ static void rapira_observer_end_to(zend_execute_data *base) {
 // rapira_request_shutdown resets it at cycle end. -1 = not captured yet.
 static zend_long rapira_job_timeout = -1;
 
+// The wall timer must not run while the worker parks in receive(): time spent
+// blocked on the job queue is not execution time. Capture the per-unit budget
+// before the first disarm — zend_unset_timeout is a no-op when
+// EG(timeout_seconds) is 0 (Zend/zend_execute_API.c zend_unset_timeout), so
+// disarm before zeroing. Called from Rust (exchange.rs) after the single-flight
+// check, so a BUSY receive() never strips the outstanding unit's budget.
+void rapira_receive_untimed(void) {
+    if (rapira_job_timeout < 0) {
+        rapira_job_timeout = EG(timeout_seconds);
+    }
+    zend_unset_timeout();
+    EG(timeout_seconds) = 0;
+}
+
+// Re-arm the captured budget when a unit is handed to PHP; zend_set_timeout
+// re-assigns EG(timeout_seconds) itself (Zend/zend_execute_API.c). The lazy
+// capture covers a worker whose first verb is tryReceive(): without it the
+// sentinel would arm zend_set_timeout(0) = unlimited and a later receive()
+// would latch the budget at 0 for the whole cycle. reset_signals=0 for the
+// same reason as rapira_request_init.
+void rapira_receive_timed(void) {
+    if (rapira_job_timeout < 0) {
+        rapira_job_timeout = EG(timeout_seconds);
+    }
+    zend_set_timeout(rapira_job_timeout, 0);
+}
+
 // Per-request state php_request_startup() resets that the worker path skips.
 static void rapira_request_init(void) {
     PG(connection_status) = PHP_CONNECTION_NORMAL;
@@ -521,6 +548,15 @@ void rapira_release_temporary_streams(void) {
 // bailout the retry skips it and finishes the remaining teardown steps.
 int rapira_request_shutdown(void) {
     volatile int bailed = OK;
+    // A cycle can end parked/untimed with EG(timeout_seconds) zeroed by
+    // rapira_receive_untimed. Nothing else restores the field — the INI layer
+    // only rewrites it through OnUpdateTimeout — and the next cycle's
+    // php_request_startup arms zend_set_timeout(EG(timeout_seconds), 1)
+    // (main/main.c:1912), so a stale 0 would disable max_execution_time for
+    // every later cycle. Put the captured budget back before resetting it.
+    if (rapira_job_timeout >= 0) {
+        EG(timeout_seconds) = rapira_job_timeout;
+    }
     rapira_job_timeout = -1; // cycle over: next cycle re-captures its budget
 #ifdef HAVE_PHP_SESSION
     // a bailout inside a user save handler skips the cleanup that clears

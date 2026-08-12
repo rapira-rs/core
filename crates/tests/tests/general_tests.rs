@@ -30,9 +30,7 @@ fn post(fixture_name: &str, body: Box<dyn Read + Send>, len: i64) -> Request {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn post_body_survives_partial_reads() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
-        "general_tests/input-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Dispatcher(fixture("general_tests/input-worker.php")))?;
     let h = r.handle()?;
 
     let payload = b"hello rapira post".to_vec(); // 17 bytes
@@ -63,9 +61,7 @@ fn post_body_survives_partial_reads() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
-        "general_tests/abort-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Dispatcher(fixture("general_tests/abort-worker.php")))?;
     let h = r.handle()?;
 
     // Drop the receiver before the fixture's first write (it sleeps to hand us
@@ -95,7 +91,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "general_tests/resources-worker.php",
     )))?;
     let h = r.handle()?;
@@ -131,7 +127,7 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn https_server_vars() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture("shared/server-variables.php")))?;
+    let r = Rapira::start(Mode::Dispatcher(fixture("shared/server-variables.php")))?;
     let h = r.handle()?;
     let mut request = req("/", "shared/server-variables.php");
     request.https = true;
@@ -158,7 +154,7 @@ fn https_server_vars() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "general_tests/exception-handler-worker.php",
     )))?;
     let h = r.handle()?;
@@ -191,7 +187,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "general_tests/throw-quiet-worker.php",
     )))?;
     let h = r.handle()?;
@@ -221,7 +217,7 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "shared/session-bailout-worker.php",
     )))?;
     let h = r.handle()?;
@@ -250,7 +246,7 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "general_tests/fatal-exception-handler-worker.php",
     )))?;
     let h = r.handle()?;
@@ -272,7 +268,7 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "general_tests/stuck-flag-worker.php",
     )))?;
     let h = r.handle()?;
@@ -295,7 +291,7 @@ fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "general_tests/fatal-backtrace-worker.php",
     )))?;
     let h = r.handle()?;
@@ -337,7 +333,7 @@ fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "shared/shutdown-fatal-worker.php",
     )))?;
     let h = r.handle()?;
@@ -358,7 +354,7 @@ fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "general_tests/abort-ignore-worker.php",
     )))?;
     let h = r.handle()?;

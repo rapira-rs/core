@@ -65,11 +65,17 @@ fn set_worker_recycle() {
 }
 
 fn run_cycle(script: &Path) -> Cycle {
+    crate::exchange::cycle_reset();
     let started = unsafe { php_request_startup() } == SUCCESS;
     if !started {
         error!(target: "rapira", "php_request_startup() failed");
     }
-    let completed = started && unsafe { run_script(script) };
+    if started {
+        // The completion flag is useless for the exit decision:
+        // php_execute_script reports false for return, exit(), and an uncaught
+        // throw alike — the closed/served signals below discriminate instead.
+        unsafe { run_script(script) };
+    }
 
     let recycle = WORKER.with_borrow_mut(|w| {
         w.as_mut().is_some_and(|wc| {
@@ -89,11 +95,24 @@ fn run_cycle(script: &Path) -> Cycle {
         return Cycle::Restart;
     }
 
-    if completed && !recycle {
+    // Serving anything proves PHP is functional: clear a stale unhealthy flag
+    // (nothing else emits Healthy on the dispatcher path).
+    if crate::exchange::served_any() {
+        sb_update(scoreboard::Event::Healthy);
+    }
+
+    if crate::exchange::closed_seen() {
+        // the dispatcher reported closure and the script wound down: clean stop
         Cycle::Stop
-    } else if recycle {
+    } else if recycle || crate::exchange::served_any() {
+        // a bailout mid-serving, or the script ended (return / exit() / an
+        // uncaught throw — php_execute_script reports false for all of those)
+        // after real work: rerun the script
         Cycle::Recycle
     } else {
+        // never served a unit and never saw closure: boot failure — the shed +
+        // unhealthy-after-5 machinery applies (a script that exits without ever
+        // receiving lands here by design)
         Cycle::Failed
     }
 }
@@ -132,6 +151,9 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
             }
         }
     };
+    // A WorkerExit can leave a live ExchangeState behind (e.g. a Restart with a
+    // unit still out); reclaim it so its Frame sender never leaks.
+    crate::exchange::reclaim_current();
     log_and_clear_last_error();
     exit
 }

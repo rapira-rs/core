@@ -19,6 +19,91 @@ use php_sys::{Mode, Rapira};
 use std::path::Path;
 use tests::{drain, fixture, php_lock_with_ini, req};
 
+/// The receive() timer discipline: the wall timer is disarmed while the worker
+/// parks in receive() and re-armed with the captured budget per unit, so time
+/// spent waiting for work never counts against max_execution_time. With the
+/// discipline broken, the 1s budget fires mid-park, the cycle fatals, and the
+/// parked job is 503-shed instead of served.
+#[test]
+fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
+    let _guard = php_lock_with_ini(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/ini/timeout_tests/timeout.php.ini"
+    )));
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
+    let h = r.handle()?;
+
+    // Park the worker well past the 1s budget, twice: the first wait proves
+    // the boot-time capture disarmed the timer, the second that the per-unit
+    // re-arm was disarmed again by the next receive().
+    for target in ["/first", "/second"] {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let (status, body) =
+            drain(h.handle_blocking(req(target, "dispatcher/echo-loop-worker.php"))?);
+        assert_eq!(
+            (status, body.as_str()),
+            (200, "method=GET body="),
+            "a worker parked past the budget must still serve {target}"
+        );
+    }
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+/// The other half of the discipline: the budget re-armed at unit handout must
+/// still fire. A unit that spins forever is killed by max_execution_time, the
+/// unit fails upstream (its frame dies unsent), and the recycled worker keeps
+/// serving.
+#[test]
+fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
+    let _guard = php_lock_with_ini(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/ini/timeout_tests/timeout.php.ini"
+    )));
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
+    let h = r.handle()?;
+
+    // Serve one unit first so the timer fatal lands as Recycle (served > 0),
+    // not as a boot failure that sheds the next request.
+    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    assert_eq!((status, body.as_str()), (200, "state=false"));
+
+    // Bounded wait: a silent re-arm regression must fail the test, not hang
+    // the suite.
+    let mut rx = h.handle_blocking(req("/?probe=spin", "dispatcher/verbs-worker.php"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match rx.try_recv() {
+            Ok(frame) => panic!(
+                "a spinning unit must not seal a frame (got status {:?})",
+                frame.head.map(|h| h.status)
+            ),
+            // the unit died unsealed: the timer fired and the cycle recycled
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "spinning unit was never killed — the per-unit budget did not re-arm"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+
+    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "state=false"),
+        "the worker must recover after the timeout"
+    );
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
 #[test]
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
@@ -26,7 +111,7 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "timeout_tests/timeout-worker.php",
     )))?;
     let h = r.handle()?;

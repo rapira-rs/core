@@ -9,7 +9,7 @@ use tokio::sync::mpsc::Sender;
 #[derive(Debug, Clone)]
 pub enum Mode {
     Classic,
-    WorkerRequest(PathBuf),
+    Dispatcher(PathBuf),
 }
 
 #[repr(C)]
@@ -61,6 +61,7 @@ pub struct Request {
     pub content_type: Option<Vec<u8>>,
     pub content_length: i64, // -1 if unknown
     pub body: Box<dyn Read + Send>,
+    pub received_at: f64, // unix seconds, stamped at intake; 0.0 = unset
 }
 
 pub struct ResponseHead {
@@ -237,6 +238,7 @@ mod tests {
                 content_type: None,
                 content_length: -1,
                 body: Box::new(std::io::empty()),
+                received_at: 0.0,
             },
             c: ReqC {
                 method: CString::default(),

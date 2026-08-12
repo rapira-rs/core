@@ -41,38 +41,10 @@ zend_class_entry *rapira_ce_http_head_not_written_error;
 zend_class_entry *rapira_ce_http_content_length_exceeded_error;
 zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 
-// https://github.com/php/php-src/pull/21899
-// https://github.com/php/php-src/blob/7114314c5a96c362b95663f7e7c9184586721f58/UPGRADING.INTERNALS#L99-L100
-// probably offsetof can be used on both, pre 8.6 and post 8.6
-// but just to be safe, use XtOffsetOf on pre 8.6
-#if PHP_VERSION_ID >= 80600
-#define RAPIRA_STD_OFFSET(type) offsetof(type, std)
-#else
-#define RAPIRA_STD_OFFSET(type) XtOffsetOf(type, std)
-#endif
-
 // return ext_functions from rapira_arginfo.h
 const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
 // we need to protect a copy
 static zend_object_handlers rapira_host_handlers;
-
-// https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
-// -> to inform the engine about special object layout
-static zend_always_inline rapira_exchange_obj *
-rapira_exchange_from(zend_object *obj) {
-    // here we need to apply that offset logic to return an zend_object, but not
-    // our own struct see: the comment on the rapira_classes.h struct definition
-    return (rapira_exchange_obj *)((char *)obj -
-                                   RAPIRA_STD_OFFSET(rapira_exchange_obj));
-}
-
-static zend_always_inline rapira_dispatcher_info_obj *
-rapira_dispatcher_info_from(zend_object *obj) {
-    // same as above, but for the dispatcher info object
-    return (rapira_dispatcher_info_obj *)((char *)obj -
-                                          RAPIRA_STD_OFFSET(
-                                              rapira_dispatcher_info_obj));
-}
 
 static zend_object_handlers rapira_exchange_handlers;
 static zend_object_handlers rapira_info_handlers;
@@ -80,6 +52,7 @@ static zend_object_handlers rapira_info_handlers;
 static zend_object *rapira_exchange_create(zend_class_entry *ce) {
     rapira_exchange_obj *obj = zend_object_alloc(sizeof(*obj), ce);
     obj->job = NULL;
+    ZVAL_UNDEF(&obj->request);
     zend_object_std_init(&obj->std, ce);
     object_properties_init(&obj->std, ce);
     return &obj->std;
@@ -93,6 +66,8 @@ static void rapira_exchange_free(zend_object *std) {
         rapira_rs_exchange_drop(obj->job);
         obj->job = NULL;
     }
+    // no-op on IS_UNDEF (getRequest never called)
+    zval_ptr_dtor(&obj->request);
 
     zend_object_std_dtor(std);
 }

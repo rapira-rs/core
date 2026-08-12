@@ -191,6 +191,7 @@ impl RapiraBackend {
             headers: req.headers,
             server_vars: Vec::new(),
             uri: req.uri,
+            received_at: 0.0,
         }
     }
 }

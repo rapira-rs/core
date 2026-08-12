@@ -41,9 +41,7 @@ fn worker_singleton() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
-        "dispatcher/worker-singleton.php",
-    )))?;
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/worker-singleton.php")))?;
     r.shutdown(); // joins the worker; the script has run to completion
 
     let records: Vec<(String, String)> = captured()

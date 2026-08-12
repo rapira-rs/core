@@ -20,7 +20,7 @@ fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/ini/observer_teardown_tests/observer-quiet.ini"
     )));
-    let r = Rapira::start(Mode::WorkerRequest(fixture(
+    let r = Rapira::start(Mode::Dispatcher(fixture(
         "shared/session-bailout-worker.php",
     )))?;
     let h = r.handle()?;

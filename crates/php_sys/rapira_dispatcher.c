@@ -17,6 +17,9 @@
 extern const char *rapira_rs_version(size_t *len);
 extern void rapira_rs_log(const char *msg, size_t msg_len, int level,
                           const char *ctx, size_t ctx_len);
+extern int rapira_rs_receive(int64_t timeout_us, void **out_job);
+extern int rapira_rs_try_receive(void **out_job);
+extern void rapira_rs_dispatcher_counters(int64_t *pending, int64_t *active);
 
 // rapira mode
 int rapira_mode = RAPIRA_MODE_CLASSIC;
@@ -87,7 +90,7 @@ ZEND_FUNCTION(Rapira_get_version) {
 
 ZEND_FUNCTION(Rapira_get_dispatcher) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (rapira_mode != RAPIRA_MODE_WORKER_REQUEST) {
+    if (rapira_mode != RAPIRA_MODE_DISPATCHER) {
         zend_throw_error(
             rapira_ce_not_in_worker_mode_error,
             "nothing dispatches work to this process outside worker mode");
@@ -183,71 +186,86 @@ ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct) {
     zend_throw_error(NULL, "host-created");
 }
 
-ZEND_METHOD(Rapira_Internal_Http_Exchange, __construct) {
-    zend_throw_error(NULL, "host-created");
+static void throw_recv(int rc) {
+    switch (rc) {
+    case RAPIRA_RECV_TIMEOUT:
+        zend_throw_exception(rapira_ce_timeout_exception,
+                             "no work became available within the timeout", 0);
+        return;
+    case RAPIRA_RECV_CLOSED:
+        zend_throw_exception(rapira_ce_closed_exception,
+                             "no more work will ever arrive", 0);
+        return;
+    case RAPIRA_RECV_BUSY:
+    default:
+        zend_throw_error(NULL, "receive() while a Rapira\\Http\\Exchange is "
+                               "unfinalized; finalize it first");
+    }
+}
+
+// The wrapping object exists before the receive: zend_object_alloc can bailout,
+// and a Box already handed to C with no owner would leak its Frame sender and
+// hang the client. With the object first, the error path is a plain dtor and
+// free_obj no-ops on the NULL job slot. The wall-timer disarm/re-arm lives on
+// the Rust side (exchange.rs), sequenced after the single-flight check.
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, receive) {
+    zend_long timeout = -1;
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+    Z_PARAM_OPTIONAL
+    Z_PARAM_LONG(timeout)
+    ZEND_PARSE_PARAMETERS_END();
+    if (timeout < -1) {
+        zend_argument_value_error(1, "must be greater than or equal to -1");
+        RETURN_THROWS();
+    }
+
+    object_init_ex(return_value, rapira_ce_internal_http_exchange);
+    void *job = NULL;
+    int rc = rapira_rs_receive((int64_t)timeout, &job);
+    if (rc != RAPIRA_RECV_OK) {
+        zval_ptr_dtor(return_value);
+        ZVAL_UNDEF(return_value);
+        throw_recv(rc);
+        RETURN_THROWS();
+    }
+    rapira_exchange_from(Z_OBJ_P(return_value))->job = job;
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Dispatcher, tryReceive) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, receive) {
-    zend_throw_error(NULL, "not implemented");
+    ZEND_PARSE_PARAMETERS_NONE();
+    object_init_ex(return_value, rapira_ce_internal_http_exchange);
+    void *job = NULL;
+    int rc = rapira_rs_try_receive(&job);
+    if (rc == RAPIRA_RECV_OK) {
+        rapira_exchange_from(Z_OBJ_P(return_value))->job = job;
+        return;
+    }
+    zval_ptr_dtor(return_value);
+    ZVAL_UNDEF(return_value);
+    if (rc == RAPIRA_RECV_EMPTY) {
+        RETURN_NULL();
+    }
+    throw_recv(rc);
     RETURN_THROWS();
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Dispatcher, getInfo) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
+    ZEND_PARSE_PARAMETERS_NONE();
+    int64_t pending = 0, active = 0;
+    rapira_rs_dispatcher_counters(&pending, &active);
+    object_init_ex(return_value, rapira_ce_internal_http_dispatcher_info);
+    rapira_dispatcher_info_obj *info =
+        rapira_dispatcher_info_from(Z_OBJ_P(return_value));
+    info->pending = (zend_long)pending;
+    info->active = (zend_long)active;
 }
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, pendingCount) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG(rapira_dispatcher_info_from(Z_OBJ_P(ZEND_THIS))->pending);
 }
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, activeCount) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Exchange, isFinalized) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Exchange, isCancelled) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Exchange, writeHead) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
-    zend_throw_error(NULL, "not implemented");
-    RETURN_THROWS();
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG(rapira_dispatcher_info_from(Z_OBJ_P(ZEND_THIS))->active);
 }
