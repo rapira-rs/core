@@ -244,7 +244,12 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
     if (EG(exception)) {
         RETURN_THROWS();
     }
-    zend_update_property(ce, self, ZEND_STRL("tls"), tls);
+    // PHP null parses to a NULL zval pointer; zend_update_property derefs it
+    if (tls != NULL) {
+        zend_update_property(ce, self, ZEND_STRL("tls"), tls);
+    } else {
+        zend_update_property_null(ce, self, ZEND_STRL("tls"));
+    }
     if (EG(exception)) {
         RETURN_THROWS();
     }

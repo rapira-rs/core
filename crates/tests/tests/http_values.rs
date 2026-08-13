@@ -24,6 +24,7 @@ fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
         "me.png 512",
         "h2 NULL",
         "example.test:8443 1722700000.25",
+        "tls-null: NULL",
         "readonly: enforced",
         "arity: enforced",
         "union: enforced",

@@ -33,9 +33,14 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
     let h = r.handle()?;
 
-    // Park the worker well past the 1s budget, twice: the first wait proves
-    // the boot-time capture disarmed the timer, the second that the per-unit
-    // re-arm was disarmed again by the next receive().
+    // Warm up: one served unit proves the worker reached its receive loop, so
+    // the sleeps below measure parked time, not startup time.
+    let (status, body) =
+        drain(h.handle_blocking(req("/warmup", "dispatcher/echo-loop-worker.php"))?);
+    assert_eq!((status, body.as_str()), (200, "method=GET body="));
+
+    // Park the worker well past the 1s budget, twice: each wait proves the
+    // budget armed at the previous handout was disarmed again by receive().
     for target in ["/first", "/second"] {
         std::thread::sleep(std::time::Duration::from_secs(2));
         let (status, body) =
@@ -105,7 +110,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     let _guard = php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),

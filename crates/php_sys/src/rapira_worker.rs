@@ -84,6 +84,13 @@ fn run_cycle(script: &Path) -> Cycle {
         })
     });
 
+    // Serving anything proves PHP is functional: clear a stale unhealthy flag
+    // (nothing else emits Healthy on the dispatcher path). Before the shutdown
+    // check, so a served cycle counts even when shutdown bails into Restart.
+    if crate::exchange::served_any() {
+        sb_update(scoreboard::Event::Healthy);
+    }
+
     // php_request_shutdown frees PG(last_error_message) (main.c:2024) —
     // log the bootstrap fatal before it disappears
     log_and_clear_last_error();
@@ -93,12 +100,6 @@ fn run_cycle(script: &Path) -> Cycle {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
         sb_update(scoreboard::Event::Restart);
         return Cycle::Restart;
-    }
-
-    // Serving anything proves PHP is functional: clear a stale unhealthy flag
-    // (nothing else emits Healthy on the dispatcher path).
-    if crate::exchange::served_any() {
-        sb_update(scoreboard::Event::Healthy);
     }
 
     if crate::exchange::closed_seen() {
@@ -130,7 +131,12 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
         match run_cycle(&script) {
             Cycle::Stop => break WorkerExit::Closed,
             Cycle::Restart => break WorkerExit::Restart,
-            Cycle::Recycle => failures = 0,
+            Cycle::Recycle => {
+                // the scoreboard's recycle counter has no other emitter on the
+                // dispatcher path
+                sb_update(scoreboard::Event::Recycled);
+                failures = 0;
+            }
             Cycle::Failed => {
                 failures += 1;
                 if failures == UNHEALTHY_AFTER {

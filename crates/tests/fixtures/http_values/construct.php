@@ -37,6 +37,10 @@ echo $req->body->files[0]->clientFilename, ' ', $req->body->files[0]->size, "\n"
 echo $req->tls->negotiatedProtocol, ' ', var_export($req->tls->certSerial, true), "\n";
 echo $req->authority, ' ', $req->receivedAt, "\n";
 
+// tls: null is a legal Request (plain-HTTP listener) — must construct, not crash.
+$plain = new Request('GET', '/', '/', null, 'HTTP/1.1', [], '', $remote, $server, null, 1.0);
+echo 'tls-null: ', var_export($plain->tls, true), "\n";
+
 // The three ways construction must refuse: readonly reassignment, wrong arity
 // (which is what proves the constructors exist at all), and the address union.
 try {

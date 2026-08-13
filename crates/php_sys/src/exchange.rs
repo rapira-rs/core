@@ -73,7 +73,12 @@ pub(crate) fn reclaim_current() {
         update(|c| c.unit = Unit::Idle);
         // SAFETY: the machine only holds pointers from Box::into_raw in
         // finish_pull, and exchange_drop untracks before reclaiming there.
-        drop(unsafe { Box::from_raw(ptr) });
+        let st = unsafe { Box::from_raw(ptr) };
+        // an unfinalized reclaim is a failed unit: count it like exchange_drop
+        if st.stage != Stage::Finalized {
+            sb_update(Event::Handled(true));
+        }
+        drop(st);
     }
 }
 
