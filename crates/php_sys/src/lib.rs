@@ -32,6 +32,11 @@ pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
 
+// HASH_KEY_IS_STRING is a #define on PHP 8.4 and an enum constant on 8.5, so the
+// bindgen name and zend_hash_get_current_key_ex's return type differ per version;
+// hardcoded like SUCCESS/FAILURE and compared through i64::from at the call sites.
+pub const HASH_KEY_IS_STRING: i64 = 1;
+
 // The Outcome-typed shims return a C `int`; the discriminant is validated at the call sites via
 // `Outcome::from_c` (unexpected values fall back to `Bailout`) rather than transmuted here.
 unsafe extern "C" {

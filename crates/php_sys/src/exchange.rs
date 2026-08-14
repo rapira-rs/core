@@ -846,14 +846,15 @@ unsafe fn walk_head_table(
         let mut pos: HashPosition = 0;
         zend_hash_internal_pointer_reset_ex(ht, &mut pos);
         loop {
-            let entry = zend_hash_get_current_data_ex(ht, &pos);
+            // raw pointer: the pos parameter is *mut on 8.4 and *const on 8.5
+            let entry = zend_hash_get_current_data_ex(ht, &raw mut pos);
             if entry.is_null() {
                 break;
             }
             let mut str_key: *mut zend_string = std::ptr::null_mut();
             let mut num_key = 0;
             let kt = zend_hash_get_current_key_ex(ht, &mut str_key, &mut num_key, &pos);
-            if kt != crate::zend_hash_key_type_HASH_KEY_IS_STRING || str_key.is_null() {
+            if i64::from(kt) != crate::HASH_KEY_IS_STRING || str_key.is_null() {
                 return Err(c"header name is not representable on the wire");
             }
             let name = zend::zstr_bytes(str_key);
@@ -868,7 +869,7 @@ unsafe fn walk_head_table(
             let mut ipos: HashPosition = 0;
             zend_hash_internal_pointer_reset_ex(inner, &mut ipos);
             loop {
-                let item = zend_hash_get_current_data_ex(inner, &ipos);
+                let item = zend_hash_get_current_data_ex(inner, &raw mut ipos);
                 if item.is_null() {
                     break;
                 }

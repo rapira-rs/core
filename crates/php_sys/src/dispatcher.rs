@@ -153,7 +153,8 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
         let mut pos: HashPosition = 0;
         zend_hash_internal_pointer_reset_ex(context, &mut pos);
         loop {
-            let entry = zend_hash_get_current_data_ex(context, &pos);
+            // raw pointer: the pos parameter is *mut on 8.4 and *const on 8.5
+            let entry = zend_hash_get_current_data_ex(context, &raw mut pos);
             if entry.is_null() {
                 break;
             }
@@ -169,7 +170,7 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
                 out = *entry;
                 zval_add_ref(&mut out);
             }
-            if kt == crate::zend_hash_key_type_HASH_KEY_IS_STRING && !skey.is_null() {
+            if i64::from(kt) == crate::HASH_KEY_IS_STRING && !skey.is_null() {
                 let kb = zend::zstr_bytes(skey);
                 // zend_strings are NUL-terminated, covering the symtable
                 // prefilter's one-byte overread
