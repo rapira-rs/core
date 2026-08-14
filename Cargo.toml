@@ -1,3 +1,7 @@
+[workspace.package]
+edition = "2024"
+version = "0.7.0"
+
 [package]
 name = "rapira_core"
 version.workspace = true
@@ -27,11 +31,6 @@ members = [
     "crates/scoreboard",
     "crates/plugins/*",
 ]
-
-[workspace.package]
-edition = "2024"
-version = "0.6.0"
-
 
 [workspace.dependencies]
 anyhow = "1"
@@ -69,6 +68,7 @@ rapira_runtime = { workspace = true }
 php_sys = { workspace = true }
 rapira_config = { workspace = true }
 rapira_pingora = { workspace = true }
+libc = "0.2"
 mimalloc = "0.1"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }

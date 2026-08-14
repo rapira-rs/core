@@ -19,7 +19,7 @@ fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
     for line in [
         "POST /upload?x=1 HTTP/2",
         "203.0.113.7:44123",
-        "NULL",
+        "server-path=NULL",
         "note=hello",
         "me.png 512",
         "h2 NULL",

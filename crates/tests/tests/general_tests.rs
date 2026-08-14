@@ -19,7 +19,7 @@ fn post(fixture_name: &str, body: Box<dyn Read + Send>, len: i64) -> Request {
     r.method = "POST".into();
     r.content_type = Some("text/plain".into());
     r.content_length = len;
-    r.body = body;
+    r.body = php_sys::types::Body::Raw(body);
     r
 }
 
@@ -27,7 +27,7 @@ fn post(fixture_name: &str, body: Box<dyn Read + Send>, len: i64) -> Request {
 // (SG(post_read)=1, main/SAPI.c) - the callback must fill the buffer until
 // real EOF or partial reads truncate the POST body.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn post_body_survives_partial_reads() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("general_tests/input-worker.php")))?;
@@ -58,7 +58,7 @@ fn post_body_survives_partial_reads() -> anyhow::Result<()> {
 // short (default ignore_user_abort=0), and the ABORTED status must not leak
 // into the next request.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("general_tests/abort-worker.php")))?;
@@ -88,7 +88,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
 // resident worker request nothing reclaims the temp stream resource, so every
 // POST grows EG(regular_list) until a sweep is in place.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -124,7 +124,7 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn https_server_vars() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("shared/server-variables.php")))?;
@@ -151,7 +151,7 @@ fn https_server_vars() -> anyhow::Result<()> {
 // throwables (zend_execute_scripts); the worker path must do the same. A
 // handled exception is not an error: no 500, no scoreboard error.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -184,7 +184,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
 // produces no output before the error path, so the rust-side 500 head and the
 // teardown header flush must not fight over it (first write wins).
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -214,7 +214,7 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
 // guard the bailed flush leaves the session active and the next request
 // reuses the previous session id.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -243,7 +243,7 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -265,7 +265,7 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -288,7 +288,7 @@ fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -330,7 +330,7 @@ fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -351,7 +351,7 @@ fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(

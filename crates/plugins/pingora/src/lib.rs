@@ -51,17 +51,19 @@ pub struct Config {
     pub max_body_size: usize,
     /// What to do with a request field whose name is not [`is_safe_field_name`].
     pub unsafe_field_names: UnsafeFieldNames,
+    /// The pool serves superglobals ($_SERVER) — classic/worker mode. The Drop
+    /// policy protects that mapping only, so it is inert without it; Reject is
+    /// an explicit opt-in and applies regardless.
+    pub superglobals: bool,
 }
 
 /// What to do with a request field name that maps onto a CGI variable another name
 /// already owns. Structurally mirrors rapira's config-side type, but owned here so this
 /// extension crate never depends on core's config crate.
 ///
-/// There is deliberately no "allow" arm. Servers that address this at all default to keeping
-/// an aliasing name away from the CGI variable, and the ones that shipped a plain off-switch
-/// are where the collision keeps coming back — CVE-2026-52845 is that bug reached through a
-/// header filter that only removed the exact spelling. An allowlist of specific expected names
-/// could be safe; a boolean could not, so neither is offered until there is a use for one.
+/// There is deliberately no "allow" arm: a boolean off-switch re-opens the
+/// aliasing collision (CVE-2026-52845 is that bug shipped). An allowlist of
+/// specific expected names could be safe; a boolean cannot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsafeFieldNames {
     /// Remove the field before anything downstream sees it.
@@ -79,6 +81,7 @@ impl Default for Config {
             server_port: 8000,
             max_body_size: 8 * 1024 * 1024,
             unsafe_field_names: UnsafeFieldNames::Drop,
+            superglobals: true,
         }
     }
 }
@@ -95,13 +98,21 @@ fn is_safe_field_name(name: &str) -> bool {
     name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// Applies [`UnsafeFieldNames`] to the downstream request. Serves as both the builder and
-/// the per-request module: the policy is `Copy` and there is no per-request state.
-struct FieldNameFilter(UnsafeFieldNames);
+/// Applies [`UnsafeFieldNames`] to the downstream request. Serves as both the
+/// builder and the per-request module: `init` copies two plain fields.
+struct FieldNameFilter {
+    policy: UnsafeFieldNames,
+    /// Drop protects the $_SERVER mapping only; without one, deleting
+    /// tchar-valid names would contradict the contract's "names as received".
+    superglobals: bool,
+}
 
 #[async_trait]
 impl HttpModule for FieldNameFilter {
     async fn request_header_filter(&mut self, req: &mut RequestHeader) -> PingoraResult<()> {
+        if self.policy == UnsafeFieldNames::Drop && !self.superglobals {
+            return Ok(());
+        }
         // Collected first: `remove_header` needs the map mutably, and it drops every value
         // under the name along with its case-preserving entry.
         let unsafe_names: Vec<String> = req
@@ -113,7 +124,7 @@ impl HttpModule for FieldNameFilter {
         if unsafe_names.is_empty() {
             return Ok(());
         }
-        if self.0 == UnsafeFieldNames::Reject {
+        if self.policy == UnsafeFieldNames::Reject {
             // Only the count and one example: pingora logs this at error level (the default
             // filter's only visible level), so joining every name lets one request with a
             // few hundred junk fields write a few hundred KB of log.
@@ -150,7 +161,10 @@ impl HttpModule for FieldNameFilter {
 
 impl HttpModuleBuilder for FieldNameFilter {
     fn init(&self) -> Module {
-        Box::new(Self(self.0))
+        Box::new(Self {
+            policy: self.policy,
+            superglobals: self.superglobals,
+        })
     }
 }
 
@@ -262,14 +276,6 @@ async fn serve(
     let conf: Arc<ServerConf> = Arc::new(ServerConf::default());
     let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let listen = config.listen.clone();
-    let mut service = http_proxy_service(
-        &conf,
-        PhpProxy {
-            php,
-            config,
-            inflight: inflight.clone(),
-        },
-    );
 
     // ONE string feeds BOTH the endpoint and the Fds key: pingora adopts only on
     // an exact match (a mismatch silently rebinds — for unix sockets it would
@@ -292,6 +298,16 @@ async fn serve(
             None,
         ),
     };
+    let mut service = http_proxy_service(
+        &conf,
+        PhpProxy {
+            php,
+            config,
+            // the resolved bind: the $server fallback and the peer-arm kind
+            listen: addr.clone(),
+            inflight: inflight.clone(),
+        },
+    );
     match &addr {
         ListenAddr::Tcp(a) => {
             let s = a.to_string();
@@ -335,17 +351,32 @@ async fn serve(
 struct PhpProxy {
     php: Php,
     config: Config,
+    /// The resolved bind address (port-0 resolved): the `$server` fallback and
+    /// the kind key for a peerless connection.
+    listen: ListenAddr,
     /// Requests between `new_ctx` and `logging` — `serve` drains this on shutdown.
     inflight: Arc<AtomicUsize>,
 }
 
+/// Per-request state; created after the head is parsed, before any body byte.
+pub struct ReqCtx {
+    /// Unix seconds when this host accepted the request.
+    received_at: f64,
+}
+
 #[async_trait]
 impl ProxyHttp for PhpProxy {
-    type CTX = ();
+    type CTX = ReqCtx;
 
-    // Every request runs new_ctx → phases → logging, so the pair below cannot underflow.
+    // Every request runs new_ctx → phases → logging, so the inflight pair cannot underflow.
     fn new_ctx(&self) -> Self::CTX {
         self.inflight.fetch_add(1, Ordering::AcqRel);
+        ReqCtx {
+            received_at: std::time::UNIX_EPOCH
+                .elapsed()
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+        }
     }
 
     /// Registered once when the service is built. The module's `request_header_filter` then
@@ -355,7 +386,10 @@ impl ProxyHttp for PhpProxy {
         // The trait default supplies this and an override replaces the whole body, so it
         // has to be re-added or downstream compression loses its (disabled) module.
         modules.add_module(ResponseCompressionBuilder::enable(0));
-        modules.add_module(Box::new(FieldNameFilter(self.config.unsafe_field_names)));
+        modules.add_module(Box::new(FieldNameFilter {
+            policy: self.config.unsafe_field_names,
+            superglobals: self.config.superglobals,
+        }));
     }
 
     async fn logging(&self, _session: &mut Session, _e: Option<&Error>, _ctx: &mut Self::CTX) {
@@ -365,33 +399,64 @@ impl ProxyHttp for PhpProxy {
     async fn request_filter(
         &self,
         session: &mut Session,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> PingoraResult<bool> {
-        let Some(request) = build_request(session, &self.config).await? else {
-            return Ok(true); // rejected here; 413 already written
+        let Some(request) = build_request(session, &self.config, &self.listen, ctx).await? else {
+            return Ok(true); // rejected here; the response is already written
         };
 
         // Buffer the whole PHP response so we can send a real Content-Length. Without a
         // framed body (Content-Length or chunked) HTTP/1.1 falls back to close-delimiting,
         // which forces a connection close per request — no keepalive, a fresh 64 KiB
         // accept buffer every time. A Content-Length keeps connections alive.
-        let response: extension_api::Response = self.php.exec(request).await.map_err(|e| {
-            Error::explain(
-                ErrorType::HTTPStatus(502),
-                format!("php exec failed: {e:#}"),
-            )
-        })?;
+        let response: extension_api::Response = match self.php.exec(request).await {
+            Ok(r) => r,
+            // host-rejected before dispatch: answer in this protocol
+            Err(e) if e.downcast_ref::<extension_api::Rejected>().is_some() => {
+                let r = e.downcast_ref::<extension_api::Rejected>().unwrap();
+                tracing::warn!(target: "http", "rejected before dispatch: {r}");
+                let mut header = ResponseHeader::build(r.status, Some(1))?;
+                header.insert_header("Content-Length", "0")?;
+                session.set_keepalive(None);
+                session
+                    .write_response_header(Box::new(header), true)
+                    .await?;
+                return Ok(true);
+            }
+            Err(e) => {
+                // a spool io failure is a host fault, not a bad gateway
+                let status = if e.chain().any(|c| c.is::<std::io::Error>()) {
+                    500
+                } else {
+                    502
+                };
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(status),
+                    format!("php exec failed: {e:#}"),
+                ));
+            }
+        };
 
-        // A missing or informational (1xx) head can't be forwarded as a final response.
+        // An informational head can't be forwarded as a final response over h1
+        // (the contract's 101 carve-out included: this front has no upgrade
+        // machinery). Loud, or the rewrite is invisible outside the wire.
         let status = if response.status < 200 {
+            tracing::error!(
+                target: "http",
+                "php committed status {} as final; this front cannot forward it — serving 502",
+                response.status
+            );
             502
         } else {
             response.status
         };
         // 204/304 have no message body: never add a server-framed Content-Length (a
-        // forced 0 would misframe a 304). PHP's own Content-Length is dropped by
-        // skip_response_header like on any response.
-        let no_body = matches!(status, 204 | 304);
+        // forced 0 would misframe a 304). A HEAD response body never goes on the
+        // wire either, and the buffered length is not what a GET would have sent
+        // (RFC 9110 §8.6), so send neither body nor Content-Length there.
+        // https://www.rfc-editor.org/rfc/rfc9110#section-8.6
+        let no_body = matches!(status, 204 | 304)
+            || session.req_header().method == pingora::http::Method::HEAD;
 
         let header = build_response_header(status, response.headers, response.body.len(), no_body)?;
         session
@@ -492,57 +557,84 @@ pub fn skip_response_header(name: &str) -> bool {
     .any(|h| name.eq_ignore_ascii_case(h))
 }
 
-/// Fold the header map into one entry per field name, joining a field's repeats with
-/// [`field_line_separator`] — or keeping only the first line for a field whose grammar is
-/// one value.
-///
-/// Combining is done here, not in the CGI mapping downstream: `HeaderMap` groups by
-/// name, so this needs no assumption that repeats arrive adjacent. Values stay raw
-/// bytes — a lossy UTF-8 decode would corrupt latin1/binary values (a signed header, a
-/// latin1 cookie) that PHP must see verbatim.
-///
-/// A repeated `Host` is answered 400 rather than folded: RFC 9112 §3.2
-/// (https://www.rfc-editor.org/rfc/rfc9112#section-3.2) makes that a MUST, and pingora's own
-/// `validate_request` screens duplicates of `Content-Length` only.
-fn combine_headers(header: &RequestHeader) -> PingoraResult<Vec<(String, Vec<u8>)>> {
-    let mut headers: Vec<(String, Vec<u8>)> = Vec::with_capacity(header.headers.keys_len());
-    for name in header.headers.keys() {
-        let name: &str = name.as_str();
-        let mut lines = header.headers.get_all(name).iter();
-        let Some(first) = lines.next() else { continue };
-        let mut combined: Vec<u8> = first.as_bytes().to_vec();
-
-        if name.eq_ignore_ascii_case("host") {
-            if lines.next().is_some() {
-                return Err(Error::explain(
-                    ErrorType::HTTPStatus(400),
-                    "request carries more than one Host field line",
-                ));
-            }
-        } else if let Some(separator) = extension_api::field_line_separator(name) {
-            for value in lines {
-                combined.extend_from_slice(separator);
-                combined.extend_from_slice(value.as_bytes());
-            }
-        } else {
-            // Singleton field: the extra lines are dropped, so say so — a client that sent
-            // two Authorization headers otherwise just sees its credential stop working.
-            let dropped = lines.count();
-            if dropped > 0 {
-                tracing::warn!(target: "http", "dropped {dropped} extra {name} field line(s): not a list field");
-            }
-        }
-        headers.push((name.to_owned(), combined));
+/// One entry per field line, wire order per name. `case_header_iter` yields
+/// nothing without a case map (h2's `From<ReqParts>` sets none), so fall back
+/// to the lowercase map — which is what h2/h3 put on the wire anyway.
+fn collect_headers(header: &RequestHeader) -> Vec<(String, Vec<u8>)> {
+    if header.has_case() {
+        header
+            .case_header_iter()
+            .map(|(n, v)| {
+                (
+                    String::from_utf8_lossy(n.as_slice()).into_owned(),
+                    v.as_bytes().to_vec(),
+                )
+            })
+            .collect()
+    } else {
+        header
+            .headers
+            .iter()
+            .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_vec()))
+            .collect()
     }
-    Ok(headers)
+}
+
+/// `$authority` from the Host field lines. RFC 9112 §3.2 makes a repeated,
+/// missing or empty Host on HTTP/1.1 a 400; without a usable Host the target
+/// URI reconstructs with an empty authority (RFC 9112 §3.3), named None here.
+/// h2/h3 carry the authority as `:authority` in the URI, not a Host line —
+/// unreachable on today's plaintext-h1 listeners, to be read from
+/// `header.uri.authority()` when a TLS/h2 front lands.
+/// https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+/// https://www.rfc-editor.org/rfc/rfc9112#section-3.3
+fn authority(headers: &[(String, Vec<u8>)], http11: bool) -> Result<Option<Vec<u8>>, &'static str> {
+    let mut lines = headers
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v);
+    let first = lines.next();
+    if lines.next().is_some() {
+        return Err("request carries more than one Host field line");
+    }
+    match first {
+        Some(v) if !v.is_empty() => Ok(Some(v.clone())),
+        Some(_) if http11 => Err("HTTP/1.1 request with an empty Host field value"),
+        None if http11 => Err("HTTP/1.1 request without a Host field"),
+        _ => Ok(None),
+    }
+}
+
+fn peer_addr(a: &pingora::protocols::l4::socket::SocketAddr) -> extension_api::Addr {
+    match a {
+        pingora::protocols::l4::socket::SocketAddr::Inet(sa) => extension_api::Addr::Inet(*sa),
+        pingora::protocols::l4::socket::SocketAddr::Unix(u) => {
+            extension_api::Addr::Unix(u.as_pathname().map(Into::into))
+        }
+    }
+}
+
+fn listen_addr(listen: &ListenAddr) -> extension_api::Addr {
+    match listen {
+        ListenAddr::Tcp(a) => extension_api::Addr::Inet(*a),
+        ListenAddr::Unix(p) => extension_api::Addr::Unix(Some(p.clone())),
+    }
 }
 
 /// Map a Pingora downstream request into a rapira `Request`. `None` means the request
-/// was rejected here (413 already written).
-async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<Option<Request>> {
+/// was rejected here (the response is already written).
+async fn build_request(
+    session: &mut Session,
+    config: &Config,
+    listen: &ListenAddr,
+    ctx: &ReqCtx,
+) -> PingoraResult<Option<Request>> {
     let header: &RequestHeader = session.req_header();
     let method: String = header.method.as_str().to_owned();
-    let uri: String = header.uri.to_string(); // path + ?query → REQUEST_URI
+    // byte-exact request-target (raw_path keeps non-UTF-8 bytes); uri stays the
+    // lossy string for REQUEST_URI
+    let target: Vec<u8> = header.raw_path().to_vec();
+    let uri: String = header.uri.to_string();
     // → SERVER_PROTOCOL, e.g. "HTTP/1.1". The framework-type → CGI-string mapping
     // lives here, not in core; static strings for the common versions (the Debug
     // formatter shows up in per-request profiles).
@@ -554,7 +646,9 @@ async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<
         pingora::http::Version::HTTP_3 => "HTTP/3.0".to_owned(),
         _ => format!("{v:?}"),
     };
-    let headers: Vec<(String, Vec<u8>)> = combine_headers(header)?;
+    let headers: Vec<(String, Vec<u8>)> = collect_headers(header);
+    let authority = authority(&headers, v == pingora::http::Version::HTTP_11)
+        .map_err(|reason| Error::explain(ErrorType::HTTPStatus(400), reason))?;
 
     let declared_len = header
         .headers
@@ -580,11 +674,26 @@ async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<
         session.write_continue_response().await?;
     }
 
-    let (remote_addr, remote_port) = session
-        .client_addr()
-        .and_then(|addr| addr.as_inet())
-        .map(|inet| (inet.ip().to_string(), inet.port()))
-        .unwrap_or_else(|| ("127.0.0.1".to_owned(), 0));
+    let remote = match session.client_addr() {
+        Some(a) => peer_addr(a),
+        // None: an unnamed UDS peer (the normal case there), or a TCP session
+        // whose digest is gone — the contract union has no unknown arm, so the
+        // latter is answered, not fabricated
+        None => match listen {
+            ListenAddr::Unix(_) => extension_api::Addr::Unix(None),
+            ListenAddr::Tcp(_) => {
+                return Err(Error::explain(
+                    ErrorType::HTTPStatus(500),
+                    "connection carries no peer address",
+                ));
+            }
+        },
+    };
+    // real getsockname: the concrete local address on a wildcard bind
+    let server = match session.server_addr() {
+        Some(a) => peer_addr(a),
+        None => listen_addr(listen),
+    };
 
     // Pre-size to the validated Content-Length (already ≤ max_body_size); chunked
     // bodies with no declared length keep growth-by-doubling.
@@ -601,12 +710,16 @@ async fn build_request(session: &mut Session, config: &Config) -> PingoraResult<
     Ok(Some(Request {
         method,
         uri,
+        target: Some(target),
+        authority,
         https: false, // plaintext for now; set from TLS once terminated here
         protocol,
-        remote_addr,
-        remote_port,
+        remote,
+        server,
         server_name: config.server_name.clone(),
         server_port: config.server_port,
+        tls: None, // plumb-only until a TLS backend lands
+        received_at: Some(ctx.received_at),
         headers,
         body,
     }))
@@ -706,27 +819,63 @@ mod tests {
         header
     }
 
-    fn combined<'a>(headers: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
+    fn value_of<'a>(headers: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
         headers
             .iter()
-            .find(|(n, _)| n == name)
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_slice())
     }
 
+    /// One entry per field line, wire order per name, case as sent.
     #[test]
-    fn repeated_fields_combine_into_one_entry() {
-        let headers = combine_headers(&request_with(&[
-            ("Cookie", "a=1"),
-            ("Cookie", "b=2"),
+    fn headers_arrive_per_line_with_case() {
+        let headers = collect_headers(&request_with(&[
+            ("X-Probe", "one"),
             ("Accept", "text/*"),
-            ("Accept", "image/*"),
-            ("User-Agent", "curl"),
-        ]))
-        .unwrap();
-        assert_eq!(combined(&headers, "cookie"), Some(&b"a=1; b=2"[..]));
-        assert_eq!(combined(&headers, "accept"), Some(&b"text/*, image/*"[..]));
-        assert_eq!(combined(&headers, "user-agent"), Some(&b"curl"[..]));
-        assert_eq!(headers.len(), 3, "one entry per field name");
+            ("x-probe", "two"),
+        ]));
+        let probes: Vec<_> = headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("x-probe"))
+            .collect();
+        assert_eq!(probes.len(), 2);
+        assert_eq!(probes[0].0, "X-Probe");
+        assert_eq!(probes[0].1, b"one");
+        assert_eq!(probes[1].0, "x-probe");
+        assert_eq!(probes[1].1, b"two");
+        assert_eq!(value_of(&headers, "accept"), Some(&b"text/*"[..]));
+    }
+
+    /// Without a case map (h2's From<ReqParts> path) the fallback still yields
+    /// every line, lowercase.
+    #[test]
+    fn no_case_requests_still_yield_headers() {
+        let mut header = RequestHeader::build_no_case("GET", b"/", None).unwrap();
+        header.append_header("X-Foo".to_string(), "1").unwrap();
+        header.append_header("X-Foo".to_string(), "2").unwrap();
+        let headers = collect_headers(&header);
+        let foos: Vec<_> = headers.iter().filter(|(n, _)| n == "x-foo").collect();
+        assert_eq!(foos.len(), 2);
+    }
+
+    /// RFC 9112 §3.2: repeated/missing/empty Host on 1.1 → 400; a bare 1.0
+    /// request named no authority.
+    #[test]
+    fn authority_follows_the_host_rules() {
+        let one = |v: &str| vec![("Host".to_owned(), v.as_bytes().to_vec())];
+        assert_eq!(
+            authority(&one("a.example"), true).unwrap().as_deref(),
+            Some(&b"a.example"[..])
+        );
+        assert!(authority(&[], true).is_err());
+        assert!(authority(&one(""), true).is_err());
+        let two = vec![
+            ("Host".to_owned(), b"a".to_vec()),
+            ("host".to_owned(), b"b".to_vec()),
+        ];
+        assert!(authority(&two, false).is_err());
+        assert_eq!(authority(&[], false).unwrap(), None);
+        assert_eq!(authority(&one(""), false).unwrap(), None);
     }
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
@@ -739,12 +888,30 @@ mod tests {
     /// Field names surviving `policy`, in map order.
     fn surviving(policy: UnsafeFieldNames, fields: &[(&str, &str)]) -> PingoraResult<Vec<String>> {
         let mut header = request_with(fields);
-        run(FieldNameFilter(policy).request_header_filter(&mut header))?;
+        run(FieldNameFilter {
+            policy,
+            superglobals: true,
+        }
+        .request_header_filter(&mut header))?;
         Ok(header
             .headers
             .keys()
             .map(|name| name.as_str().to_owned())
             .collect())
+    }
+
+    /// Drop protects the $_SERVER mapping; a dispatcher pool has none, so the
+    /// contract's "names as received" wins there.
+    #[test]
+    fn drop_is_inert_without_superglobals() {
+        let mut header = request_with(&[("X_Forwarded_For", "1.2.3.4")]);
+        run(FieldNameFilter {
+            policy: UnsafeFieldNames::Drop,
+            superglobals: false,
+        }
+        .request_header_filter(&mut header))
+        .unwrap();
+        assert!(header.headers.get("x_forwarded_for").is_some());
     }
 
     #[test]
@@ -780,49 +947,6 @@ mod tests {
         assert_eq!(err.etype(), &ErrorType::HTTPStatus(400));
         let names = surviving(UnsafeFieldNames::Reject, &[("X-Forwarded-For", "1.2.3.4")]).unwrap();
         assert_eq!(names, ["x-forwarded-for"]);
-    }
-
-    /// The separator goes in on position, not on "nothing accumulated yet" — an empty
-    /// first value must still be one of the list's elements.
-    #[test]
-    fn an_empty_first_value_still_separates() {
-        let headers =
-            combine_headers(&request_with(&[("Accept", ""), ("Accept", "text/*")])).unwrap();
-        assert_eq!(combined(&headers, "accept"), Some(&b", text/*"[..]));
-    }
-
-    /// Joining a singleton field corrupts it — a second `Authorization` folded into the
-    /// first lands inside the credential php-src base64-decodes, turning a working login
-    /// into a garbage one. The first line wins, as it did before combining moved here.
-    #[test]
-    fn singleton_fields_keep_only_the_first_line() {
-        let headers = combine_headers(&request_with(&[
-            ("Authorization", "Basic dXNlcjpwYXNz"),
-            ("Authorization", "Basic ZXZpbDpldmls"),
-            ("Content-Type", "text/plain"),
-            ("Content-Type", "text/evil"),
-        ]))
-        .unwrap();
-        assert_eq!(
-            combined(&headers, "authorization"),
-            Some(&b"Basic dXNlcjpwYXNz"[..])
-        );
-        assert_eq!(combined(&headers, "content-type"), Some(&b"text/plain"[..]));
-    }
-
-    /// RFC 9112 §3.2 makes more than one Host field line a 400. pingora's `validate_request`
-    /// screens duplicate `Content-Length` only, so nothing upstream catches this.
-    #[test]
-    fn a_repeated_host_is_rejected() {
-        let err = combine_headers(&request_with(&[
-            ("Host", "good.example"),
-            ("Host", "evil.example"),
-        ]))
-        .unwrap_err();
-        assert_eq!(err.etype(), &ErrorType::HTTPStatus(400));
-
-        let headers = combine_headers(&request_with(&[("Host", "good.example")])).unwrap();
-        assert_eq!(combined(&headers, "host"), Some(&b"good.example"[..]));
     }
 
     #[test]

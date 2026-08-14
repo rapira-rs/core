@@ -1,10 +1,8 @@
 //! Bounds on what one `\Rapira\log()` call can put on the wire, adopted from
 //! Monolog's `NormalizerFormatterTest`.
 //!
-//! Monolog normalizes before encoding, which is where its caps live; we hand the
-//! array straight to `php_json_encode`. The `#[ignore]`d tests below are the
-//! executable spec for that missing pass — they assert the behaviour we want, not
-//! the behaviour we have.
+//! No normalization pass yet: the array goes straight to `php_json_encode`.
+//! The `#[ignore]`d tests specify the caps that pass adds.
 
 use tests::{app_record, app_records};
 use tracing::Level;
@@ -61,8 +59,7 @@ fn a_thousand_items_are_not_truncated() {
 }
 
 /// Monolog: testNormalizeHandleLargeArrays — over the cap, the array is truncated
-/// and carries a marker naming the real size. Measured today: 2000 items encode
-/// in full, and 500_000 produce a 3.39 MB record.
+/// and carries a marker naming the real size.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn large_arrays_are_capped_and_marked() {
@@ -86,8 +83,8 @@ fn large_arrays_are_capped_and_marked() {
     );
 }
 
-/// Beyond Monolog, which caps items and depth but never string length. Measured:
-/// a single 5 MiB scalar becomes a 5.24 MB log record with no cap and no marker.
+/// Beyond Monolog, which caps items and depth but never string length: a huge
+/// scalar becomes an equally huge log record with no cap and no marker.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn huge_strings_are_capped() {
@@ -105,10 +102,9 @@ fn huge_strings_are_capped() {
 }
 
 /// Monolog: testMaxNormalizeDepth — over-deep branches abort with a marker naming
-/// the limit. Measured today: PHP_JSON_PARTIAL_OUTPUT_ON_ERROR disables json's
-/// depth ceiling entirely (json_encoder.c:192-197), so encoding runs until Zend's
-/// stack guard trips at roughly 5500 levels and substitutes a bare null. Bounded,
-/// but silent — and the cut-off moves with how deep the PHP call stack already was.
+/// the limit. PHP_JSON_PARTIAL_OUTPUT_ON_ERROR disables json's depth ceiling
+/// entirely (json_encoder.c:192-197), so encoding runs until Zend's stack guard
+/// trips and substitutes a bare null: bounded, but silent.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn deep_nesting_is_marked_not_silently_cut() {

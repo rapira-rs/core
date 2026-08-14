@@ -257,6 +257,32 @@ pub fn http_get_raw(
     Ok(raw)
 }
 
+/// As [`http_raw`], returning the unparsed response bytes — for asserting on
+/// the header block itself.
+pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
+    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
+    s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(timeout))?;
+    s.write_all(request)?;
+    s.flush()?;
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw)?;
+    Ok(raw)
+}
+
+/// A caller-controlled request: no implicit Host or Connection line. For
+/// requests the other helpers cannot express (e.g. a missing Host).
+pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
+    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
+    s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(timeout))?;
+    s.write_all(request)?;
+    s.flush()?;
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw)?;
+    parse_status_and_body(&raw)
+}
+
 /// Sibling of [`http_get`] with a body. `content_type` is bytes, not text: a multipart
 /// boundary is opaque octets and obs-text is legal in a field value.
 pub fn http_post(

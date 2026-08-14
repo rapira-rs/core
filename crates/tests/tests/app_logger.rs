@@ -76,7 +76,7 @@ fn log_context_carries_a_throwable() {
             "a logged exception must be diagnosable: no {fragment:?} in {ctx:?}"
         );
     }
-    // The chained cause is why it failed; the outermost frame alone rarely says.
+    // the chained cause must survive flattening
     assert!(
         ctx.contains("inner cause"),
         "the previous exception must survive: {ctx:?}"
@@ -135,9 +135,8 @@ fn log_context_encodes_common_php_values() {
     );
 }
 
-/// A worked example of how much an internal class's JSON shape depends on how it
-/// was built: the createFromDateString() form carries no y/m/d at all, only the
-/// string it was parsed from, so a consumer cannot treat the two alike.
+/// createFromDateString() DateIntervals carry no y/m/d, only `from_string`;
+/// the two construction forms encode differently.
 #[test]
 fn app_logger_dateinterval_easy() {
     let (level, msg, ctx) = app_record("app_logger/app-logger-dateinterval.php");

@@ -102,78 +102,115 @@ impl Php {
     /// Submit `req` and collect the whole response — the worker seals it into a
     /// single frame, so the caller wakes once per response. Errors when PHP
     /// produced no response head, when the worker died mid-response (the channel
-    /// closed without a frame), or when PHP errored after it began writing its
-    /// body (so the body may be incomplete).
+    /// closed without a frame), when PHP errored after it began writing its
+    /// body (so the body may be incomplete), or with a downcastable [`Rejected`]
+    /// when the host refused the body before dispatch (malformed multipart → 400,
+    /// past a configured limit → 413) — nothing rejected ever reaches a worker.
     pub async fn exec(&self, req: Request) -> Result<Response> {
         self.backend.exec(req).await
     }
 }
 
+/// One endpoint of an accepted connection, as the socket reports it. The union mirrors
+/// the contract's `InetAddress|UnixAddress`: a port exists exactly when the endpoint is
+/// an IP one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Addr {
+    Inet(std::net::SocketAddr),
+    /// None is an unnamed endpoint — the usual case for a peer connecting to a unix
+    /// listener, which binds no path of its own.
+    Unix(Option<PathBuf>),
+}
+
+/// The client certificate facts, present only when one was presented (mTLS). Grouped so
+/// the contract's "all null unless one was presented" is a type fact.
+#[derive(Debug, Clone)]
+pub struct ClientCert {
+    /// Serial number, hex.
+    pub serial: String,
+    /// Subject O; absent in some certificates.
+    pub organization: Option<String>,
+    /// SHA-256 over the DER form, lowercase hex.
+    pub fingerprint: String,
+}
+
+/// What the TLS handshake settled, when this listener terminated TLS itself. No Default
+/// on purpose: a Tls value must come from a real handshake.
+#[derive(Debug, Clone)]
+pub struct Tls {
+    /// Protocol version as the TLS stack names it: "TLSv1.3". Must be non-empty.
+    pub version: String,
+    /// Negotiated cipher suite: "TLS_AES_256_GCM_SHA384". Must be non-empty.
+    pub cipher: String,
+    /// What ALPN settled on ("h2"), or None when the client offered no list.
+    /// Maps to `Tls::$negotiatedProtocol`.
+    pub alpn: Option<String>,
+    /// Name the client asked for through SNI, or None if it sent none.
+    /// Maps to `Tls::$requestedServerName`.
+    pub server_name: Option<String>,
+    pub cert: Option<ClientCert>,
+}
+
+/// A request the host rejected before dispatch; the extension answers it in its own
+/// protocol. Surfaces as [`Php::exec`]'s error — downcast from `anyhow::Error`.
+#[derive(Debug)]
+pub struct Rejected {
+    /// 400 for a malformed body, 413 past a configured limit.
+    pub status: u16,
+    /// For the extension's log; never sent to the client verbatim.
+    pub reason: String,
+}
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status, self.reason)
+    }
+}
+
+impl std::error::Error for Rejected {}
+
 /// A request an extension runs through PHP. Pool-internal fields (`query`,
 /// `content_type`, script paths) are derived by the host's backend.
+///
+/// Every fidelity field is populated or honestly omitted (`Option`/enum) — an extension
+/// with no wire form for a fact passes None, never a fabricated default.
 pub struct Request {
     pub method: String,
     pub uri: String, // path + optional ?query → REQUEST_URI
+    /// The request-target byte-for-byte: the h1 request line's target, `:path` on h2/h3.
+    /// None when the extension has no wire form; the host falls back to `uri`'s bytes.
+    pub target: Option<Vec<u8>>,
+    /// The authority the client named, byte-for-byte (`Host` on h1,
+    /// `:authority` on h2/h3). None = named none; never `Some(b"")`. Rejecting
+    /// a Host-less HTTP/1.1 request is the extension's job (RFC 9112 §3.2,
+    /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2).
+    pub authority: Option<Vec<u8>>,
     pub https: bool,
     pub protocol: String, // "HTTP/1.1"
-    pub remote_addr: String,
-    pub remote_port: u16,
+    /// The peer's end of the connection, as the socket reports it.
+    pub remote: Addr,
+    /// The accepting socket — which listener took the call, not configuration.
+    pub server: Addr,
+    /// Configured CGI facts (`SERVER_NAME`/`SERVER_PORT`, RFC 3875) and the `$uri`
+    /// synthesis fallback; distinct from the socket-derived `server`.
     pub server_name: String,
     pub server_port: u16,
-    /// Header values are raw bytes (latin1/binary-safe), mirroring [`Response`]:
-    /// a client may send octets that are not valid UTF-8 and PHP must see them verbatim.
-    ///
-    /// At most one entry per field name, compared case-insensitively: combine a field's
-    /// repeats with [`field_line_separator`] before submitting. Field names must also be
-    /// `[A-Za-z0-9-]`; `_` and `.` both reach the CGI variable a `-` name owns, so a name
-    /// carrying either lets a client overwrite a field the front set.
-    ///
-    /// The host re-normalises the repeats on the way in, so that violation costs a log line
-    /// rather than a silently wrong `$_SERVER`. Names it takes as given: only the layer
-    /// terminating the connection can answer a bad one with a `400` instead of dropping it
-    /// silently, so the screen belongs in the extension — `rapira_pingora` runs it in a
-    /// downstream module, before anything reads the map.
+    /// What the handshake settled, when this listener terminated TLS itself. None on a
+    /// plaintext listener — `https` may still be true behind a terminating front.
+    pub tls: Option<Tls>,
+    /// Unix seconds when the extension accepted the request: after the head was parsed,
+    /// before the body was read. None when the extension has no ingress stamp; the host
+    /// then stamps at intake.
+    pub received_at: Option<f64>,
+    /// One entry per field line: repeats stay separate entries in wire order,
+    /// names as received (case preserved). Values are raw bytes
+    /// (latin1/binary-safe). The host folds repeats only for the `$_SERVER`
+    /// mapping; nothing is folded on the dispatcher path.
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Vec<u8>,
 }
 
-/// The separator joining repeats of `name`, or `None` when the field's grammar is one value
-/// and repeats must not be joined — the first line wins and the rest are dropped.
-///
-/// RFC 9110 §5.3 (https://www.rfc-editor.org/rfc/rfc9110#section-5.3) permits combining only
-/// "without changing the semantics of the message", i.e. for fields defined as a comma list.
-/// Joining a singleton field corrupts it: a second `Authorization` folded into the first
-/// lands inside the credential php-src base64-decodes. `Cookie` is a list but not a comma
-/// one — it rejoins on `"; "`, the cookie-string form its parser expects (RFC 6265 §4.2.1,
-/// https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1).
-///
-/// `Host` is deliberately absent: more than one `Host` line is a 400, not a first-wins
-/// (RFC 9112 §3.2, https://www.rfc-editor.org/rfc/rfc9112#section-3.2), which only a front
-/// terminating the connection can answer. The fallback therefore joins it like any other
-/// field: a front that let the repeat through has already skipped the only correct answer.
-/// Joining is the safer of the two wrong answers — `Host = uri-host [ ":" port ]` admits no
-/// comma (RFC 9110 §7.2, https://www.rfc-editor.org/rfc/rfc9110#section-7.2), so the joined
-/// value fails closed in whatever parses `HTTP_HOST`, where a first-wins would instead hand
-/// PHP a clean authority the client picked.
-pub fn field_line_separator(name: &str) -> Option<&'static [u8]> {
-    const SINGLETON: &[&str] = &[
-        "authorization",
-        "proxy-authorization",
-        "content-type",
-        "content-length",
-        "referer",
-        "from",
-    ];
-    if SINGLETON.iter().any(|f| name.eq_ignore_ascii_case(f)) {
-        None
-    } else if name.eq_ignore_ascii_case("cookie") {
-        Some(b"; ")
-    } else {
-        Some(b", ")
-    }
-}
-
-#[derive(Default)]
+// No Default: it would mint status 0, which no wire can carry.
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, Vec<u8>)>, // bytes: latin1/binary-safe

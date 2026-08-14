@@ -1,0 +1,192 @@
+//! Constructor bodies for the `Rapira\Http` value objects. The C shells own
+//! the fast-ZPP macro layer and hand the parsed arguments here; every property
+//! write goes through zend.rs. False reports a pending throw (the shells
+//! backstop a caught panic).
+
+use std::ffi::c_double;
+
+use crate::{
+    IS_OBJECT, callbacks::guard, rapira_ce_http_tls, rapira_ce_inet_address,
+    rapira_ce_unix_address, zend, zend_object, zend_string, zend_zval_value_name, zval,
+};
+
+/// The `Rapira\InetAddress|Rapira\UnixAddress` union check the arginfo cannot
+/// enforce (internal arg types are debug-only).
+unsafe fn address_arg(zv: *mut zval, num: u32) -> bool {
+    unsafe {
+        if zend::zval_type(zv) == IS_OBJECT {
+            let ce = (*(*zv).value.obj).ce;
+            if zend::instanceof(ce, rapira_ce_inet_address)
+                || zend::instanceof(ce, rapira_ce_unix_address)
+            {
+                return true;
+            }
+        }
+        crate::zend_argument_type_error(
+            num,
+            c"must be of type Rapira\\InetAddress|Rapira\\UnixAddress, %s given".as_ptr(),
+            zend_zval_value_name(zv),
+        );
+        false
+    }
+}
+
+/// # Safety
+/// `obj` the object under construction; strings/zvals are ZPP-owned for the
+/// call. All ctors below share this contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_ctor_inet_address(
+    obj: *mut zend_object,
+    ip: *mut zend_string,
+    port: i64,
+) -> bool {
+    guard(false, || unsafe {
+        let ce = rapira_ce_inet_address;
+        zend::prop_zstr(ce, obj, c"ip", ip);
+        zend::prop_long(ce, obj, c"port", port);
+        !zend::exception_pending()
+    })
+}
+
+/// # Safety
+/// As `rapira_rs_ctor_inet_address`; `path` nullable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_ctor_unix_address(
+    obj: *mut zend_object,
+    path: *mut zend_string,
+) -> bool {
+    guard(false, || unsafe {
+        zend::prop_zstr_or_null(rapira_ce_unix_address, obj, c"path", path);
+        !zend::exception_pending()
+    })
+}
+
+/// # Safety
+/// As `rapira_rs_ctor_inet_address`; the five cert/negotiation strings are
+/// nullable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_ctor_tls(
+    obj: *mut zend_object,
+    version: *mut zend_string,
+    cipher: *mut zend_string,
+    negotiated: *mut zend_string,
+    server_name: *mut zend_string,
+    serial: *mut zend_string,
+    org: *mut zend_string,
+    fingerprint: *mut zend_string,
+) -> bool {
+    guard(false, || unsafe {
+        let ce = rapira_ce_http_tls;
+        zend::prop_zstr(ce, obj, c"version", version);
+        zend::prop_zstr(ce, obj, c"cipher", cipher);
+        zend::prop_zstr_or_null(ce, obj, c"negotiatedProtocol", negotiated);
+        zend::prop_zstr_or_null(ce, obj, c"requestedServerName", server_name);
+        zend::prop_zstr_or_null(ce, obj, c"certSerial", serial);
+        zend::prop_zstr_or_null(ce, obj, c"certOrganization", org);
+        zend::prop_zstr_or_null(ce, obj, c"certFingerprint", fingerprint);
+        !zend::exception_pending()
+    })
+}
+
+/// # Safety
+/// As `rapira_rs_ctor_inet_address`; `headers` a live array zval.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_ctor_form_field(
+    obj: *mut zend_object,
+    name: *mut zend_string,
+    value: *mut zend_string,
+    headers: *mut zval,
+) -> bool {
+    guard(false, || unsafe {
+        // dynamic scope: these classes are open to userland extension
+        let ce = (*obj).ce;
+        zend::prop_zstr(ce, obj, c"name", name);
+        zend::prop_zstr(ce, obj, c"value", value);
+        zend::prop_zval(ce, obj, c"headers", headers);
+        !zend::exception_pending()
+    })
+}
+
+/// # Safety
+/// As `rapira_rs_ctor_form_field`; `client_media_type` nullable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_ctor_uploaded_file(
+    obj: *mut zend_object,
+    name: *mut zend_string,
+    client_filename: *mut zend_string,
+    client_media_type: *mut zend_string,
+    headers: *mut zval,
+    tmp_path: *mut zend_string,
+    size: i64,
+) -> bool {
+    guard(false, || unsafe {
+        let ce = (*obj).ce;
+        zend::prop_zstr(ce, obj, c"name", name);
+        zend::prop_zstr(ce, obj, c"clientFilename", client_filename);
+        zend::prop_zstr_or_null(ce, obj, c"clientMediaType", client_media_type);
+        zend::prop_zval(ce, obj, c"headers", headers);
+        zend::prop_zstr(ce, obj, c"tmpPath", tmp_path);
+        zend::prop_long(ce, obj, c"size", size);
+        !zend::exception_pending()
+    })
+}
+
+/// # Safety
+/// As `rapira_rs_ctor_form_field`; `fields`/`files` live array zvals.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_ctor_multipart(
+    obj: *mut zend_object,
+    fields: *mut zval,
+    files: *mut zval,
+) -> bool {
+    guard(false, || unsafe {
+        let ce = (*obj).ce;
+        zend::prop_zval(ce, obj, c"fields", fields);
+        zend::prop_zval(ce, obj, c"files", files);
+        !zend::exception_pending()
+    })
+}
+
+/// # Safety
+/// As `rapira_rs_ctor_form_field`. `body` is the C-shell-built union zval
+/// (Multipart object or string); `authority`/`tls` nullable; `remote`/`server`
+/// are validated here against the address union (args 8 and 9).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn rapira_rs_ctor_request(
+    obj: *mut zend_object,
+    method: *mut zend_string,
+    uri: *mut zend_string,
+    target: *mut zend_string,
+    authority: *mut zend_string,
+    protocol: *mut zend_string,
+    headers: *mut zval,
+    body: *mut zval,
+    remote: *mut zval,
+    server: *mut zval,
+    tls: *mut zval,
+    received_at: c_double,
+) -> bool {
+    guard(false, || unsafe {
+        if !address_arg(remote, 8) || !address_arg(server, 9) {
+            return false;
+        }
+        let ce = (*obj).ce;
+        zend::prop_zstr(ce, obj, c"method", method);
+        zend::prop_zstr(ce, obj, c"uri", uri);
+        zend::prop_zstr(ce, obj, c"target", target);
+        zend::prop_zstr_or_null(ce, obj, c"authority", authority);
+        zend::prop_zstr(ce, obj, c"protocol", protocol);
+        zend::prop_zval(ce, obj, c"headers", headers);
+        zend::prop_zval(ce, obj, c"body", body);
+        zend::prop_zval(ce, obj, c"remote", remote);
+        zend::prop_zval(ce, obj, c"server", server);
+        if tls.is_null() {
+            zend::prop_null(ce, obj, c"tls");
+        } else {
+            zend::prop_zval(ce, obj, c"tls", tls);
+        }
+        zend::prop_double(ce, obj, c"receivedAt", received_at);
+        !zend::exception_pending()
+    })
+}

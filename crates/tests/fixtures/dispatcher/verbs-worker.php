@@ -65,7 +65,42 @@ try {
             } catch (\ValueError) {
                 $out[] = 'shape';
             }
+            try {
+                $ex->writeHead(200, [123 => ['v']]);
+            } catch (\ValueError) {
+                $out[] = 'intkey';
+            }
+            try {
+                $ex->writeHead(200, ['x-a' => [123]]);
+            } catch (\ValueError) {
+                $out[] = 'item';
+            }
             $ex->writeBody(implode(';', $out));
+            continue;
+        }
+        if ($probe === 'empty-chunk') {
+            $ex->writeBody('', eos: false); // does nothing: no head commits
+            $ex->writeHead(404);
+            $ex->writeBody('body');
+            continue;
+        }
+        if ($probe === 'verb-edges') {
+            try {
+                $d->tryReceive();
+            } catch (\Error) {
+                $out[] = 'try-busy';
+            }
+            try {
+                $d->receive(-2);
+            } catch (\ValueError) {
+                $out[] = 'neg-timeout';
+            }
+            try {
+                $ex->writeBody(implode(';', $out), eos: true);
+                $ex->writeHead(500);
+            } catch (HeadAlreadyWrittenError $e) {
+                \Rapira\log('head-after-eos', context: ['class' => $e::class]);
+            }
             continue;
         }
         if ($probe === 'interim') {

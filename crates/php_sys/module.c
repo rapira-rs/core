@@ -77,7 +77,7 @@ PHP_MINIT_FUNCTION(rapira) {
 }
 
 PHP_RSHUTDOWN_FUNCTION(rapira) {
-    rapira_dispatcher_release();
+    rapira_rs_dispatcher_release();
     return SUCCESS;
 }
 
@@ -144,13 +144,10 @@ static void rapira_observer_end_to(zend_execute_data *base) {
     EG(current_execute_data) = orig;
 }
 
-// Per-job execution budget, captured once per cycle. EG(timeout_seconds) is
-// runtime-mutable (set_time_limit()/ini_set() go through OnUpdateTimeout) and
-// the worker path never restores INI per job, so re-arming straight from it
-// would let one job's set_time_limit(0) disable the timer for every later job.
-// The first rapira_request_init of a cycle runs after the bootstrap top-level,
-// so the capture honors the bootstrap's own set_time_limit;
-// rapira_request_shutdown resets it at cycle end. -1 = not captured yet.
+// Per-job execution budget. set_time_limit()/ini_set() rewrite
+// EG(timeout_seconds) at runtime and the worker never restores INI per job, so
+// re-arming from the live field would leak one job's set_time_limit(0) into
+// every later job. Captured after the bootstrap top-level; -1 = not captured.
 static zend_long rapira_job_timeout = -1;
 
 // The wall timer must not run while the worker parks in receive(): time spent
@@ -168,15 +165,11 @@ void rapira_receive_untimed(void) {
 }
 
 // Re-arm the captured budget when a unit is handed to PHP; zend_set_timeout
-// re-assigns EG(timeout_seconds) itself (Zend/zend_execute_API.c). The lazy
-// capture covers a worker whose first verb is tryReceive(): without it the
-// sentinel would arm zend_set_timeout(0) = unlimited and a later receive()
-// would latch the budget at 0 for the whole cycle. reset_signals=0 for the
-// same reason as rapira_request_init.
+// re-assigns EG(timeout_seconds) itself (Zend/zend_execute_API.c). Every
+// receive verb runs rapira_receive_untimed first, so the budget is always
+// captured before this arms. reset_signals=0 for the same reason as
+// rapira_request_init.
 void rapira_receive_timed(void) {
-    if (rapira_job_timeout < 0) {
-        rapira_job_timeout = EG(timeout_seconds);
-    }
     zend_set_timeout(rapira_job_timeout, 0);
 }
 
@@ -201,12 +194,9 @@ static void rapira_request_init(void) {
     // capture above), not max_input_time. Teardown unsets it, so time spent
     // blocked on the job queue is never counted.
     //
-    // reset_signals=0: with reset_signals, zend_set_timeout reinstalls the
-    // SIGRTMIN handler + unblocks it on every call (an rt_sigaction +
-    // rt_sigprocmask syscall per job). Both are already in place for this
-    // thread: php_request_startup runs zend_set_timeout(..., 1) at cycle boot,
-    // the disposition is process-wide, and nothing re-blocks SIGRTMIN between
-    // jobs (rapira only blocks INT/TERM). Same per-request re-arm as
+    // reset_signals=0: the SIGRTMIN handler is already installed process-wide
+    // (php_request_startup ran zend_set_timeout(..., 1) at cycle boot) and
+    // nothing re-blocks it between jobs; same per-request re-arm as
     // php_execute_script (main.c:2630).
     // https://man7.org/linux/man-pages/man7/signal.7.html
     // https://man7.org/linux/man-pages/man2/sigaction.2.html
@@ -276,10 +266,9 @@ static void rapira_activate_auto_globals(void) {
     ZEND_HASH_FOREACH_END();
 }
 #ifdef HAVE_PHP_SESSION
-// Worker mode bypasses module RSHUTDOWN, so the session module never flushes/
-// closes an active session between requests - do the work session_rshutdown
-// would have done, or PS(id)/session_status leak across requests (one request
-// reusing the previous one's session).
+// Worker mode bypasses module RSHUTDOWN, so an active session never flushes
+// between requests and PS(id)/session_status leak across them — do the work
+// session_rshutdown would have done.
 //
 // Nothing here is guarded on purpose. A bailing save handler is a fatal: it
 // must reach rapira_request_teardown's zend_catch and recycle the worker, so

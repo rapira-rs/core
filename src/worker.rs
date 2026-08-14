@@ -61,6 +61,7 @@ pub fn worker_body(
     mode: Mode,
     script: PathBuf,
     max_requests: u64,
+    mut uploads: rapira_runtime::multipart::Limits,
 ) -> i32 {
     // The engine heap and execution timer were set up by the master's MINIT;
     // the child must re-key/re-arm them before any PHP runs.
@@ -82,16 +83,45 @@ pub fn worker_body(
 
     // Boot failure before serving anything is the unhealthy contract: a
     // never-serviceable gen-0 pool must failboot, not respawn forever.
-    let Ok(rapira) = Rapira::start_worker(mode, hooks) else {
-        return WORKER_EXIT_UNHEALTHY;
+    let rapira = match Rapira::start_worker(mode, hooks) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(target: "rapira", "worker PHP boot failed: {e:#}");
+            return WORKER_EXIT_UNHEALTHY;
+        }
     };
-    let Ok(handle) = rapira.handle() else {
-        return WORKER_EXIT_UNHEALTHY;
+    let handle = match rapira.handle() {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(target: "rapira", "worker handle failed: {e:#}");
+            return WORKER_EXIT_UNHEALTHY;
+        }
     };
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
-    let running: rapira_runtime::Running = host.run(handle, script);
+    // Per-pid spool subdir: SpooledFile drops cover destructor paths; the
+    // master's boot sweep reclaims dirs a SIGKILLed worker left behind.
+    uploads.dir = uploads
+        .dir
+        .join(format!("rapira-spool-{}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&uploads.dir) {
+        tracing::error!(
+            target: "rapira",
+            "creating spool dir {}: {e}",
+            uploads.dir.display()
+        );
+        return WORKER_EXIT_UNHEALTHY;
+    }
+    let spool_dir = uploads.dir.clone();
+    let running: rapira_runtime::Running = host.run_with_options(
+        handle,
+        script,
+        rapira_runtime::RuntimeOptions {
+            uploads: Arc::new(uploads),
+            ..rapira_runtime::RuntimeOptions::default()
+        },
+    );
     let _ = stopper.set(running.stopper());
     // Quota/unhealthy may have fired before the stopper existed.
     if WORKER_EXIT.load(SeqCst) != -1 {
@@ -100,6 +130,11 @@ pub fn worker_body(
 
     let outcomes: Vec<Result<(), String>> = running.serve_worker();
     drop(rapira); // joins the PHP thread; module teardown stays with the master
+    // Every request has concluded: reclaim this generation's spool dir, or
+    // respawns accumulate one per pid (the boot sweep only covers crashes).
+    if let Err(e) = std::fs::remove_dir_all(&spool_dir) {
+        tracing::warn!(target: "rapira", "removing spool dir {}: {e}", spool_dir.display());
+    }
 
     // A decided protocol code (recycle/unhealthy) wins: those carry supervision
     // meaning (no-backoff respawn, gen-0 failboot) a drain error must not erase.

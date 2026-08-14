@@ -11,7 +11,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::null_mut;
 
 pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
-    catch_unwind(AssertUnwindSafe(f)).unwrap_or(default)
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        // the payload already went to stderr via the panic hook; this line puts
+        // the substitution in the structured log
+        tracing::error!(target: "rapira", "panic caught at the FFI boundary; default substituted");
+        default
+    })
 }
 
 /// Hard cap on the response body buffered in Rust (outside PHP's memory_limit).
@@ -66,14 +71,14 @@ impl SapiHeader {
 
 /// `tchar`, the only bytes a field name may contain (RFC 9110 §5.6.2,
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2; `field-name = token`, §5.1).
-fn is_tchar(b: u8) -> bool {
+pub(crate) fn is_tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
 /// A byte a field value may carry: visible ASCII, obs-text (`0x80..=0xff`), SP or HTAB
 /// (RFC 9110 §5.5, https://www.rfc-editor.org/rfc/rfc9110#section-5.5). SP/HTAB are legal
 /// between vchars; the caller already trimmed the ends.
-fn is_field_value_byte(b: u8) -> bool {
+pub(crate) fn is_field_value_byte(b: u8) -> bool {
     (b >= 0x20 && b != 0x7f) || b == b'\t'
 }
 
@@ -174,48 +179,64 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
     len: usize,
     aborted: *mut bool,
 ) -> usize {
-    guard(0, || {
-        let ctx = unsafe {
-            let Some(c) = ctx() else {
-                let data = slice::from_raw_parts(buf.cast::<u8>(), len);
-                tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
-                return len;
+    let mut completed = false;
+    let written = guard(0, || {
+        let n = (|| {
+            let ctx = unsafe {
+                let Some(c) = ctx() else {
+                    let data = slice::from_raw_parts(buf.cast::<u8>(), len);
+                    tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
+                    return len;
+                };
+                c
             };
-            c
-        };
 
-        if ctx.stream == StreamState::NotSent {
-            let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
-            ctx.commit_head(status, vec![]);
-        }
+            if ctx.stream == StreamState::NotSent {
+                let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
+                ctx.commit_head(status, vec![]);
+            }
 
-        if let Some(tx) = &ctx.sender {
-            if tx.is_closed() {
-                // receiver dropped = client disconnected: stop buffering. PHP
-                // ignores ub_write's return, so signal the shim to raise the
-                // abort after this frame unwinds.
-                ctx.finish(false);
-                unsafe { *aborted = true };
-                return 0;
+            if let Some(tx) = &ctx.sender {
+                if tx.is_closed() {
+                    // receiver dropped = client disconnected: stop buffering. PHP
+                    // ignores ub_write's return, so signal the shim to raise the
+                    // abort after this frame unwinds.
+                    ctx.finish(false);
+                    unsafe { *aborted = true };
+                    return 0;
+                }
+                if ctx.body.len() + len > MAX_BUFFERED_BODY {
+                    tracing::error!(
+                        target: "rapira",
+                        "response body exceeds the host buffer cap ({} + {len} > {MAX_BUFFERED_BODY} bytes); aborting the request",
+                        ctx.body.len()
+                    );
+                    // over the buffer cap: seal the buffered body as truncated and abort the
+                    // request through the same path as a client disconnect
+                    ctx.finish(true);
+                    unsafe { *aborted = true };
+                    return 0;
+                }
+                let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
+                ctx.body.extend_from_slice(buf);
+                // Body output began *during the handler* (the teardown flush sets
+                // `tearing_down` first): a later error now truncates the body.
+                if !ctx.tearing_down {
+                    ctx.stream = StreamState::BodyStreamed;
+                }
             }
-            if ctx.body.len() + len > MAX_BUFFERED_BODY {
-                // over the buffer cap: seal the buffered body as truncated and abort the
-                // request through the same path as a client disconnect
-                ctx.finish(true);
-                unsafe { *aborted = true };
-                return 0;
-            }
-            let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
-            ctx.body.extend_from_slice(buf);
-            // Body output began *during the handler* (the teardown flush sets
-            // `tearing_down` first): a later error now truncates the body.
-            if !ctx.tearing_down {
-                ctx.stream = StreamState::BodyStreamed;
-            }
-        }
 
-        len
-    })
+            len
+        })();
+        completed = true;
+        n
+    });
+    if !completed {
+        // a caught panic dropped this chunk: abort the request rather than serve
+        // a 200 with a hole in the body
+        unsafe { *aborted = true };
+    }
+    written
 }
 
 /// # Safety
@@ -258,10 +279,16 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
     // A short read (fewer than `count` bytes) signals end-of-body: the engine
     // sets SG(post_read)=1 and stops calling this (php-src main/SAPI.c:232-252).
     with_ctx(0, |ctx| {
+        let crate::types::Body::Raw(reader) = &mut ctx.req.body else {
+            // the host parses multipart only for Exchange-style delivery, which
+            // never binds a server context — reaching this arm is a host bug
+            tracing::debug!(target: "rapira", "read_post on a host-parsed multipart body");
+            return 0;
+        };
         let dst = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), count) };
         let mut filled = 0;
         while filled < count {
-            match ctx.req.body.read(&mut dst[filled..]) {
+            match reader.read(&mut dst[filled..]) {
                 Ok(0) => break,
                 Ok(n) => filled += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -275,19 +302,21 @@ pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
     with_ctx(null_mut(), |ctx| {
         // the Cookie buffer is request-owned; NULL = no Cookie header (the SAPI convention)
         ctx.c
-            .cookie
             .as_ref()
+            .and_then(|c| c.cookie.as_ref())
             .map_or(null_mut(), |c| c.as_ptr() as *mut c_char)
     })
 }
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
     with_ctx((), |ctx| {
-        // php_register_variable_safe emallocs; under OOM it zend_bailout()s, and a
-        // longjmp over a Rust frame with pending drops is UB. So this frame holds no
-        // owned Rust values across register calls: fixed vars register from static
-        // names and up-stack borrows; everything owned (CONTENT_LENGTH, HTTP_*,
-        // server vars) is built into `pairs` first and registered from a ManuallyDrop
-        // (no drop glue) — a bail leaks one batch instead of corrupting the unwind.
+        // CGI-only callback; the dispatcher path builds no ReqC and never binds a
+        // server context, so a missing one here is a no-op, not an error.
+        let Some(reqc) = ctx.c.as_ref() else { return };
+        // php_register_variable_safe emallocs; under OOM it zend_bailout()s, and
+        // a longjmp over a Rust frame with pending drops is UB. This frame holds
+        // no owned Rust values: fixed vars register from borrows into ReqC,
+        // owned batches go through a ManuallyDrop — a bail leaks one batch
+        // instead of corrupting the unwind.
         let put_bytes = |name: &CStr, val: &[u8]| unsafe {
             php_register_variable_safe(
                 name.as_ptr(),
@@ -310,8 +339,8 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             c"REQUEST_SCHEME",
             if ctx.req.https { "https" } else { "http" },
         );
-        put(c"REMOTE_HOST", &ctx.req.remote_addr);
-        put(c"REMOTE_PORT", &ctx.req.remote_port);
+        put(c"REMOTE_HOST", &reqc.remote_addr);
+        put(c"REMOTE_PORT", &reqc.remote_port);
         // REMOTE_IDENT is optional per CGI/1.1; rapira runs no RFC 1413 ident lookup, so it is empty.
         // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.10
         // https://www.rfc-editor.org/rfc/rfc1413
@@ -320,13 +349,13 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put(c"REQUEST_URI", &ctx.req.uri);
         put(c"QUERY_STRING", &ctx.req.query);
         // borrow the request-lived CString (a lossy conversion would allocate here)
-        put_bytes(c"SCRIPT_FILENAME", ctx.c.script.to_bytes());
+        put_bytes(c"SCRIPT_FILENAME", reqc.script.to_bytes());
         put(c"SCRIPT_NAME", &ctx.req.script_name);
         put(c"SERVER_PROTOCOL", &ctx.req.protocol);
         put(c"SERVER_SOFTWARE", "Rapira");
         put(c"SERVER_NAME", &ctx.req.server_name);
-        put(c"SERVER_PORT", &ctx.req.server_port);
-        put(c"REMOTE_ADDR", &ctx.req.remote_addr);
+        put(c"SERVER_PORT", &reqc.server_port);
+        put(c"REMOTE_ADDR", &reqc.remote_addr);
         put(c"GATEWAY_INTERFACE", "CGI/1.1");
         put(c"HTTPS", if ctx.req.https { "on" } else { "" });
 
@@ -351,12 +380,11 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             put_bytes(c"CONTENT_TYPE", ct);
         }
 
-        // Owned names/values built up front, registered from a ManuallyDrop (see the
-        // bailout note above). Order is load-bearing: php_register_variable_safe is
-        // last-write-wins, so server vars registered last override derived
-        // HTTP_*/CONTENT_LENGTH.
+        // Order is load-bearing: registration is last-write-wins, so server vars
+        // override derived HTTP_*/CONTENT_LENGTH. The folded table (one value
+        // per name) keeps that deterministic for repeated field lines.
         let pairs = cgi_header_vars(
-            &ctx.req.headers,
+            &reqc.folded_headers,
             ctx.req.content_length,
             &ctx.req.server_vars,
         );
@@ -375,8 +403,8 @@ pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) 
 
         let key = unsafe { slice::from_raw_parts(name.cast::<u8>(), name_len) };
         ctx.c
-            .env
-            .get(key)
+            .as_ref()
+            .and_then(|c| c.env.get(key))
             .map_or(null_mut(), |v| v.as_ptr() as *mut c_char)
     })
 }

@@ -1,15 +1,14 @@
 //! How individual context values normalize, adopted from Monolog's
 //! `NormalizerFormatterTest::testFormat` and friends.
 //!
-//! The `#[ignore]`d tests assert Monolog's guarantees, not ours. Each one names a
-//! value that today either loses its type or vanishes outright.
+//! The `#[ignore]`d tests assert Monolog's guarantees for values that lose
+//! their type or vanish without a normalizer.
 
 use tests::app_record;
 use tracing::Level;
 
 /// Monolog testFormat: INF, -INF and NAN normalize to the strings "INF", "-INF"
-/// and "NaN". Measured today: all three encode as `0`, which is the worst kind of
-/// wrong — a plausible number where a sentinel belongs.
+/// and "NaN". Today all three encode as `0`.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn special_floats_keep_their_meaning() {
@@ -24,8 +23,7 @@ fn special_floats_keep_their_meaning() {
 }
 
 /// Monolog testIgnoresInvalidEncoding: undecodable bytes are replaced, the value
-/// survives. Measured today: the whole value becomes `null`, so raw request bytes
-/// disappear entirely rather than degrading.
+/// survives. Today the whole value becomes `null`.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn invalid_utf8_is_substituted_not_dropped() {
@@ -78,9 +76,8 @@ fn resources_render_as_a_type_marker() {
 }
 
 /// Monolog testFormatToStringExceptionHandle: an object whose __toString throws
-/// degrades to an empty value and the record is still produced. This passes today
-/// only because we never call __toString — it must keep passing once we do, which
-/// is exactly why it is not ignored.
+/// degrades to an empty value and the record is still produced. Passes because
+/// __toString is never called; it must keep passing once it is.
 #[test]
 fn a_throwing_tostring_cannot_break_logging() {
     let (level, msg, ctx) = app_record("app_logger/types-objects.php");

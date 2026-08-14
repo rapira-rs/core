@@ -37,24 +37,27 @@ pub fn php_lock_with_ini(ini: &Path) -> sync::MutexGuard<'static, ()> {
 pub fn req(uri: &str, fixture_name: &str) -> Request {
     let query = uri.split_once('?').map(|x: (&str, &str)| x.1);
     Request {
-        remote_port: "8080".into(),
         document_root: String::new(),
         https: false,
         method: "GET".into(),
         uri: uri.into(),
+        target: None,
+        authority: None,
         query: query.unwrap_or("").into(),
         protocol: "HTTP/1.1".into(),
-        remote_addr: "127.0.0.1".into(),
+        remote: php_sys::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
+        server: php_sys::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server_name: "localhost".into(),
-        server_port: "8080".into(),
+        server_port: 8080,
         script_filename: fixture(fixture_name),
         script_name: "/index.php".into(),
         headers: vec![],
         server_vars: vec![],
         content_type: None,
         content_length: 0,
-        body: Box::new(std::io::empty()),
-        received_at: 0.0,
+        body: php_sys::types::Body::Raw(Box::new(std::io::empty())),
+        received_at: None,
+        tls: None,
     }
 }
 

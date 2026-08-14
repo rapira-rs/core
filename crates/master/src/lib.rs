@@ -1,5 +1,5 @@
-//! `rapira_master`: a single-threaded, pre-fork process master. No tokio, no
-//! async, no thread spawns — just `libc` + `std` + the shared-memory scoreboard.
+//! `rapira_master`: a single-threaded, pre-fork process master built on
+//! `libc` + `std` + the shared-memory scoreboard.
 //!
 //! The master boots PHP once (caller side), then forks workers that inherit the
 //! warm image. It supervises them with configurable pool modes (static /

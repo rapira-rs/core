@@ -75,6 +75,22 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// A `rapira-spool-<pid>` entry is reclaimable only when its owner is gone:
+/// kill(pid, 0) probes existence without signaling, and ESRCH means no such
+/// process. EPERM means it exists under another uid — not ours to sweep.
+/// https://man7.org/linux/man-pages/man2/kill.2.html
+fn spool_dir_reclaimable(name: &str) -> bool {
+    let Some(pid) = name
+        .strip_prefix("rapira-spool-")
+        .and_then(|p| p.parse::<i32>().ok())
+        .filter(|&p| p > 0)
+    else {
+        return false;
+    };
+    let gone = unsafe { libc::kill(pid, 0) } == -1;
+    gone && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // Collapse CLI flags, the config file, and defaults into one validated struct. This
     // also resolves the entry script to an absolute path before anything daemonizes; a
@@ -115,6 +131,51 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
             UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
         },
+        // the Drop screen protects the $_SERVER mapping, which only classic
+        // mode builds
+        superglobals: settings.pool.classic,
+    };
+
+    // Spool boot: the root must take a file now, not fail per-request; sweep
+    // spool dirs whose owning process is gone. The dir may be shared (the
+    // default is the system temp dir), so liveness gates the sweep — another
+    // running instance's dirs stay.
+    let uploads = &settings.http.uploads;
+    std::fs::create_dir_all(&uploads.dir)
+        .map_err(|e| anyhow::anyhow!("creating http.uploads.dir {}: {e}", uploads.dir.display()))?;
+    let probe = uploads
+        .dir
+        .join(format!(".rapira-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"").map_err(|e| {
+        anyhow::anyhow!(
+            "http.uploads.dir {} is not writable: {e}",
+            uploads.dir.display()
+        )
+    })?;
+    let _ = std::fs::remove_file(&probe);
+    match std::fs::read_dir(&uploads.dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                if !spool_dir_reclaimable(&entry.file_name().to_string_lossy()) {
+                    continue;
+                }
+                let path = entry.path();
+                if let Err(e) = std::fs::remove_dir_all(&path) {
+                    tracing::warn!(target: "rapira", "sweeping spool dir {}: {e}", path.display());
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(target: "rapira", "listing {} for the spool sweep: {e}", uploads.dir.display());
+        }
+    }
+    let upload_limits = rapira_runtime::multipart::Limits {
+        dir: uploads.dir.clone(),
+        max_file_size: uploads.max_file_size,
+        max_field_size: uploads.max_field_size,
+        max_files: uploads.max_files,
+        max_parts: uploads.max_parts,
+        max_part_headers: uploads.max_part_headers,
     };
 
     // Extensions are compiled in; register the HTTP front (and any others) here, each
@@ -183,7 +244,14 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
         rapira_master::run(cfg, scoreboard, move |env: rapira_master::WorkerEnv| {
             let host: ExtensionRuntime = host_cell.take().expect("fresh child owns the host copy");
-            worker::worker_body(env, host, mode.clone(), script.clone(), max_requests)
+            worker::worker_body(
+                env,
+                host,
+                mode.clone(),
+                script.clone(),
+                max_requests,
+                upload_limits.clone(),
+            )
         });
 
     match stop {
@@ -196,5 +264,31 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             tracing::error!(target: "rapira", "master failed: {e:#}");
             std::process::exit(rapira_master::MASTER_EXIT_FAILBOOT);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spool_dir_reclaimable;
+
+    /// The sweep must only reclaim dirs whose owning process is gone: foreign
+    /// names, malformed pids, and live processes (this one) all stay.
+    #[test]
+    fn spool_sweep_reclaims_only_dead_pid_dirs() {
+        assert!(!spool_dir_reclaimable("other-dir"));
+        assert!(!spool_dir_reclaimable("rapira-spool-"));
+        assert!(!spool_dir_reclaimable("rapira-spool-x"));
+        assert!(!spool_dir_reclaimable("rapira-spool--5"));
+        // pid 0 signals the whole process group; never probe it
+        assert!(!spool_dir_reclaimable("rapira-spool-0"));
+        let live = std::process::id();
+        assert!(!spool_dir_reclaimable(&format!("rapira-spool-{live}")));
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived child");
+        let dead = child.id();
+        let _ = child.wait();
+        assert!(spool_dir_reclaimable(&format!("rapira-spool-{dead}")));
     }
 }

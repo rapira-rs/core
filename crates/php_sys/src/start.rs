@@ -40,6 +40,12 @@ impl Drop for PhpModule {
 
 pub struct Rapira {
     pub(crate) intake: Option<Intake>,
+    /// The mode serves superglobals per job (classic/worker); the dispatcher
+    /// path skips the whole ReqC materialization.
+    pub(crate) superglobals: bool,
+    /// Exchange-style delivery (`Mode::Dispatcher`); the handle carries it so
+    /// the runtime never re-derives the mode.
+    pub(crate) dispatcher: bool,
     worker: Option<JoinHandle<()>>,
     board: Option<rapira_scoreboard::Scoreboard>,
     module: Option<PhpModule>,
@@ -67,7 +73,6 @@ impl Rapira {
         Ok(PhpModule {})
     }
 
-    // worker side part
     pub fn start_worker(mode: Mode, hooks: WorkerHooks) -> anyhow::Result<Self> {
         let WorkerHooks {
             max_requests,
@@ -90,6 +95,10 @@ impl Rapira {
             pending: pending.clone(),
         };
 
+        // $_SERVER is a per-job build for classic (and the future worker arm);
+        // the dispatcher path never reads it.
+        let superglobals = matches!(mode, Mode::Classic);
+        let dispatcher = matches!(mode, Mode::Dispatcher(_));
         // SAFETY: safe, trust me, I'm a developer
         unsafe {
             crate::rapira_mode = match &mode {
@@ -113,6 +122,8 @@ impl Rapira {
 
         Ok(Self {
             intake: Some(intake),
+            superglobals,
+            dispatcher,
             worker: Some(worker),
             board,
             module: None,
@@ -164,7 +175,7 @@ impl Drop for Rapira {
         }
 
         let _ = worker.join();
-        // Fused: module teardown, same order as before the split; worker flavor: no-op.
+        // Module teardown; the worker flavor holds no module and no-ops.
         drop(self.module.take());
     }
 }
@@ -191,17 +202,12 @@ fn worker_main(mode: Mode, rx: JobRx) {
     }
 }
 
+/// Untimed pull as a plain Option; Closed maps to None.
 pub(crate) fn pull_job() -> Option<Job> {
-    JOB_RX.with_borrow_mut(|slot| {
-        let job_r = slot.as_mut()?;
-        sb_update(Event::Idle);
-        let job = job_r.rx.recv().ok();
-        if job.is_some() {
-            job_r.pending.fetch_sub(1, Ordering::Relaxed);
-            sb_update(Event::Active);
-        }
-        job
-    })
+    match pull_job_wait(None) {
+        Pulled::Job(job) => Some(*job),
+        _ => None,
+    }
 }
 
 pub(crate) enum Pulled {
@@ -212,7 +218,9 @@ pub(crate) enum Pulled {
     Closed,
 }
 
-/// receive(-1) / receive(n): block up to `timeout` (None = forever).
+/// receive(-1) / receive(n): block up to `timeout` (None = forever). Idle
+/// covers only the park; control returns to PHP as Active on every arm, or the
+/// master watchdog would skip a worker spinning after a no-unit return.
 pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
     JOB_RX.with_borrow_mut(|slot| {
         let Some(job_r) = slot.as_mut() else {
@@ -223,10 +231,10 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
             None => job_r.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
             Some(t) => job_r.rx.recv_timeout(t),
         };
+        sb_update(Event::Active);
         match got {
             Ok(job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                sb_update(Event::Active);
                 Pulled::Job(Box::new(job))
             }
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
@@ -235,7 +243,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
     })
 }
 
-/// tryReceive() / receive(0): never blocks. Idle is reported here too — a
+/// tryReceive() / receive(0): never blocks. The Idle/Active pair still runs — a
 /// polling worker must refresh last_activity_ms or the master watchdog
 /// TERMs it as a stuck request (master/src/events.rs:509-517).
 pub(crate) fn pull_job_try() -> Pulled {
@@ -244,10 +252,11 @@ pub(crate) fn pull_job_try() -> Pulled {
             return Pulled::Closed;
         };
         sb_update(Event::Idle);
-        match job_r.rx.try_recv() {
+        let got = job_r.rx.try_recv();
+        sb_update(Event::Active);
+        match got {
             Ok(job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                sb_update(Event::Active);
                 Pulled::Job(Box::new(job))
             }
             Err(TryRecvError::Empty) => Pulled::Empty,

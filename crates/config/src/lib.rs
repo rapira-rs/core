@@ -175,6 +175,22 @@ pub struct HttpSettings {
     /// Bytes, converted from the config's `max_body_size_mb`.
     pub max_body_size: usize,
     pub unsafe_field_names: UnsafeFieldNames,
+    pub uploads: UploadSettings,
+}
+
+/// Multipart limits and the spool root (`[http.uploads]`); past a limit the
+/// host answers 413 before dispatch.
+#[derive(Debug)]
+pub struct UploadSettings {
+    /// Spool root for file parts; workers spool into a per-pid subdirectory.
+    pub dir: PathBuf,
+    /// Bytes, from `max_file_size_mb`.
+    pub max_file_size: u64,
+    /// Bytes, from `max_field_size_kb`.
+    pub max_field_size: usize,
+    pub max_files: usize,
+    pub max_parts: usize,
+    pub max_part_headers: usize,
 }
 
 /// What to do with a request field whose name reaches a CGI variable another name owns:
@@ -243,6 +259,19 @@ struct HttpSection {
     /// Unrecognised values are a boot error, not a silent fall back to the default —
     /// a security knob that survives a typo is worse than one that refuses to start.
     unsafe_field_names: Option<UnsafeFieldNames>,
+    #[serde(default)]
+    uploads: UploadsSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UploadsSection {
+    dir: Option<String>,
+    max_file_size_mb: Option<u64>,
+    max_field_size_kb: Option<usize>,
+    max_files: Option<usize>,
+    max_parts: Option<usize>,
+    max_part_headers: Option<usize>,
 }
 
 /// One pool table as written. Embedded by name — never `#[serde(flatten)]`, which
@@ -353,6 +382,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow::anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
 
+    let uploads = resolve_uploads(file.http.uploads, config_dir)?;
     let pool = resolve_pool(file.pool, &cli, config_dir, "pool")?;
     let supervisor = resolve_supervisor(file.supervisor, config_dir)?;
     let log = resolve_log(file.log)?;
@@ -367,10 +397,57 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
             server_port,
             max_body_size,
             unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
+            uploads,
         },
         pool,
         supervisor,
         log,
+    })
+}
+
+/// Path/limit resolution only; the binary probes the directory at boot.
+fn resolve_uploads(
+    section: UploadsSection,
+    config_dir: Option<&Path>,
+) -> anyhow::Result<UploadSettings> {
+    let dir = match section.dir.filter(|d| !d.is_empty()) {
+        Some(d) => config_relative(config_dir, &d)?,
+        None => std::env::temp_dir(),
+    };
+    let max_file_size_mb = section.max_file_size_mb.unwrap_or(2);
+    if max_file_size_mb == 0 {
+        bail!("http.uploads.max_file_size_mb must be at least 1");
+    }
+    let max_file_size = max_file_size_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+        anyhow::anyhow!("http.uploads.max_file_size_mb {max_file_size_mb} is too large")
+    })?;
+    let max_field_size_kb = section.max_field_size_kb.unwrap_or(256);
+    if max_field_size_kb == 0 {
+        bail!("http.uploads.max_field_size_kb must be at least 1");
+    }
+    let max_field_size = max_field_size_kb.checked_mul(1024).ok_or_else(|| {
+        anyhow::anyhow!("http.uploads.max_field_size_kb {max_field_size_kb} is too large")
+    })?;
+    let max_parts = section.max_parts.unwrap_or(1024);
+    if max_parts == 0 {
+        bail!("http.uploads.max_parts must be at least 1");
+    }
+    let max_part_headers = section.max_part_headers.unwrap_or(32);
+    if max_part_headers == 0 {
+        bail!("http.uploads.max_part_headers must be at least 1");
+    }
+    let max_files = section.max_files.unwrap_or(20);
+    if max_files == 0 {
+        // zero would 413 every file part while the server boots clean
+        bail!("http.uploads.max_files must be at least 1");
+    }
+    Ok(UploadSettings {
+        dir,
+        max_file_size,
+        max_field_size,
+        max_files,
+        max_parts,
+        max_part_headers,
     })
 }
 
@@ -667,7 +744,7 @@ mod tests {
         assert!(load_str("[pool]\nbogus = 1\n").is_err());
         assert!(load_str("[nope]\nx = 1\n").is_err());
         assert!(load_str("[supervisor]\nbogus = 1\n").is_err());
-        // pre-1.0 renames: the old keys and tables are gone, not aliased
+        // removed keys and tables are errors, not aliases
         assert!(load_str("[pool]\nthreads = 1\n").is_err());
         assert!(load_str("[pm]\nmode = \"static\"\n").is_err());
         // every key has exactly one home
@@ -736,6 +813,37 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("pool.processes must be at least 1"), "{err}");
+    }
+
+    /// `[http.uploads]` resolves every knob (with unit conversion, dir relative
+    /// to the config) and rejects a zero max_files like its siblings — zero
+    /// would 413 every file part while booting clean.
+    #[test]
+    fn http_uploads_resolve_and_reject_zero_files() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http.uploads]\ndir = \"spool\"\n\
+             max_file_size_mb = 3\nmax_field_size_kb = 7\nmax_files = 4\n\
+             max_parts = 9\nmax_part_headers = 5\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let u = &s.http.uploads;
+        assert_eq!(u.dir, Path::new("/w/spool"));
+        assert_eq!(u.max_file_size, 3 * 1024 * 1024);
+        assert_eq!(u.max_field_size, 7 * 1024);
+        assert_eq!(u.max_files, 4);
+        assert_eq!(u.max_parts, 9);
+        assert_eq!(u.max_part_headers, 5);
+
+        let file =
+            load_str("[pool]\nentrypoint = \"a.php\"\n[http.uploads]\nmax_files = 0\n").unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("http.uploads.max_files must be at least 1"),
+            "{err}"
+        );
     }
 
     /// `ondemand` and `static` share one match arm: the arm still has to tell them

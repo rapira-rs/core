@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 /// hardcoded `RUST_LOG=info` keeps governing the filter: the config owns the
 /// format, the env owns the filter.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn json_format_shapes_the_log() {
     let srv = spawn_with_config("shared/echo-worker.php", 1, "[log]\nformat = \"json\"\n");
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
@@ -51,7 +51,7 @@ fn json_format_shapes_the_log() {
 /// Default `[log]`: the plain format on a redirected (non-tty) stderr keeps the
 /// human shape and emits no ANSI escapes.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn plain_format_is_uncolored_when_redirected() {
     let srv = spawn_with_config("shared/echo-worker.php", 1, "");
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
@@ -79,11 +79,11 @@ fn plain_format_is_uncolored_when_redirected() {
     }
 }
 
-/// With the implicit php-floor rule gone, `[log.targets] php = "warn"` is what
-/// makes PHP diagnostics visible again: `level = "error"` alone hides them.
-/// Runs without `RUST_LOG` so the config owns the filter.
+/// `[log.targets] php = "warn"` is what makes PHP diagnostics visible;
+/// `level = "error"` alone hides them. Runs without `RUST_LOG` so the config
+/// owns the filter.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn log_targets_php_restores_php_diagnostics() {
     let srv = spawn_without_rust_log("logging/warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
@@ -124,7 +124,7 @@ fn log_targets_php_restores_php_diagnostics() {
 /// knob. The same `level = "error"` that hides the PHP warning in
 /// [`log_targets_php_restores_php_diagnostics`] lets it through under `RUST_LOG=info`.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn rust_log_replaces_the_config_filter() {
     let srv = spawn_with_config("logging/warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");

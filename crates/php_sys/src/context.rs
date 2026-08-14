@@ -48,16 +48,19 @@ pub(crate) fn unbind_server_context() {
 }
 
 pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
+    // CGI-only: the SAPI pointers below live in ReqC, which the dispatcher path
+    // never builds (it binds no server context either).
+    let Some(reqc) = ctx.c.as_ref() else { return };
     let sg = unsafe { &mut *rapira_sg() };
     // the engine never resets the previous request status (the reset in sapi_activate()
     // is commented out in php-src, main/SAPI.c:435-437)
     sg.sapi_headers.http_response_code = 200;
     let ri: &mut sapi_request_info = &mut sg.request_info;
-    ri.request_method = ctx.c.method.as_ptr();
-    ri.query_string = ctx.c.query.as_ptr() as *mut c_char;
-    ri.request_uri = ctx.c.uri.as_ptr() as *mut c_char;
-    ri.path_translated = ctx.c.script.as_ptr() as *mut c_char;
-    ri.content_type = ctx.c.ctype.as_ref().map_or(null(), |s| s.as_ptr());
+    ri.request_method = reqc.method.as_ptr();
+    ri.query_string = reqc.query.as_ptr() as *mut c_char;
+    ri.request_uri = reqc.uri.as_ptr() as *mut c_char;
+    ri.path_translated = reqc.script.as_ptr() as *mut c_char;
+    ri.content_type = reqc.ctype.as_ref().map_or(null(), |s| s.as_ptr());
     ri.content_length = ctx.req.content_length;
     ri.proto_num = match ctx.req.protocol.as_str() {
         "HTTP/1.0" => 1000,
@@ -72,8 +75,7 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     // so sapi_deactivate_module -> efree auth. NULL-safe (main.c guards `auth`).
     unsafe {
         php_handle_auth_data(
-            ctx.c
-                .authorization
+            reqc.authorization
                 .as_ref()
                 .map_or(null(), |auth| auth.as_ptr()),
         )

@@ -1,7 +1,7 @@
 //! Pool scaling decisions: dynamic per-tick spawn/trim and the
 //! ondemand arming invariant. Pure logic for idle-server maintenance (spare
-//! thresholds, spawn-rate doubling) plus the ondemand suppression state we hold
-//! in place of an edge-triggered event backend.
+//! thresholds, spawn-rate doubling) plus ondemand suppression state standing
+//! in for an edge-triggered event backend.
 
 /// Ceiling on the doubling spawn-burst counter; not configurable.
 pub(crate) const MAX_SPAWN_RATE: u32 = 32;

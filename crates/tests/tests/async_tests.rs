@@ -2,7 +2,7 @@ use php_sys::{Mode, Rapira};
 use tests::{drain_async, fixture, php_lock_async, req};
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn hello_world_worker() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
     let r = Rapira::start(Mode::Dispatcher(fixture("shared/worker.php")))?;
@@ -18,7 +18,7 @@ async fn hello_world_worker() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn worker_request_isolation() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
     let r = Rapira::start(Mode::Dispatcher(fixture("shared/leak-worker.php")))?;
@@ -43,7 +43,7 @@ async fn worker_request_isolation() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn worker_survives_exit() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
@@ -90,7 +90,7 @@ async fn worker_survives_exit() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn fibers_stress_worker() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
@@ -112,7 +112,7 @@ async fn fibers_stress_worker() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
@@ -165,7 +165,7 @@ async fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn many_producers_test() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
@@ -208,7 +208,7 @@ async fn many_producers_test() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn worker_basic_auth() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
@@ -245,7 +245,7 @@ async fn worker_basic_auth() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn server_variables() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
@@ -259,7 +259,7 @@ async fn server_variables() -> anyhow::Result<()> {
     request.method = "POST".into();
     request.content_type = Some("text/plain".into());
     request.content_length = 3;
-    request.body = Box::new(std::io::Cursor::new(b"foo".to_vec()));
+    request.body = php_sys::types::Body::Raw(Box::new(std::io::Cursor::new(b"foo".to_vec())));
     request
         .headers
         .push(("Authorization".into(), "Basic dmFsZXJ5OnBhc3N3b3Jk".into()));
@@ -293,7 +293,7 @@ async fn server_variables() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn worker_finish_request() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
@@ -343,7 +343,7 @@ async fn worker_finish_request() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn getenv_worker() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
     unsafe {
@@ -360,7 +360,7 @@ async fn getenv_worker() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn scoreboard_counts_worker() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
     let r = Rapira::start(Mode::Dispatcher(fixture("shared/throw-worker.php")))?;
@@ -381,7 +381,7 @@ async fn scoreboard_counts_worker() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 async fn worker_session_isolation() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
     let r = Rapira::start(Mode::Dispatcher(fixture("shared/session-worker.php")))?;
@@ -394,7 +394,7 @@ async fn worker_session_isolation() -> anyhow::Result<()> {
     assert_eq!(s1, 200);
     assert_eq!(s2, 200);
     assert!(b1.contains("n=0"), "req1 fresh session (got: {b1:?})");
-    // without the fix: session_status stays active + $_SESSION leaks -> req2 sees n=1
+    // session_status and $_SESSION must reset between jobs
     assert!(
         b2.contains("n=0"),
         "session must reset between worker requests (got: {b2:?})"

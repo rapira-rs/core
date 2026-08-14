@@ -41,11 +41,10 @@ zend_class_entry *rapira_ce_http_head_not_written_error;
 zend_class_entry *rapira_ce_http_content_length_exceeded_error;
 zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 
-// return ext_functions from rapira_arginfo.h
 const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
-// we need to protect a copy
-static zend_object_handlers rapira_host_handlers;
 
+// own copies: std_object_handlers is shared engine state
+static zend_object_handlers rapira_host_handlers;
 static zend_object_handlers rapira_exchange_handlers;
 static zend_object_handlers rapira_info_handlers;
 
@@ -58,8 +57,7 @@ static zend_object *rapira_exchange_create(zend_class_entry *ce) {
     return &obj->std;
 }
 
-// the job here is a rust owned box
-// a php release should pass it to rust, safe rust :)
+// job is a Rust Box; free_obj hands it back to Rust to drop
 static void rapira_exchange_free(zend_object *std) {
     rapira_exchange_obj *obj = rapira_exchange_from(std);
     if (obj->job != NULL) {
@@ -81,8 +79,6 @@ static zend_object *rapira_dispatcher_info_create(zend_class_entry *ce) {
     return &obj->std;
 }
 
-// don't know if it is a good idea to have that big method.
-// if it'll become a problem -> split into smaller ones
 void rapira_register_classes(void) {
     zend_class_entry *throwable =
         register_class_Rapira_Exception_RapiraThrowable(zend_ce_throwable);
@@ -109,7 +105,7 @@ void rapira_register_classes(void) {
     rapira_ce_dispatcher_info = register_class_Rapira_DispatcherInfo();
     rapira_ce_dispatcher = register_class_Rapira_Dispatcher();
 
-    // http stuff
+    // http
     rapira_ce_inet_address = register_class_Rapira_InetAddress();
     rapira_ce_unix_address = register_class_Rapira_UnixAddress();
     rapira_ce_http_tls = register_class_Rapira_Http_Tls();
@@ -146,13 +142,8 @@ void rapira_register_classes(void) {
     rapira_ce_internal_http_exchange =
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
 
-    // preventing cloning of internal objects
-    // clone_call = zobj->handlers->clone_obj;
-    // if (UNEXPECTED(clone_call == NULL)) {
-    //     zend_throw_error(NULL, "Trying to clone an uncloneable object of
-    //     class %s", ...);
-    // adaptation of the zend_compile.c:2070
-    // /Zend/zend_vm_def.h:6050-6056,
+    // clone_obj = NULL makes the engine throw "Trying to clone an uncloneable
+    // object" for these host-created classes (Zend/zend_vm_def.h:6050-6056)
     memcpy(&rapira_host_handlers, &std_object_handlers,
            sizeof(rapira_host_handlers));
     rapira_host_handlers.clone_obj = NULL;
@@ -163,7 +154,7 @@ void rapira_register_classes(void) {
            sizeof(rapira_exchange_handlers));
     rapira_exchange_handlers.clone_obj = NULL;
     rapira_exchange_handlers.offset = RAPIRA_STD_OFFSET(rapira_exchange_obj);
-    // we need our own free function to handle the job pointer free
+    // free_obj must release the Rust job pointer
     rapira_exchange_handlers.free_obj = rapira_exchange_free;
     rapira_ce_internal_http_exchange->create_object = rapira_exchange_create;
     rapira_ce_internal_http_exchange->default_object_handlers =

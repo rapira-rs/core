@@ -15,10 +15,38 @@ use crate::{
 // never holds more than one message.
 const FRAME_CAP: usize = 1;
 
+/// How long a request may wait for an intake slot before it is shed.
+const INTAKE_WAIT: Duration = Duration::from_secs(30);
+
+/// Why a job could not be handed to the pool. Typed so the front can answer
+/// 503 for shedding instead of blaming a gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleError {
+    /// The intake stayed full for the whole wait budget.
+    Saturated,
+    /// The pool is gone: draining or stopped.
+    Stopped,
+}
+
+impl std::fmt::Display for HandleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Saturated => write!(f, "worker pool saturated for {INTAKE_WAIT:?}"),
+            Self::Stopped => write!(f, "worker pool stopped"),
+        }
+    }
+}
+
+impl std::error::Error for HandleError {}
+
 #[derive(Clone)]
 pub struct RapiraHandle {
     intake: SyncSender<Job>,
     pending: Arc<AtomicUsize>,
+    /// The pool serves superglobals ($_SERVER): Context materializes ReqC.
+    superglobals: bool,
+    /// Exchange-style delivery (`Mode::Dispatcher`).
+    dispatcher: bool,
 }
 
 impl Rapira {
@@ -30,6 +58,8 @@ impl Rapira {
         Ok(RapiraHandle {
             intake: intake.tx.clone(),
             pending: intake.pending.clone(),
+            superglobals: self.superglobals,
+            dispatcher: self.dispatcher,
         })
     }
 }
@@ -41,77 +71,88 @@ fn now_unix_f64() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Holds the `pending` increment until the job is accepted: Drop decrements, a
+/// successful hand-off disarms. Give-up, disconnect and a panicking blocking
+/// task all share the one decrement path.
+struct PendingGuard(Option<Arc<AtomicUsize>>);
+
+impl PendingGuard {
+    fn arm(pending: &Arc<AtomicUsize>) -> Self {
+        pending.fetch_add(1, Ordering::Relaxed);
+        Self(Some(pending.clone()))
+    }
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if let Some(pending) = self.0.take() {
+            pending.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 impl RapiraHandle {
+    /// Exchange-style delivery: the host parses multipart before enqueue.
+    pub fn dispatcher(&self) -> bool {
+        self.dispatcher
+    }
+
     // pending is a diagnostic gauge (Dispatcher::getInfo) — Relaxed. Incremented
     // before the send, decremented on give-up: the consumer decrements as soon
     // as it wakes, so the reverse order could wrap the counter below zero.
-    pub async fn handle(&self, mut req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
-        req.received_at = now_unix_f64();
+    pub async fn handle(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+        // a plugin-stamped ingress time wins; this is the fallback for producers
+        // that have none (tests preset it to pin the value)
+        req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        let job = Job {
-            ctx: Context::new(req, tx),
+        let mut job = Job {
+            ctx: Context::new(req, tx, self.superglobals),
         };
-        self.pending.fetch_add(1, Ordering::Relaxed);
-        match self.intake.try_send(job) {
-            Ok(()) => {}
-            Err(TrySendError::Full(job)) => {
-                let tx2 = self.intake.clone();
-                let pending = self.pending.clone();
-                let sent = tokio::task::spawn_blocking(move || {
-                    // Bounded: spawn_blocking tasks cannot be cancelled and the
-                    // runtime's Drop waits for them, so an unbounded park could
-                    // hang worker shutdown.
-                    // https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html
-                    let deadline = Instant::now() + Duration::from_secs(30);
-                    let mut job = job;
-                    loop {
-                        match tx2.try_send(job) {
-                            Ok(()) => return true,
-                            Err(TrySendError::Full(j)) => {
-                                if Instant::now() > deadline {
-                                    // the closure owns the give-up decrement:
-                                    // the awaiting future may already be
-                                    // cancelled, this code always runs
-                                    pending.fetch_sub(1, Ordering::Relaxed);
-                                    return false;
-                                }
-                                job = j;
-                                std::thread::sleep(Duration::from_millis(1));
-                            }
-                            Err(TrySendError::Disconnected(_)) => {
-                                pending.fetch_sub(1, Ordering::Relaxed);
-                                return false;
-                            }
-                        }
-                    }
-                })
-                .await;
-                if !matches!(sent, Ok(true)) {
-                    return Err(anyhow!("worker pool stopped or saturated"));
+        let pending = PendingGuard::arm(&self.pending);
+        // Async try_send/sleep instead of a blocking send: the wait cancels with
+        // the client (the job then drops undelivered and its Frame sender with
+        // it) and parks no blocking-pool thread.
+        let deadline = Instant::now() + INTAKE_WAIT;
+        loop {
+            match self.intake.try_send(job) {
+                Ok(()) => {
+                    pending.disarm();
+                    return Ok(rx);
                 }
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                self.pending.fetch_sub(1, Ordering::Relaxed);
-                return Err(anyhow!("worker pool stopped"));
+                Err(TrySendError::Full(j)) => {
+                    if Instant::now() > deadline {
+                        tracing::warn!(
+                            target: "rapira",
+                            "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
+                            self.pending.load(Ordering::Relaxed)
+                        );
+                        return Err(HandleError::Saturated);
+                    }
+                    job = j;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(TrySendError::Disconnected(_)) => return Err(HandleError::Stopped),
             }
         }
-        Ok(rx)
     }
 
-    pub fn handle_blocking(&self, mut req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
-        req.received_at = now_unix_f64();
+    pub fn handle_blocking(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+        req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        self.pending.fetch_add(1, Ordering::Relaxed);
+        let pending = PendingGuard::arm(&self.pending);
         if self
             .intake
             .send(Job {
-                ctx: Context::new(req, tx),
+                ctx: Context::new(req, tx, self.superglobals),
             })
             .is_err()
         {
-            self.pending.fetch_sub(1, Ordering::Relaxed);
-            return Err(anyhow!("worker pool stopped"));
+            return Err(HandleError::Stopped);
         }
+        pending.disarm();
         Ok(rx)
     }
 }

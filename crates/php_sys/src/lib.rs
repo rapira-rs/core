@@ -8,6 +8,7 @@ pub mod diagnostics;
 pub mod dispatcher;
 pub mod exchange;
 pub mod executor;
+pub(crate) mod fold;
 pub mod handler;
 pub mod module;
 pub mod quota;
@@ -15,11 +16,13 @@ pub mod rapira_worker;
 pub mod scoreboard;
 pub mod start;
 pub mod types;
+pub mod values;
+pub(crate) mod zend;
 
 use std::ffi::c_int;
 
 pub use bindings::*;
-pub use handler::RapiraHandle;
+pub use handler::{HandleError, RapiraHandle};
 pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira};
 pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};

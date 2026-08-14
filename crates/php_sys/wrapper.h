@@ -20,6 +20,7 @@
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
 #endif
+#include <ext/json/php_json.h>
 #include <Zend/zend_observer.h>
 #include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
@@ -35,56 +36,68 @@ void rapira_release_temporary_streams(void);
 int rapira_request_activate(void);
 int rapira_request_shutdown(void);
 size_t rapira_ub_write(const char *str, size_t len);
+// array_init_size and smart_str_free are macro/inline-only; shims for the
+// Rust builders
+void rapira_array_init(zval *zv, uint32_t size);
+void rapira_smart_str_free(smart_str *s);
 
-// RunMode in start.rs - keep in sync
+// Mode in types.rs, mapped in start.rs (start_worker) - keep in sync
 enum {
     RAPIRA_MODE_CLASSIC = 0,
     RAPIRA_MODE_WORKER = 1,
     RAPIRA_MODE_DISPATCHER = 2,
-    RAPIRA_MODE_DISPATCHER_ASYNC = 3,
 };
 extern int rapira_mode;
 
-enum {
-    RAPIRA_RECV_OK = 0,
-    RAPIRA_RECV_TIMEOUT = 1,
-    RAPIRA_RECV_EMPTY = 2,
-    RAPIRA_RECV_CLOSED = 3,
-    RAPIRA_RECV_BUSY = 4,
-};
-
-enum {
-    RAPIRA_VERB_OK = 0,
-    RAPIRA_VERB_FINALIZED = 1,
-    RAPIRA_VERB_DISCARDED = 2,
-    RAPIRA_VERB_HEAD_WRITTEN = 3,
-    RAPIRA_VERB_INTERIM = 4,
-    RAPIRA_VERB_INVALID = 5,
-    RAPIRA_VERB_OVERFLOW = 6,
-};
-
-// Non-owning (ptr,len) view; the bytes belong to whichever side filled it and
-// stay valid only for the current call unless documented otherwise. Keep in
-// sync with RapiraStr / RapiraRequestView in exchange.rs (#[repr(C)]).
+// Object layouts with embedded C data, declared here so bindgen generates them
+// and Rust reads named fields instead of a hardcoded offset.
+// https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
+// +---------------------+  <- true allocation start
+// | void *job           |     invisible to PHP
+// | zval request        |
+// +---------------------+  <- +RAPIRA_STD_OFFSET(rapira_exchange_obj)
+// | zend_object std     |  <- THE pointer everyone else holds
+// +---------------------+
 typedef struct {
-    const char *ptr;
-    size_t len;
-} rapira_str;
+    void *job; // Box<ExchangeState> -> owned by Rust, NULLing when released
+    zval request; // cached Rapira\Http\Request; IS_UNDEF until getRequest()
+    zend_object std;
+} rapira_exchange_obj;
 
 typedef struct {
-    rapira_str method;
-    rapira_str uri;
-    rapira_str target;
-    rapira_str authority; // ptr NULL: request named none
-    rapira_str protocol;
-    rapira_str body;
-    rapira_str remote_ip;
-    rapira_str server_ip;
-    int32_t remote_port; // 0: not an IP endpoint
-    int32_t server_port;
-    double received_at;
-    size_t header_count;
-} rapira_request_view;
+    zend_long pending;
+    zend_long active;
+    zend_object std;
+} rapira_dispatcher_info_obj;
+
+// Class entries, MINIT-written (rapira_register_classes). Rust binds them as
+// static muts; all are assigned before any object of these classes can exist.
+// rapira.stub.php
+extern zend_class_entry *rapira_ce_log_level;
+extern zend_class_entry *rapira_ce_work;
+extern zend_class_entry *rapira_ce_dispatcher_info;
+extern zend_class_entry *rapira_ce_dispatcher;
+// exceptions
+extern zend_class_entry *rapira_ce_closed_exception;
+extern zend_class_entry *rapira_ce_timeout_exception;
+extern zend_class_entry *rapira_ce_work_discarded_exception;
+extern zend_class_entry *rapira_ce_not_in_worker_mode_error;
+extern zend_class_entry *rapira_ce_already_finalized_error;
+// http
+extern zend_class_entry *rapira_ce_http_tls;
+extern zend_class_entry *rapira_ce_http_multipart;
+extern zend_class_entry *rapira_ce_internal_http_dispatcher;
+extern zend_class_entry *rapira_ce_inet_address;
+extern zend_class_entry *rapira_ce_unix_address;
+extern zend_class_entry *rapira_ce_internal_http_exchange;
+extern zend_class_entry *rapira_ce_internal_http_dispatcher_info;
+extern zend_class_entry *rapira_ce_http_head_already_written_error;
+extern zend_class_entry *rapira_ce_http_head_not_written_error;
+extern zend_class_entry *rapira_ce_http_content_length_exceeded_error;
+extern zend_class_entry *rapira_ce_http_file_not_sendable_exception;
+extern zend_class_entry *rapira_ce_http_form_field;
+extern zend_class_entry *rapira_ce_http_uploaded_file;
+extern zend_class_entry *rapira_ce_http_request;
 
 void rapira_receive_untimed(void);
 void rapira_receive_timed(void);

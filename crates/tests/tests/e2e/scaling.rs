@@ -2,7 +2,7 @@ use crate::harness::*;
 use std::time::{Duration, Instant};
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn dynamic_scales_up_down() {
     // `pool.processes` is the ceiling (max children); dynamic keeps
     // min_spare..max_spare idle.
@@ -28,7 +28,7 @@ fn dynamic_scales_up_down() {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn ondemand_spawns_on_connect() {
     let srv = spawn_with_config(
         "shared/echo-worker.php",

@@ -18,7 +18,7 @@ function nest(int $depth): int
 $handler = static function (): void {
 	$sum = 0;
 
-	// 1) 300 independent fibers, each entering, recursing, and suspending twice.
+	// 300 independent fibers, each entering, recursing, and suspending twice.
 	//    Every start/resume crosses the fiber<->worker stack boundary.
 	for ($i = 0; $i < 300; $i++) {
 		$f = new Fiber(function (): int {
@@ -34,11 +34,11 @@ $handler = static function (): void {
 	}
 	// sum = 300 * 755 = 226500
 
-	// 2) 25 deeply nested fibers — 25 fiber stacks stacked at once.
+	// 25 deeply nested fibers — 25 fiber stacks stacked at once.
 	$sum += nest(25);                     // +144
 
 	header('Content-Type: text/plain');
-	echo "fibers ok sum=$sum\n";          // 22
+	echo "fibers ok sum=$sum\n";          // 226644
 };
 
 // Resident loop: each iteration handles one request through $handler.

@@ -996,8 +996,8 @@ mod tests {
         let mut m = test_master(6, PoolMode::Static);
         let t0 = Instant::now();
         m.table.generation = 1;
-        // A current-gen worker is already up; the drained old worker has been
-        // removed from the table (reaped). No old-gen workers remain.
+        // Current-gen worker up, drained old worker already reaped: no old-gen
+        // workers left.
         push_proc(&mut m, P_NEW, 0, 1, t0);
         let drained = WorkerProc {
             pid: P_OLD0,

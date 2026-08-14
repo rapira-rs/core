@@ -3,18 +3,17 @@ use std::path::Path;
 use php_sys::{Mode, Rapira};
 use tests::{drain, fixture, php_lock_with_ini, req};
 
-// A bailing save handler bails inside rapira_reset_session. The longjmp skips the observer
-// end handlers of every frame it abandons; unless rapira_request_teardown closes them,
-// EG(current_observed_frame) keeps pointing at VM-stack slots the PHP worker loop frees the
-// moment HttpHandler::handleRequest returns, and zend_observer_fcall_end_all() walks into them
-// at cycle end. Pre-fix: SIGSEGV (release) / a spin inside end_all (debug).
+// A bailing save handler bails inside rapira_reset_session. The longjmp skips
+// the observer end handlers of every frame it abandons; rapira_request_teardown
+// must close them, or EG(current_observed_frame) points at VM-stack slots the
+// worker loop frees and zend_observer_fcall_end_all() walks into them at cycle
+// end.
 //
-// Own binary, own ini: PHPRC is process-global, and zend_test's markers must stay OFF here -
-// printing them perturbs the arena enough to hide the fault. Needs --enable-zend-test;
-// without it the observer API never registers and this degrades to a plain session test.
+// Own binary, own ini: PHPRC is process-global and zend_test's markers must
+// stay off — printing them hides the fault. Needs --enable-zend-test.
 // https://github.com/php/php-src/pull/5857
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()> {
     let _guard = php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),

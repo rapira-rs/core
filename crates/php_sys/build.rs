@@ -107,8 +107,8 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn macos_sysroot(bindings: bindgen::Builder) -> bindgen::Builder {
-    // The libclang 19+ that reports the preserve_none convention no longer infers the SDK path, so
-    // point it at the active SDK or the parse fails to find <stdlib.h> and friends.
+    // libclang 19+ does not infer the macOS SDK path: point it at the active
+    // SDK or the parse fails to find <stdlib.h> and friends.
     if let Ok(out) = Command::new("xcrun").args(["--show-sdk-path"]).output()
         && out.status.success()
     {

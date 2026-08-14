@@ -3,7 +3,6 @@ use std::thread;
 use php_sys::{Mode, Rapira};
 use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 
-// this test works on both zts and nts
 #[test]
 fn hello_world_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -40,7 +39,7 @@ fn fibers_stress_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn hello_world_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("shared/worker.php")))?; // single interpreter => same one for both reqs
@@ -56,7 +55,7 @@ fn hello_world_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_request_isolation() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("shared/leak-worker.php")))?; // single interpreter => same one for both reqs
@@ -81,7 +80,7 @@ fn worker_request_isolation() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_survives_exit() -> anyhow::Result<()> {
     let _guard = php_lock();
 
@@ -116,7 +115,7 @@ fn worker_survives_exit() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn fibers_stress_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
 
@@ -138,7 +137,7 @@ fn fibers_stress_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     let _guard = php_lock();
 
@@ -180,7 +179,7 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn many_producers_test() -> anyhow::Result<()> {
     let _guard = php_lock();
 
@@ -218,7 +217,7 @@ fn many_producers_test() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_basic_auth() -> anyhow::Result<()> {
     let _guard = php_lock();
 
@@ -255,7 +254,7 @@ fn worker_basic_auth() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn server_variables() -> anyhow::Result<()> {
     let _guard = php_lock();
 
@@ -269,7 +268,7 @@ fn server_variables() -> anyhow::Result<()> {
     request.method = "POST".into();
     request.content_type = Some("text/plain".into());
     request.content_length = 3;
-    request.body = Box::new(std::io::Cursor::new(b"foo".to_vec()));
+    request.body = php_sys::types::Body::Raw(Box::new(std::io::Cursor::new(b"foo".to_vec())));
     request
         .headers
         .push(("Authorization".into(), "Basic dmFsZXJ5OnBhc3N3b3Jk".into()));
@@ -303,7 +302,7 @@ fn server_variables() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_finish_request() -> anyhow::Result<()> {
     let _guard = php_lock();
 
@@ -361,7 +360,7 @@ fn getenv_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn getenv_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     unsafe {
@@ -394,7 +393,7 @@ fn failboot_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn scoreboard_counts_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("shared/throw-worker.php")))?;
@@ -415,7 +414,7 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -444,9 +443,6 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Multi-worker scoreboard aggregation returns as a multi-process test once the
-// fork-based pool and the shared-memory scoreboard land (E2E harness batch).
-
 #[test]
 fn scoreboard_counts_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -471,7 +467,7 @@ fn scoreboard_counts_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_session_isolation() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("shared/session-worker.php")))?;
@@ -484,7 +480,7 @@ fn worker_session_isolation() -> anyhow::Result<()> {
     assert_eq!(s1, 200);
     assert_eq!(s2, 200);
     assert!(b1.contains("n=0"), "req1 fresh session (got: {b1:?})");
-    // without the fix: session_status stays active + $_SESSION leaks -> req2 sees n=1
+    // session_status and $_SESSION must reset between jobs
     assert!(
         b2.contains("n=0"),
         "session must reset between worker requests (got: {b2:?})"
@@ -502,7 +498,7 @@ fn worker_session_isolation() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
@@ -536,7 +532,7 @@ fn php_levels(logged: &[tests::Captured], mark: &str) -> Vec<tracing::Level> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
@@ -577,7 +573,7 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
 // error_reporting(0) masks every type php-src would mask, fatals included; the recycle it
 // causes still has to be explained, so fatals are exempt from the mask.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
@@ -607,7 +603,7 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
 // log_errors routes the diagnostic through the SAPI log callback too; both paths must agree.
 // Assumes php_error_cb owns that callback: an extension that hooks it reports at its own level.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
@@ -655,7 +651,7 @@ fn sapi_ini_entries_applied() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn status_code_does_not_leak_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("basic_tests/status-worker.php")))?;
@@ -692,7 +688,7 @@ fn status_code_does_not_leak_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_finish_request_header_only() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -709,7 +705,7 @@ fn worker_finish_request_header_only() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -735,7 +731,7 @@ fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -758,7 +754,7 @@ fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() -> anyhow::Result<()>
 {
     let _guard = php_lock();
@@ -773,10 +769,8 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
         "basic_tests/h2-boot-bail-worker.php",
     )))?;
     let h = r.handle()?;
-    // The bootstrap's session save handler fatals on the first-call teardown flush.
-    // Before the fix that bailout was swallowed and the job served in cycle 1 (count
-    // "1"); after the fix it recycles, so the worker re-bootstraps and serves in
-    // cycle 2 (count "2").
+    // The bootstrap's session save handler fatals on the first-call teardown
+    // flush; that bailout recycles and re-bootstraps, so the counter reads "2".
     let (_, body) = drain(h.handle_blocking(req("/", "basic_tests/h2-boot-bail-worker.php"))?);
     assert_eq!(
         body, "2",
@@ -792,7 +786,7 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
 // A post-loop warning left in PG(last_error_message) trips the core_globals_dtor assertion
 // at php_module_shutdown (main.c:2102).
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -808,7 +802,7 @@ fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -854,7 +848,7 @@ fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_finish_request_flush_bailout_recycles() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(

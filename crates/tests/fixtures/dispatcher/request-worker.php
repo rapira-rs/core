@@ -1,26 +1,57 @@
 <?php
 
-// Echoes every Request field into the response body for the field-mapping test.
+// Echoes every Request field into the response body for the field-mapping tests.
 
 $d = \Rapira\get_dispatcher();
 try {
     while (true) {
         $ex = $d->receive();
         $req = $ex->getRequest();
+        // the memo: repeated calls hand back the same instance
+        $again = $ex->getRequest();
+        $caseKeys = [];
+        foreach ($req->headers as $k => $v) {
+            if (strcasecmp((string)$k, 'x-case') === 0) {
+                $caseKeys[] = $k;
+            }
+        }
         $lines = [
             'method=' . $req->method,
             'uri=' . $req->uri,
-            'target=' . $req->target,
+            'target-hex=' . bin2hex($req->target),
             'authority=' . var_export($req->authority, true),
             'protocol=' . $req->protocol,
-            'x-probe=' . implode(',', $req->headers['x-probe'] ?? []),
+            // repeats stay separate list entries, wire order
+            'x-probe=' . implode('|', $req->headers['x-probe'] ?? []),
+            // same name in two casings = two keys (byte-exact grouping)
+            'x-case-keys=' . implode('|', $caseKeys),
             // an all-digit field name must land as an integer key (symtable)
             'h123=' . implode(',', $req->headers[123] ?? []),
-            'body=' . $req->body,
+            // a single-letter name must stay a string key
+            'h-single=' . implode(',', $req->headers['a'] ?? []),
+            // '-'-leading names pin the symtable prefilter's one-byte overread
+            'h-dash=' . implode(',', $req->headers['-'] ?? []),
+            'h-neg=' . implode(',', $req->headers['-1'] ?? []),
+            'memo-same=' . var_export($req === $again, true),
+            'body=' . (is_string($req->body) ? $req->body : $req->body::class),
             'remote=' . $req->remote::class,
-            'remote-ip=' . ($req->remote instanceof \Rapira\InetAddress ? $req->remote->ip : ''),
-            'remote-port=' . ($req->remote instanceof \Rapira\InetAddress ? $req->remote->port : ''),
-            'tls-null=' . var_export($req->tls === null, true),
+            'remote-detail=' . ($req->remote instanceof \Rapira\InetAddress
+                ? $req->remote->ip . ':' . $req->remote->port
+                : var_export($req->remote->path, true)),
+            'server=' . $req->server::class,
+            'server-detail=' . ($req->server instanceof \Rapira\InetAddress
+                ? $req->server->ip . ':' . $req->server->port
+                : var_export($req->server->path, true)),
+            'tls=' . ($req->tls === null ? 'NULL' : implode('|', [
+                $req->tls->version,
+                $req->tls->cipher,
+                var_export($req->tls->negotiatedProtocol, true),
+                var_export($req->tls->requestedServerName, true),
+                var_export($req->tls->certSerial, true),
+                var_export($req->tls->certOrganization, true),
+                var_export($req->tls->certFingerprint, true),
+            ])),
+            'received-at=' . var_export($req->receivedAt, true),
             'received-at-positive=' . var_export($req->receivedAt > 0, true),
         ];
         $ex->writeBody(implode("\n", $lines));

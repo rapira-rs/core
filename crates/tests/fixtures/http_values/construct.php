@@ -31,7 +31,7 @@ $req = new Request(
 
 echo $req->method, ' ', $req->target, ' ', $req->protocol, "\n";
 echo $req->remote->ip, ':', $req->remote->port, "\n";
-echo var_export($req->server->path, true), "\n";
+echo 'server-path=', var_export($req->server->path, true), "\n";
 echo $req->body->fields[0]->name, '=', $req->body->fields[0]->value, "\n";
 echo $req->body->files[0]->clientFilename, ' ', $req->body->files[0]->size, "\n";
 echo $req->tls->negotiatedProtocol, ' ', var_export($req->tls->certSerial, true), "\n";

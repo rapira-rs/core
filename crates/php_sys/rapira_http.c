@@ -1,30 +1,31 @@
 #include "rapira_classes.h"
 #include "zend_API.h"
-#include "zend_operators.h"
-#include "zend_property_hooks.h"
 #include "zend_types.h"
 
-static void set_str_or_null(zend_class_entry *scope, zend_object *obj,
-                            const char *name, size_t len, zend_string *val) {
-    if (val != NULL) {
-        zend_update_property_str(scope, obj, name, len, val);
-    } else {
-        zend_update_property_null(scope, obj, name, len);
-    }
-}
-
-static bool address_arg(zval *arg, uint32_t num) {
-    if (Z_TYPE_P(arg) == IS_OBJECT &&
-        (instanceof_function(Z_OBJCE_P(arg), rapira_ce_inet_address) ||
-         instanceof_function(Z_OBJCE_P(arg), rapira_ce_unix_address))) {
-        return true;
-    }
-    zend_argument_type_error(
-        num,
-        "must be of type Rapira\\InetAddress|Rapira\\UnixAddress, %s given",
-        zend_zval_value_name(arg));
-    return false;
-}
+// rust glue (src/values.rs); the ctor bodies throw from Rust and report false
+// with the throw pending
+extern bool rapira_rs_ctor_inet_address(zend_object *obj, zend_string *ip,
+                                        int64_t port);
+extern bool rapira_rs_ctor_unix_address(zend_object *obj, zend_string *path);
+extern bool rapira_rs_ctor_tls(zend_object *obj, zend_string *version,
+                               zend_string *cipher, zend_string *negotiated,
+                               zend_string *server_name, zend_string *serial,
+                               zend_string *org, zend_string *fingerprint);
+extern bool rapira_rs_ctor_form_field(zend_object *obj, zend_string *name,
+                                      zend_string *value, zval *headers);
+extern bool rapira_rs_ctor_uploaded_file(zend_object *obj, zend_string *name,
+                                         zend_string *client_filename,
+                                         zend_string *client_media_type,
+                                         zval *headers, zend_string *tmp_path,
+                                         int64_t size);
+extern bool rapira_rs_ctor_multipart(zend_object *obj, zval *fields,
+                                     zval *files);
+extern bool rapira_rs_ctor_request(zend_object *obj, zend_string *method,
+                                   zend_string *uri, zend_string *target,
+                                   zend_string *authority,
+                                   zend_string *protocol, zval *headers,
+                                   zval *body, zval *remote, zval *server,
+                                   zval *tls, double received_at);
 
 ZEND_METHOD(Rapira_InetAddress, __construct) {
     zend_string *ip;
@@ -34,13 +35,10 @@ ZEND_METHOD(Rapira_InetAddress, __construct) {
     Z_PARAM_LONG(port)
     ZEND_PARSE_PARAMETERS_END();
 
-    zend_update_property_str(rapira_ce_inet_address, Z_OBJ_P(ZEND_THIS),
-                             ZEND_STRL("ip"), ip);
-    if (EG(exception)) {
+    if (!rapira_rs_ctor_inet_address(Z_OBJ_P(ZEND_THIS), ip, (int64_t)port)) {
+        rapira_throw_or_backstop("InetAddress construction");
         RETURN_THROWS();
     }
-    zend_update_property_long(rapira_ce_inet_address, Z_OBJ_P(ZEND_THIS),
-                              ZEND_STRL("port"), port);
 }
 
 ZEND_METHOD(Rapira_UnixAddress, __construct) {
@@ -49,8 +47,10 @@ ZEND_METHOD(Rapira_UnixAddress, __construct) {
     Z_PARAM_STR_OR_NULL(path)
     ZEND_PARSE_PARAMETERS_END();
 
-    set_str_or_null(rapira_ce_unix_address, Z_OBJ_P(ZEND_THIS),
-                    ZEND_STRL("path"), path);
+    if (!rapira_rs_ctor_unix_address(Z_OBJ_P(ZEND_THIS), path)) {
+        rapira_throw_or_backstop("UnixAddress construction");
+        RETURN_THROWS();
+    }
 }
 
 ZEND_METHOD(Rapira_Http_Tls, __construct) {
@@ -66,38 +66,11 @@ ZEND_METHOD(Rapira_Http_Tls, __construct) {
     Z_PARAM_STR_OR_NULL(fingerprint)
     ZEND_PARSE_PARAMETERS_END();
 
-    zend_object *self = Z_OBJ_P(ZEND_THIS);
-    zend_update_property_str(rapira_ce_http_tls, self, ZEND_STRL("version"),
-                             version);
-    if (EG(exception)) {
+    if (!rapira_rs_ctor_tls(Z_OBJ_P(ZEND_THIS), version, cipher, negotiated,
+                            server_name, serial, org, fingerprint)) {
+        rapira_throw_or_backstop("Tls construction");
         RETURN_THROWS();
     }
-    zend_update_property_str(rapira_ce_http_tls, self, ZEND_STRL("cipher"),
-                             cipher);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    set_str_or_null(rapira_ce_http_tls, self, ZEND_STRL("negotiatedProtocol"),
-                    negotiated);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    set_str_or_null(rapira_ce_http_tls, self, ZEND_STRL("requestedServerName"),
-                    server_name);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    set_str_or_null(rapira_ce_http_tls, self, ZEND_STRL("certSerial"), serial);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    set_str_or_null(rapira_ce_http_tls, self, ZEND_STRL("certOrganization"),
-                    org);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    set_str_or_null(rapira_ce_http_tls, self, ZEND_STRL("certFingerprint"),
-                    fingerprint);
 }
 
 ZEND_METHOD(Rapira_Http_FormField, __construct) {
@@ -109,17 +82,10 @@ ZEND_METHOD(Rapira_Http_FormField, __construct) {
     Z_PARAM_ARRAY(headers)
     ZEND_PARSE_PARAMETERS_END();
 
-    zend_class_entry *ce = Z_OBJCE_P(ZEND_THIS);
-    zend_object *self = Z_OBJ_P(ZEND_THIS);
-    zend_update_property_str(ce, self, ZEND_STRL("name"), name);
-    if (EG(exception)) {
+    if (!rapira_rs_ctor_form_field(Z_OBJ_P(ZEND_THIS), name, value, headers)) {
+        rapira_throw_or_backstop("FormField construction");
         RETURN_THROWS();
     }
-    zend_update_property_str(ce, self, ZEND_STRL("value"), value);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property(ce, self, ZEND_STRL("headers"), headers);
 }
 
 ZEND_METHOD(Rapira_Http_UploadedFile, __construct) {
@@ -135,30 +101,12 @@ ZEND_METHOD(Rapira_Http_UploadedFile, __construct) {
     Z_PARAM_LONG(size)
     ZEND_PARSE_PARAMETERS_END();
 
-    zend_class_entry *ce = Z_OBJCE_P(ZEND_THIS);
-    zend_object *self = Z_OBJ_P(ZEND_THIS);
-    zend_update_property_str(ce, self, ZEND_STRL("name"), name);
-    if (EG(exception)) {
+    if (!rapira_rs_ctor_uploaded_file(Z_OBJ_P(ZEND_THIS), name,
+                                      client_filename, client_media_type,
+                                      headers, tmp_path, (int64_t)size)) {
+        rapira_throw_or_backstop("UploadedFile construction");
         RETURN_THROWS();
     }
-    zend_update_property_str(ce, self, ZEND_STRL("clientFilename"),
-                             client_filename);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    set_str_or_null(ce, self, ZEND_STRL("clientMediaType"), client_media_type);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property(ce, self, ZEND_STRL("headers"), headers);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property_str(ce, self, ZEND_STRL("tmpPath"), tmp_path);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property_long(ce, self, ZEND_STRL("size"), size);
 }
 
 ZEND_METHOD(Rapira_Http_Multipart, __construct) {
@@ -168,13 +116,10 @@ ZEND_METHOD(Rapira_Http_Multipart, __construct) {
     Z_PARAM_ARRAY(files)
     ZEND_PARSE_PARAMETERS_END();
 
-    zend_class_entry *ce = Z_OBJCE_P(ZEND_THIS);
-    zend_object *self = Z_OBJ_P(ZEND_THIS);
-    zend_update_property(ce, self, ZEND_STRL("fields"), fields);
-    if (EG(exception)) {
+    if (!rapira_rs_ctor_multipart(Z_OBJ_P(ZEND_THIS), fields, files)) {
+        rapira_throw_or_backstop("Multipart construction");
         RETURN_THROWS();
     }
-    zend_update_property(ce, self, ZEND_STRL("files"), files);
 }
 
 ZEND_METHOD(Rapira_Http_Request, __construct) {
@@ -196,62 +141,18 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
     Z_PARAM_DOUBLE(received_at)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!address_arg(remote, 8) || !address_arg(server, 9)) {
-        RETURN_THROWS();
+    // the ZVAL_OBJ/ZVAL_STR union wrap is macro glue; ownership stays with ZPP
+    zval body;
+    if (body_obj != NULL) {
+        ZVAL_OBJ(&body, body_obj);
+    } else {
+        ZVAL_STR(&body, body_str);
     }
 
-    zend_class_entry *ce = Z_OBJCE_P(ZEND_THIS);
-    zend_object *self = Z_OBJ_P(ZEND_THIS);
-    zend_update_property_str(ce, self, ZEND_STRL("method"), method);
-    if (EG(exception)) {
+    if (!rapira_rs_ctor_request(Z_OBJ_P(ZEND_THIS), method, uri, target,
+                                authority, protocol, headers, &body, remote,
+                                server, tls, received_at)) {
+        rapira_throw_or_backstop("Request construction");
         RETURN_THROWS();
     }
-    zend_update_property_str(ce, self, ZEND_STRL("uri"), uri);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property_str(ce, self, ZEND_STRL("target"), target);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    set_str_or_null(ce, self, ZEND_STRL("authority"), authority);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property_str(ce, self, ZEND_STRL("protocol"), protocol);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property(ce, self, ZEND_STRL("headers"), headers);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    if (body_obj != NULL) {
-        zval body;
-        ZVAL_OBJ(&body, body_obj);
-        zend_update_property(ce, self, ZEND_STRL("body"), &body);
-    } else {
-        zend_update_property_str(ce, self, ZEND_STRL("body"), body_str);
-    }
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property(ce, self, ZEND_STRL("remote"), remote);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property(ce, self, ZEND_STRL("server"), server);
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    // PHP null parses to a NULL zval pointer; zend_update_property derefs it
-    if (tls != NULL) {
-        zend_update_property(ce, self, ZEND_STRL("tls"), tls);
-    } else {
-        zend_update_property_null(ce, self, ZEND_STRL("tls"));
-    }
-    if (EG(exception)) {
-        RETURN_THROWS();
-    }
-    zend_update_property_double(ce, self, ZEND_STRL("receivedAt"), received_at);
 }

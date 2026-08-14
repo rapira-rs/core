@@ -8,7 +8,7 @@ fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u
     r.method = "POST".into();
     r.content_type = content_type.map(|s| s.as_bytes().to_vec());
     r.content_length = body.len() as i64;
-    r.body = Box::new(std::io::Cursor::new(body));
+    r.body = php_sys::types::Body::Raw(Box::new(std::io::Cursor::new(body)));
     r
 }
 
@@ -78,7 +78,7 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
 
 // $_GET/$_POST must be rebuilt per worker request — no stale values.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn post_superglobals_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -142,7 +142,7 @@ fn request_merge_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn request_merge_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -172,7 +172,7 @@ fn request_merge_worker() -> anyhow::Result<()> {
 // A jit autoglobal first touched only in a LATER request must still build fresh:
 // req1 builds $_REQUEST, req2 never touches it, req3 must not see stale data.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -214,7 +214,7 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
 
 // The Cookie header feeds $_COOKIE fresh on every worker request.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn cookies_refresh_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("ported_tests/cookies-worker.php")))?;
@@ -314,7 +314,7 @@ fn session_cookie_roundtrip_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
     session_roundtrip(
         Mode::Dispatcher(fixture("ported_tests/session-count-worker.php")),
@@ -324,7 +324,7 @@ fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
 
 // A userland save handler registered DURING request 1 must still serve request 2.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -361,7 +361,7 @@ fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
 
 // A save handler registered BEFORE the worker loop stays installed for all requests.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -403,7 +403,7 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
 // becomes a response header, the status set via http_response_code sticks,
 // and the header set rebuilds per worker request.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn response_header_edges_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("ported_tests/headers-worker.php")))?;
@@ -482,7 +482,7 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
 // fail-first: worker requests must also carry the expose_php X-Powered-By
 // header that a full per-request startup would add.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -504,7 +504,7 @@ fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
 // Unbuffered output written across several ub_writes (with an explicit flush()
 // between them) arrives whole and in order in the single sealed frame.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("ported_tests/flush-worker.php")))?;
@@ -565,7 +565,7 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
 // A 6MB body with no content type travels intact through php://input, and the
 // next request's input is unaffected.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn large_post_body_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -640,7 +640,7 @@ fn multipart_upload_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn multipart_upload_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("ported_tests/upload-worker.php")))?;
@@ -660,7 +660,7 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("ported_tests/upload-worker.php")))?;
@@ -695,7 +695,7 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
 // Output already sent, then an uncaught throw: exactly one head, status 200
 // (committed by the echo), the fatal text follows in the body, worker survives.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -725,7 +725,7 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
 // Streams opened before the worker loop keep their identity and read position
 // across requests — between-request cleanup must not touch live resources.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -749,7 +749,7 @@ fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -778,15 +778,42 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle()?;
-    // One entry per field name: repeats are combined by the front, so this is the shape
-    // a request reaches php_sys in. Two wire Cookie headers are covered end to end by
-    // the e2e suite.
+    // a pre-joined single Cookie line passes through the fold unchanged
     let mut request = req("/multi-cookie.php", "ported_tests/multi-cookie.php");
     request.headers.push(("Cookie".into(), "a=1; b=2".into()));
     let (status, body) = drain(h.handle_blocking(request)?);
     drop(h);
     r.shutdown();
     assert_eq!((status, body.as_str()), (200, "1,2,a=1; b=2"));
+    Ok(())
+}
+
+/// The `$_SERVER` fold end to end: per-line repeats arrive from the front, and
+/// ReqC::build joins list fields on their separators (Cookie on `; `,
+/// X-Forwarded-For on `, `) while a singleton field keeps its first line.
+#[test]
+fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic)?;
+    let h = r.handle()?;
+    let mut request = req("/fold-check.php", "ported_tests/fold-check.php");
+    for (name, value) in [
+        ("Cookie", "a=1"),
+        ("X-Forwarded-For", "1.2.3.4"),
+        ("Authorization", "Bearer one"),
+        ("cookie", "b=2"),
+        ("x-forwarded-for", "5.6.7.8"),
+        ("authorization", "Bearer two"),
+    ] {
+        request.headers.push((name.into(), value.into()));
+    }
+    let (status, body) = drain(h.handle_blocking(request)?);
+    drop(h);
+    r.shutdown();
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "1,2,a=1; b=2,1.2.3.4, 5.6.7.8,Bearer one")
+    );
     Ok(())
 }
 
@@ -838,7 +865,7 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
 /// must reach php-src byte for byte — decoding it lossily leaves rfc1867 hunting for a
 /// boundary the body never contains, and the upload silently vanishes.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("ported_tests/upload-worker.php")))?;
@@ -864,7 +891,7 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
 /// a C0 control both reach the SAPI. Dropping those two fields must not cost the status,
 /// the other headers, or the body.
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
+#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture(
