@@ -20,7 +20,13 @@ Dispatcher (the default mode) — resident script pulling units from the host, h
 rapira serve examples/dispatcher.php
 ```
 
-All three listen on 127.0.0.1:8000 by default:
+With a config file instead of flags — `rapira.toml` here runs the dispatcher example (`pool.entrypoint` resolves against the config's directory; CLI flags override file values):
+
+```sh
+rapira serve --config examples/rapira.toml
+```
+
+All of the above listen on 127.0.0.1:8000:
 
 ```sh
 curl http://127.0.0.1:8000/
