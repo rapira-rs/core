@@ -17,6 +17,10 @@ pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
 /// Fallible SDK paths report `anyhow::Error`; the host renders it to a log line.
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
+/// Header/trailer fields: one entry per field line, wire order, names as
+/// received, values raw bytes (latin1/binary-safe).
+pub type FieldLines = Vec<(String, Vec<u8>)>;
+
 /// A native rapira extension: a long-lived service that drives PHP via [`Php`].
 ///
 /// Lifecycle: `init` (construct, injecting [`Extension::Config`]) → `prepare`
@@ -69,9 +73,137 @@ pub trait Extension: Send + 'static {
 /// extension-facing API and not semver-guarded.
 #[doc(hidden)]
 pub trait Backend: Send + Sync + 'static {
-    /// Submit `req` and resolve with the whole response; the error contract lives on
-    /// [`Php::exec`].
-    fn exec(&self, req: Request) -> Pin<Box<dyn Future<Output = Result<Response>> + Send + '_>>;
+    /// Submit `req` and resolve with the response stream once the unit is
+    /// dispatched; the error contract lives on [`Php::exec`].
+    fn exec(&self, req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>>;
+}
+
+/// One event of a response stream, in wire order:
+/// `Interim* Head? (Chunk|File)* End?`. A stream that ends (`next()` → None)
+/// without `End` means the worker died; without `Head`, that it produced no
+/// response at all.
+pub enum ReplyEvent {
+    /// Advisory interim head (100-199): forward it where the protocol allows,
+    /// drop it otherwise. Carries no framing fields.
+    Interim {
+        status: u16,
+        headers: FieldLines,
+    },
+    /// The final head, at most once.
+    Head {
+        status: u16,
+        headers: FieldLines,
+        /// The framing to apply when Some; None means the extension chooses
+        /// (chunked on HTTP/1.1).
+        content_length: Option<u64>,
+        /// 204 | 304 | a HEAD request | 1xx: send no body bytes and no framing
+        /// fields, whatever else the stream carries.
+        bodiless: bool,
+        /// The body is already content-coded; compression must leave it alone.
+        body_coded: bool,
+    },
+    Chunk(bytes::Bytes),
+    /// A file slice the host opened and validated; the extension streams it
+    /// and owns the handle.
+    File {
+        file: std::fs::File,
+        offset: u64,
+        len: u64,
+    },
+    /// Terminal. Trailers ride here; an extension that cannot express them
+    /// drops the section.
+    End {
+        trailers: FieldLines,
+        truncated: bool,
+    },
+}
+
+/// The producer side of a [`Reply`]. Host-internal, like [`Backend`].
+#[doc(hidden)]
+pub trait ReplySource: Send + 'static {
+    fn next(&mut self) -> Pin<Box<dyn Future<Output = Option<ReplyEvent>> + Send + '_>>;
+}
+
+/// A dispatched request's response stream. Dropping it tells the host the
+/// client is gone: the worker's next write raises `WorkDiscardedException`.
+pub struct Reply(Box<dyn ReplySource>);
+
+impl Reply {
+    /// Host-internal constructor, like [`Php::new`].
+    #[doc(hidden)]
+    pub fn new(source: Box<dyn ReplySource>) -> Self {
+        Self(source)
+    }
+
+    /// The next event; None ends the stream (see [`ReplyEvent`]).
+    pub async fn next(&mut self) -> Option<ReplyEvent> {
+        self.0.next().await
+    }
+
+    /// Collect the stream into a buffered [`Response`]. Interim heads are
+    /// dropped (a buffered response has nowhere to carry them). Errors when the
+    /// worker died before any response, when the stream is truncated, or when
+    /// no head was produced.
+    pub async fn collect(mut self) -> Result<Response> {
+        let mut response: Option<Response> = None; // built by Head, grown by the body events
+        let mut end: Option<bool> = None; // Some(truncated) once End arrived
+        while let Some(ev) = self.0.next().await {
+            match ev {
+                ReplyEvent::Interim { .. } => {}
+                ReplyEvent::Head {
+                    status, headers, ..
+                } => {
+                    response = Some(Response {
+                        status,
+                        headers,
+                        body: Vec::new(),
+                    });
+                }
+                ReplyEvent::Chunk(b) => {
+                    if let Some(r) = response.as_mut() {
+                        r.body.extend_from_slice(&b);
+                    }
+                }
+                // synchronous read: collect is the buffered convenience,
+                // streaming consumers pump File themselves
+                ReplyEvent::File { file, offset, len } => {
+                    if let Some(r) = response.as_mut() {
+                        r.body.extend_from_slice(&read_slice(&file, offset, len)?);
+                    }
+                }
+                ReplyEvent::End { truncated, .. } => {
+                    end = Some(truncated);
+                    break;
+                }
+            }
+        }
+        match (response, end) {
+            (None, None) => Err(anyhow::anyhow!(
+                "php worker died mid-response (channel closed without a response)"
+            )),
+            (Some(_), None) | (_, Some(true)) => {
+                Err(anyhow::anyhow!("php crashed mid-response; body truncated"))
+            }
+            (None, Some(false)) => Err(anyhow::anyhow!("php produced no response head")),
+            (Some(r), Some(false)) => Ok(r),
+        }
+    }
+}
+
+/// Read `len` bytes at `offset` (short when the file shrank).
+fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    let mut out = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
+    let mut done = 0usize;
+    while done < out.len() {
+        let n = file.read_at(&mut out[done..], offset + done as u64)?;
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    out.truncate(done);
+    Ok(out)
 }
 
 /// The PHP bridge handed to every extension. Cheap to clone; every clone shares the
@@ -99,14 +231,12 @@ impl Php {
         &self.script
     }
 
-    /// Submit `req` and collect the whole response — the worker seals it into a
-    /// single frame, so the caller wakes once per response. Errors when PHP
-    /// produced no response head, when the worker died mid-response (the channel
-    /// closed without a frame), when PHP errored after it began writing its
-    /// body (so the body may be incomplete), or with a downcastable [`Rejected`]
-    /// when the host refused the body before dispatch (malformed multipart → 400,
-    /// past a configured limit → 413) — nothing rejected ever reaches a worker.
-    pub async fn exec(&self, req: Request) -> Result<Response> {
+    /// Submit `req`; resolves with the response stream once the unit is
+    /// dispatched. Errors with a downcastable [`Rejected`] when the host
+    /// refused the request before dispatch (malformed multipart → 400, past a
+    /// configured limit → 413) — nothing rejected ever reaches a worker.
+    /// Response-shape failures surface from [`Reply::next`]/[`Reply::collect`].
+    pub async fn exec(&self, req: Request) -> Result<Reply> {
         self.backend.exec(req).await
     }
 }
@@ -206,13 +336,14 @@ pub struct Request {
     /// names as received (case preserved). Values are raw bytes
     /// (latin1/binary-safe). The host folds repeats only for the `$_SERVER`
     /// mapping; nothing is folded on the dispatcher path.
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: FieldLines,
     pub body: Vec<u8>,
 }
 
 // No Default: it would mint status 0, which no wire can carry.
+#[derive(Debug)]
 pub struct Response {
     pub status: u16,
-    pub headers: Vec<(String, Vec<u8>)>, // bytes: latin1/binary-safe
+    pub headers: FieldLines, // bytes: latin1/binary-safe
     pub body: Vec<u8>,
 }

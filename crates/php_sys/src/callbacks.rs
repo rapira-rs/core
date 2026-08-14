@@ -19,9 +19,10 @@ pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     })
 }
 
-/// Hard cap on the response body buffered in Rust (outside PHP's memory_limit).
-/// Shared by classic `ub_write` (aborts + recycles) and Exchange `writeBody`
-/// (seals the unit truncated).
+/// Hard cap on response bytes buffered in Rust (outside PHP's memory_limit).
+/// Classic `ub_write` applies it to the whole body (aborts + recycles);
+/// Exchange `writeBody` per chunk (seals the unit truncated) — streamed
+/// responses are otherwise bounded by the frame channel.
 pub(crate) const MAX_BUFFERED_BODY: usize = 1 << 30; // 1 GiB
 
 struct SapiHeaders(*mut sapi_headers_struct);
@@ -273,7 +274,8 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
 }
 
 pub(crate) unsafe extern "C" fn flush(_sc: *mut c_void) {
-    // nothing to do: the body buffers into the single Frame, delivered at finish
+    // nothing to do on the classic path: the body buffers into the event trio
+    // delivered at finish
 }
 pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usize {
     // A short read (fewer than `count` bytes) signals end-of-body: the engine

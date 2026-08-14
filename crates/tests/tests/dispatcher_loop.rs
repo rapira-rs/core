@@ -9,21 +9,7 @@
 
 use php_sys::{Frame, Mode, Rapira};
 use std::io::Cursor;
-use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
-
-fn drain_frame(mut rx: tokio::sync::mpsc::Receiver<Frame>) -> Option<Frame> {
-    rx.blocking_recv()
-}
-
-fn header_value(frame: &Frame, name: &str) -> Option<String> {
-    frame
-        .head
-        .as_ref()?
-        .headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-        .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
-}
+use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
 /// Boot `verbs-worker.php`, serve one probe request, tear down — the shared
 /// shape of every single-probe test.
@@ -50,15 +36,11 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
     let h = r.handle()?;
 
-    let frame = drain_frame(h.handle_blocking(req("/first", "dispatcher/echo-loop-worker.php"))?)
-        .expect("first unit must seal a frame");
-    assert_eq!(frame.head.as_ref().map(|hd| hd.status), Some(200));
+    let resp = drain_resp(h.handle_blocking(req("/first", "dispatcher/echo-loop-worker.php"))?);
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.header("x-rapira-target").as_deref(), Some("/first"));
     assert_eq!(
-        header_value(&frame, "x-rapira-target").as_deref(),
-        Some("/first")
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&frame.body),
+        resp.body_string(),
         "method=GET body=",
         "empty request body echoes empty"
     );
@@ -66,12 +48,9 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     let mut rq2 = req("/second", "dispatcher/echo-loop-worker.php");
     rq2.body = php_sys::types::Body::Raw(Box::new(Cursor::new(b"two".to_vec())));
     rq2.content_length = 3;
-    let frame = drain_frame(h.handle_blocking(rq2)?).expect("second unit must seal a frame");
-    assert_eq!(
-        header_value(&frame, "x-rapira-target").as_deref(),
-        Some("/second")
-    );
-    assert_eq!(String::from_utf8_lossy(&frame.body), "method=GET body=two");
+    let resp = drain_resp(h.handle_blocking(rq2)?);
+    assert_eq!(resp.header("x-rapira-target").as_deref(), Some("/second"));
+    assert_eq!(resp.body_string(), "method=GET body=two");
 
     drop(h);
     r.shutdown(); // joins the worker: receive() saw closure, the script wound down
@@ -275,24 +254,53 @@ fn try_and_timed_receive_serve_units() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A 1xx head (other than 101) is advisory: accepted, dropped, and the unit
-/// stays open for the real head.
+/// A 1xx head (other than 101) is advisory and goes out at once, ahead of the
+/// final head; the unit stays open for the real head.
 #[test]
-fn interim_head_is_dropped() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/?probe=interim")?;
-    assert_eq!(
-        (status, body.as_str()),
-        (200, "after-interim finalized=false")
+fn interim_head_is_emitted_before_the_final_head() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
+    let h = r.handle()?;
+    let resp =
+        drain_resp(h.handle_blocking(req("/?probe=interim", "dispatcher/verbs-worker.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.interim.len(), 1, "the 103 must reach the stream");
+    assert_eq!(resp.interim[0].status, 103);
+    assert!(
+        resp.interim[0].headers.iter().any(|(k, _)| k == "link"),
+        "interim fields travel with it"
     );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.body_string(), "after-interim finalized=false");
     Ok(())
 }
 
-/// 101 is the carve-out in the 1xx interim rule: it commits as the final head
-/// and locks out any later `writeHead()`.
+/// 101 is the carve-out in the 1xx interim rule: it commits as the final head,
+/// locks out any later `writeHead()`, and — being 1xx — carries no body:
+/// chunks are accepted and dropped.
 #[test]
 fn writehead_101_commits_as_final() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/?probe=upgrade")?;
-    assert_eq!((status, body.as_str()), (101, "locked"));
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
+    let h = r.handle()?;
+    let resp =
+        drain_resp(h.handle_blocking(req("/?probe=upgrade", "dispatcher/verbs-worker.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.status(), 101);
+    assert!(resp.bodiless, "the Head frame marks a 1xx bodiless");
+    assert!(resp.body.is_empty(), "1xx carries no body");
+    assert!(
+        captured()
+            .iter()
+            .any(|c| c.target == "app" && c.message == "101-locked"),
+        "the second writeHead must throw HeadAlreadyWrittenError"
+    );
     Ok(())
 }
 
@@ -317,10 +325,8 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle()?;
 
-    let frame =
-        drain_frame(h.handle_blocking(req("/?probe=multi", "dispatcher/verbs-worker.php"))?)
-            .expect("unit must seal");
-    let head = frame.head.as_ref().expect("head committed");
+    let resp = drain_resp(h.handle_blocking(req("/?probe=multi", "dispatcher/verbs-worker.php"))?);
+    let head = resp.head.as_ref().expect("head committed");
     assert_eq!(head.status, 200);
     let multi: Vec<String> = head
         .headers
@@ -329,8 +335,8 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
         .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
         .collect();
     assert_eq!(multi, ["a", "b"], "one field line per list value, in order");
-    assert_eq!(header_value(&frame, "x-ref").as_deref(), Some("r1"));
-    assert_eq!(header_value(&frame, "x-vref").as_deref(), Some("c1"));
+    assert_eq!(resp.header("x-ref").as_deref(), Some("r1"));
+    assert_eq!(resp.header("x-vref").as_deref(), Some("c1"));
 
     drop(h);
     r.shutdown();
@@ -804,5 +810,378 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
 fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=info")?;
     assert_eq!((status, body.as_str()), (200, "pending=0 active=1"));
+    Ok(())
+}
+
+// ---- streaming (stream-worker.php): the frame protocol past the buffered
+// one-shot
+
+/// Boot stream-worker, hand it one probe request, return the receiver.
+fn stream_probe(
+    query: &str,
+) -> anyhow::Result<(
+    Rapira,
+    php_sys::RapiraHandle,
+    tokio::sync::mpsc::Receiver<Frame>,
+)> {
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
+    let h = r.handle()?;
+    let rx = h.handle_blocking(req(query, "dispatcher/stream-worker.php"))?;
+    Ok((r, h, rx))
+}
+
+/// Poll the app log for `message`, bounded; returns its JSON context.
+fn wait_app_record(message: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(ctx) = captured()
+            .iter()
+            .find(|c| c.target == "app" && c.message == message)
+            .map(|c| c.context.clone())
+        {
+            return ctx;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no {message:?} app record within 10s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// `flush()` puts the head on the wire while the body is still 300ms away —
+/// the bounded read is the timing proof.
+#[test]
+fn flush_puts_the_head_on_the_wire_before_eos() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let (r, h, mut rx) = stream_probe("/?probe=flush-park")?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let first = loop {
+        match rx.try_recv() {
+            Ok(frame) => break frame,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "flush never reached the stream"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("worker died before flushing")
+            }
+        }
+    };
+    let Frame::Head {
+        head,
+        content_length,
+        ..
+    } = first
+    else {
+        panic!("the first frame must be the flushed head");
+    };
+    assert_eq!(head.status, 200);
+    assert_eq!(content_length, None, "flush costs the computed length");
+    // the worker is still parked in usleep: nothing else is on the stream yet
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "no body before the worker wakes"
+    );
+
+    let mut body = Vec::new();
+    let mut ended = false;
+    while let Some(frame) = rx.blocking_recv() {
+        match frame {
+            Frame::Chunk(b) => body.extend_from_slice(&b),
+            Frame::End { truncated, .. } => {
+                assert!(!truncated);
+                ended = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(ended, "the stream must end cleanly");
+    assert_eq!(body, b"after");
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+/// `writeBody(eos: false)` chunks stream in order; the head carries no
+/// computed length (the front chooses the framing).
+#[test]
+fn streamed_chunks_arrive_in_order() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let (r, h, rx) = stream_probe("/?probe=chunks")?;
+    let resp = drain_resp(rx);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.content_length, None);
+    assert_eq!(resp.body_string(), "one,two,three");
+    assert!(resp.ended && !resp.truncated);
+    Ok(())
+}
+
+/// The CLEE prefix rule: the bytes that fit the declared content-length are
+/// sent, the response completes per its declaration, the write throws.
+#[test]
+fn content_length_exceeded_sends_the_fitting_prefix() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+    let (r, h, rx) = stream_probe("/?probe=cl-exceeded")?;
+    let resp = drain_resp(rx);
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.content_length,
+        Some(5),
+        "the declared length is honoured"
+    );
+    assert_eq!(resp.body_string(), "01234", "the surplus is not sent");
+    assert!(
+        resp.ended && !resp.truncated,
+        "complete per its declaration; keepalive survives"
+    );
+    let ctx = wait_app_record("cl-exceeded");
+    assert!(
+        ctx.contains(r#"ContentLengthExceededError"#),
+        "wrong class in {ctx}"
+    );
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+/// Dropping the receiver mid-unit is the client-gone signal: the next write
+/// throws WorkDiscardedException, the unit reports cancelled+finalized, and
+/// the worker keeps serving.
+#[test]
+fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
+    let h = r.handle()?;
+
+    let rx = h.handle_blocking(req("/?probe=discard", "dispatcher/stream-worker.php"))?;
+    // wait until the unit is out with PHP, then leave — dropping earlier can
+    // race the pre-handout probe, which would fail the unit before PHP sees it
+    wait_app_record("discard-held");
+    drop(rx);
+
+    let ctx = wait_app_record("discard");
+    assert!(
+        ctx.contains("WorkDiscardedException"),
+        "wrong class in {ctx}"
+    );
+    assert!(ctx.contains(r#""cancelled":true"#), "isCancelled in {ctx}");
+    assert!(ctx.contains(r#""finalized":true"#), "isFinalized in {ctx}");
+
+    // the single-flight gate is free again: the worker serves the next unit
+    let resp =
+        drain_resp(h.handle_blocking(req("/?probe=chunks", "dispatcher/stream-worker.php"))?);
+    assert_eq!(resp.body_string(), "one,two,three");
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+/// A declared content-length rides the Head frame as the framing; an under-run
+/// is nothing PHP-visible (the front closes the connection).
+#[test]
+fn declared_content_length_rides_the_head_frame() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let (r, h, rx) = stream_probe("/?probe=declared-cl")?;
+    let resp = drain_resp(rx);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.content_length, Some(10));
+    assert_eq!(resp.body_string(), "abc");
+    assert!(resp.ended && !resp.truncated);
+    Ok(())
+}
+
+// ---- sendFile (stream-worker.php): host-streamed files
+
+/// Write a temp payload and point the sendfile root at the temp dir.
+fn sendfile_setup(name: &str) -> std::path::PathBuf {
+    php_sys::set_sendfile_root(std::env::temp_dir());
+    let path = std::env::temp_dir().join(format!("rapira-test-{name}-{}", std::process::id()));
+    std::fs::write(&path, b"abcdefghijklmnopqrstuvwxyz").expect("write payload");
+    path
+}
+
+fn with_path_header(query: &str, path: &std::path::Path) -> php_sys::Request {
+    let mut rq = req(query, "dispatcher/stream-worker.php");
+    rq.headers.push((
+        "x-path".into(),
+        path.to_string_lossy().into_owned().into_bytes(),
+    ));
+    rq
+}
+
+/// A one-shot sendFile: the host knows the length up front, so the head
+/// carries a real content-length; the file bytes ride a File frame.
+#[test]
+fn sendfile_one_shot_carries_the_file_length() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let path = sendfile_setup("sendfile");
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
+    let h = r.handle()?;
+    let resp = drain_resp(h.handle_blocking(with_path_header("/?probe=sendfile", &path))?);
+    drop(h);
+    r.shutdown();
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.content_length, Some(26));
+    assert_eq!(resp.body, b"abcdefghijklmnopqrstuvwxyz");
+    assert!(resp.ended && !resp.truncated);
+    Ok(())
+}
+
+/// A range response is the handler's own 206 + content-range with the slice
+/// passed as offset/length; no HTTP semantics happen in sendFile itself.
+#[test]
+fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let path = sendfile_setup("slice");
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
+    let h = r.handle()?;
+    let resp = drain_resp(h.handle_blocking(with_path_header("/?probe=sendfile-slice", &path))?);
+    drop(h);
+    r.shutdown();
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(resp.status(), 206);
+    assert_eq!(resp.content_length, Some(3));
+    assert_eq!(resp.body, b"cde");
+    Ok(())
+}
+
+/// FileNotSendableException is raised before anything is written, so the
+/// handler can still answer 404 — the reason it is catchable.
+#[test]
+fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    php_sys::set_sendfile_root(std::env::temp_dir());
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
+    let h = r.handle()?;
+    let resp = drain_resp(h.handle_blocking(req(
+        "/?probe=sendfile-missing",
+        "dispatcher/stream-worker.php",
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.body_string(), "nope");
+    Ok(())
+}
+
+/// A path outside the configured root is not sendable, symlinks resolved.
+#[test]
+fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    php_sys::set_sendfile_root(std::env::temp_dir());
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
+    let h = r.handle()?;
+    let resp = drain_resp(h.handle_blocking(with_path_header(
+        "/?probe=sendfile-escape",
+        std::path::Path::new("/etc/hosts"),
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.body_string(), "denied");
+    Ok(())
+}
+
+// ---- writeTrailers (stream-worker.php): the third ending
+
+/// Trailers ride the End frame after streamed chunks; the field is validated
+/// and delivered to the frame level (the h1 front drops it on the wire).
+#[test]
+fn trailers_ride_the_end_frame() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let (r, h, rx) = stream_probe("/?probe=trailers")?;
+    let resp = drain_resp(rx);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.body_string(), "chunk,");
+    assert_eq!(
+        resp.trailers,
+        vec![("x-checksum".to_string(), b"abc123".to_vec())]
+    );
+    assert!(resp.ended && !resp.truncated);
+    Ok(())
+}
+
+/// A trailers-only response spells its head explicitly and keeps real length
+/// framing: content-length 0, not empty chunked.
+#[test]
+fn trailers_only_response_keeps_length_framing() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let (r, h, rx) = stream_probe("/?probe=trailers-only")?;
+    let resp = drain_resp(rx);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.content_length, Some(0));
+    assert!(resp.body.is_empty());
+    assert_eq!(
+        resp.trailers,
+        vec![("x-checksum".to_string(), b"empty".to_vec())]
+    );
+    Ok(())
+}
+
+/// Nothing on the way to a trailer section commits a head; the throw is
+/// catchable and the unit still serves.
+#[test]
+fn trailers_before_a_head_throw_head_not_written() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+    let (r, h, rx) = stream_probe("/?probe=trailers-no-head")?;
+    let resp = drain_resp(rx);
+
+    assert_eq!(resp.status(), 200, "the handler recovers with a body");
+    assert_eq!(resp.body_string(), "caught");
+    let ctx = wait_app_record("trailers-no-head");
+    assert!(ctx.contains("HeadNotWrittenError"), "wrong class in {ctx}");
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+/// A field from the forbidden categories raises `\ValueError`, protocol-
+/// independent; the handler recovers.
+#[test]
+fn forbidden_trailer_field_is_rejected() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let (r, h, rx) = stream_probe("/?probe=trailers-forbidden")?;
+    let resp = drain_resp(rx);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.body_string(), "rejected");
     Ok(())
 }

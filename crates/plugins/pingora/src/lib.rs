@@ -11,8 +11,11 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use extension_api::{Extension, ListenAddr, Php, PrepareCtx, PreparedListener, Request, Result};
-use pingora::http::{RequestHeader, ResponseHeader};
+use extension_api::{
+    Extension, FieldLines, ListenAddr, Php, PrepareCtx, PreparedListener, ReplyEvent, Request,
+    Result,
+};
+use pingora::http::{Method, RequestHeader, ResponseHeader, Version};
 use pingora::modules::http::compression::ResponseCompressionBuilder;
 use pingora::modules::http::{HttpModule, HttpModuleBuilder, HttpModules, Module};
 use pingora::proxy::{ProxyHttp, Session, http_proxy_service};
@@ -55,6 +58,9 @@ pub struct Config {
     /// policy protects that mapping only, so it is inert without it; Reject is
     /// an explicit opt-in and applies regardless.
     pub superglobals: bool,
+    /// Per-write bound on the response path: body writes via pingora's
+    /// write_timeout, head/terminator writes via explicit timeouts.
+    pub write_timeout: Duration,
 }
 
 /// What to do with a request field name that maps onto a CGI variable another name
@@ -82,6 +88,7 @@ impl Default for Config {
             max_body_size: 8 * 1024 * 1024,
             unsafe_field_names: UnsafeFieldNames::Drop,
             superglobals: true,
+            write_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -405,12 +412,8 @@ impl ProxyHttp for PhpProxy {
             return Ok(true); // rejected here; the response is already written
         };
 
-        // Buffer the whole PHP response so we can send a real Content-Length. Without a
-        // framed body (Content-Length or chunked) HTTP/1.1 falls back to close-delimiting,
-        // which forces a connection close per request — no keepalive, a fresh 64 KiB
-        // accept buffer every time. A Content-Length keeps connections alive.
-        let response: extension_api::Response = match self.php.exec(request).await {
-            Ok(r) => r,
+        let mut reply = match self.php.exec(request).await {
+            Ok(reply) => reply,
             // host-rejected before dispatch: answer in this protocol
             Err(e) if e.downcast_ref::<extension_api::Rejected>().is_some() => {
                 let r = e.downcast_ref::<extension_api::Rejected>().unwrap();
@@ -437,37 +440,154 @@ impl ProxyHttp for PhpProxy {
             }
         };
 
-        // An informational head can't be forwarded as a final response over h1
-        // (the contract's 101 carve-out included: this front has no upgrade
-        // machinery). Loud, or the rewrite is invisible outside the wire.
-        let status = if response.status < 200 {
-            tracing::error!(
-                target: "http",
-                "php committed status {} as final; this front cannot forward it — serving 502",
-                response.status
-            );
-            502
-        } else {
-            response.status
-        };
-        // 204/304 have no message body: never add a server-framed Content-Length (a
-        // forced 0 would misframe a 304). A HEAD response body never goes on the
-        // wire either, and the buffered length is not what a GET would have sent
-        // (RFC 9110 §8.6), so send neither body nor Content-Length there.
-        // https://www.rfc-editor.org/rfc/rfc9110#section-8.6
-        let no_body = matches!(status, 204 | 304)
-            || session.req_header().method == pingora::http::Method::HEAD;
+        // The event loop writes the stream as it arrives. A one-shot response
+        // is still a Head+Chunk+End trio carrying its computed Content-Length,
+        // so keepalive is preserved on the buffered path; a stream without a
+        // length is chunked (never close-delimited, which kills keepalive).
+        session.set_write_timeout(Some(self.config.write_timeout));
+        let wt = self.config.write_timeout;
+        let mut head_seen = false;
+        let mut no_body = false;
+        let mut declared_cl: Option<u64> = None;
+        // our own counter: pingora adds header bytes into body_bytes_sent()
+        let mut body_sent: u64 = 0;
+        // disarmed once the client pipelines: the probe ate a byte, reuse is off
+        let mut watch_idle = true;
 
-        let header = build_response_header(status, response.headers, response.body.len(), no_body)?;
-        session
-            .write_response_header(Box::new(header), no_body)
-            .await?;
-        if !no_body {
-            session
-                .write_response_body(Some(response.body.into()), true)
-                .await?;
+        let truncated = loop {
+            let ev = tokio::select! {
+                biased;
+                ev = reply.next() => ev,
+                res = session.read_body_or_idle(true), if watch_idle => {
+                    match res {
+                        Err(e) if matches!(e.etype(), ErrorType::ConnectionClosed) => {
+                            // client gone: dropping the reply is what raises
+                            // WorkDiscardedException at the worker's next write
+                            drop(reply);
+                            session.set_keepalive(None);
+                            return Err(Error::explain(
+                                ErrorType::ConnectionClosed,
+                                "downstream closed while streaming",
+                            )
+                            .into_down());
+                        }
+                        // pipelined bytes (or a stray read): the 1-byte probe
+                        // consumed data, so reuse is unsafe; keep serving
+                        _ => {
+                            watch_idle = false;
+                            session.set_keepalive(None);
+                            continue;
+                        }
+                    }
+                }
+            };
+            let Some(ev) = ev else {
+                if !head_seen {
+                    return Err(Error::explain(
+                        ErrorType::HTTPStatus(502),
+                        "php worker died before a response head",
+                    ));
+                }
+                break true;
+            };
+            match ev {
+                ReplyEvent::Interim { status, headers } => {
+                    // HTTP/1.0 defines no 1xx class (contract: interim heads
+                    // are advisory and drop where the protocol has no room;
+                    // RFC 8297 §3 counsels the same caution).
+                    // https://www.rfc-editor.org/rfc/rfc8297#section-3
+                    if session.req_header().version == Version::HTTP_10 || head_seen {
+                        tracing::debug!(target: "http", "dropped interim {status}");
+                        continue;
+                    }
+                    let header = build_interim_header(status, headers)?;
+                    timed(wt, session.write_response_header(Box::new(header), false)).await?;
+                }
+                ReplyEvent::Head {
+                    status,
+                    headers,
+                    content_length,
+                    bodiless,
+                    ..
+                } => {
+                    // A final 1xx can't be forwarded over h1 (no upgrade
+                    // machinery). Loud, or the rewrite is invisible.
+                    let status = if status < 200 {
+                        tracing::error!(
+                            target: "http",
+                            "php committed status {status} as final; this front cannot forward it — serving 502"
+                        );
+                        502
+                    } else {
+                        status
+                    };
+                    no_body = bodiless
+                        || matches!(status, 204 | 304)
+                        || session.req_header().method == Method::HEAD;
+                    let http11 = session.req_header().version == Version::HTTP_11;
+                    let chunked = !no_body && content_length.is_none() && http11;
+                    if !no_body && content_length.is_none() && !http11 {
+                        // close-delimited: pingora renders the Connection
+                        // header from will_keepalive() before its own
+                        // too-late disable, so flip it ahead of the write
+                        session.set_keepalive(None);
+                    }
+                    declared_cl = content_length.filter(|_| !no_body);
+                    let header =
+                        build_response_header(status, headers, declared_cl, chunked, no_body)?;
+                    timed(wt, session.write_response_header(Box::new(header), false)).await?;
+                    head_seen = true;
+                }
+                ReplyEvent::Chunk(b) => {
+                    if no_body || b.is_empty() {
+                        continue;
+                    }
+                    body_sent += b.len() as u64;
+                    // bounded natively by set_write_timeout
+                    session.write_response_body(Some(b), false).await?;
+                }
+                ReplyEvent::File { file, offset, len } => {
+                    if no_body {
+                        continue;
+                    }
+                    body_sent += pump_file(session, file, offset, len, wt).await?;
+                }
+                ReplyEvent::End { .. } if !head_seen => {
+                    return Err(Error::explain(
+                        ErrorType::HTTPStatus(502),
+                        "php produced no response head",
+                    ));
+                }
+                ReplyEvent::End { truncated, .. } => {
+                    // a declared-length under-run must not poison keepalive:
+                    // the truncated close is the only honest framing
+                    break truncated || declared_cl.is_some_and(|cl| body_sent < cl);
+                }
+            }
+        };
+
+        if truncated {
+            session.set_keepalive(None);
+            // Ok(true) would let the proxy's finish() write a clean chunked
+            // terminator and erase the truncation; a downstream-sourced error
+            // writes nothing and drops the socket mid-message.
+            return Err(
+                Error::explain(ErrorType::ConnectionClosed, "php response truncated").into_down(),
+            );
         }
+        // terminate inside the inflight window (the proxy's finish() runs
+        // after logging()); write_timeout does not cover this write natively
+        timed(wt, session.write_response_body(None, true)).await?;
         Ok(true) // response already sent; proxy runs logging + finish, never reaches upstream
+    }
+
+    /// Truncated streams and client aborts exit through downstream-sourced
+    /// errors; they are normal operation, not error-log material.
+    fn suppress_error_log(&self, _session: &Session, _ctx: &Self::CTX, error: &Error) -> bool {
+        matches!(
+            error.etype(),
+            ErrorType::ConnectionClosed | ErrorType::WriteError | ErrorType::WriteTimedout
+        )
     }
 
     async fn upstream_peer(
@@ -489,8 +609,9 @@ impl ProxyHttp for PhpProxy {
 /// cost the body.
 fn build_response_header(
     status: u16,
-    headers: Vec<(String, Vec<u8>)>,
-    body_len: usize,
+    headers: FieldLines,
+    content_length: Option<u64>,
+    chunked: bool,
     no_body: bool,
 ) -> PingoraResult<ResponseHeader> {
     let mut header = ResponseHeader::build(status, Some(headers.len() + 1))?;
@@ -503,8 +624,8 @@ fn build_response_header(
             connection_named_headers(&value, &mut conn_named);
             continue; // Connection is itself hop-by-hop
         }
-        // Framing is derived from the buffered body and connection management is
-        // ours, never PHP's (hop-by-hop, RFC 9110 §7.6.1).
+        // Framing and connection management are ours, never PHP's
+        // (hop-by-hop, RFC 9110 §7.6.1).
         if skip_response_header(&name) {
             continue;
         }
@@ -518,14 +639,92 @@ fn build_response_header(
         }
     }
     // Rare path only: drop the fields a Connection value named, before our own
-    // Content-Length goes in below so a `Connection: content-length` can't strip it.
+    // framing goes in below so a `Connection: content-length` can't strip it.
     for tok in &conn_named {
         header.remove_header(tok.as_str());
     }
+    // A bodiless response (204/304/HEAD/1xx) carries neither field: RFC 9110
+    // §8.6 and RFC 9112 §6.1 forbid them on 204/1xx, and the current HEAD
+    // behavior (no synthesized length) stays.
+    // https://www.rfc-editor.org/rfc/rfc9112#section-6.1
     if !no_body {
-        header.insert_header("Content-Length", body_len.to_string())?;
+        if let Some(n) = content_length {
+            header.insert_header("Content-Length", n.to_string())?;
+        } else if chunked {
+            // pingora selects the body mode from this header; it is never
+            // taken from PHP (skip_response_header strips PHP's)
+            header.insert_header("Transfer-Encoding", "chunked")?;
+        }
     }
     Ok(header)
+}
+
+/// An interim head: PHP's fields (already stripped of framing by the exchange
+/// layer; the skip list is defence-in-depth), no framing of ours.
+fn build_interim_header(status: u16, headers: FieldLines) -> PingoraResult<ResponseHeader> {
+    let mut header = ResponseHeader::build(status, Some(headers.len()))?;
+    for (name, value) in headers {
+        if skip_response_header(&name) || name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        let logged = name.clone();
+        if let Err(e) = header.append_header(name, value) {
+            tracing::debug!(target: "http", "dropped interim header {logged}: {e}");
+        }
+    }
+    Ok(header)
+}
+
+/// `set_write_timeout` bounds body writes only; head writes and the terminator
+/// need this explicit bound.
+async fn timed<T>(
+    wt: Duration,
+    fut: impl std::future::Future<Output = PingoraResult<T>>,
+) -> PingoraResult<T> {
+    match tokio::time::timeout(wt, fut).await {
+        Ok(r) => r,
+        Err(_) => {
+            Err(Error::explain(ErrorType::WriteTimedout, "response write timed out").into_down())
+        }
+    }
+}
+
+/// Stream a validated file slice: 64 KiB reads off the blocking pool (the fd
+/// moves in and out of each read), one bounded body write per read. Returns
+/// the bytes written (short when the file shrank).
+async fn pump_file(
+    session: &mut Session,
+    file: std::fs::File,
+    offset: u64,
+    len: u64,
+    wt: Duration,
+) -> PingoraResult<u64> {
+    use std::os::unix::fs::FileExt;
+    let mut file = file;
+    let mut done: u64 = 0;
+    while done < len {
+        let want = std::cmp::min(64 * 1024, len - done) as usize;
+        let off = offset + done;
+        let (f, res) = tokio::task::spawn_blocking(move || {
+            let mut buf = vec![0u8; want];
+            let res = file.read_at(&mut buf, off).map(|n| {
+                buf.truncate(n);
+                buf
+            });
+            (file, res)
+        })
+        .await
+        .map_err(|e| Error::explain(ErrorType::InternalError, format!("file read task: {e}")))?;
+        file = f;
+        let buf = res
+            .map_err(|e| Error::explain(ErrorType::InternalError, format!("sendfile read: {e}")))?;
+        if buf.is_empty() {
+            break;
+        }
+        done += buf.len() as u64;
+        timed(wt, session.write_response_body(Some(buf.into()), false)).await?;
+    }
+    Ok(done)
 }
 
 /// Parse a `Connection` header value into the lower-cased field names it lists,
@@ -758,7 +957,8 @@ mod tests {
                 ("X-Drop", "1"),
                 ("X-Keep", "2"),
             ]),
-            7,
+            Some(7),
+            false,
             false,
         )
         .unwrap();
@@ -771,8 +971,11 @@ mod tests {
     #[test]
     fn bodyless_statuses_get_no_content_length() {
         for status in [204u16, 304] {
-            let head = build_response_header(status, hdrs(&[("X-A", "1")]), 0, true).unwrap();
+            // even a declared length stays off a bodiless head
+            let head =
+                build_response_header(status, hdrs(&[("X-A", "1")]), Some(0), false, true).unwrap();
             assert!(head.headers.get("content-length").is_none(), "{status}");
+            assert!(head.headers.get("transfer-encoding").is_none(), "{status}");
         }
     }
 
@@ -783,7 +986,8 @@ mod tests {
         let head = build_response_header(
             200,
             hdrs(&[("Content Type", "text/html"), ("X-Keep", "2")]),
-            3,
+            Some(3),
+            false,
             false,
         )
         .unwrap();
@@ -796,12 +1000,44 @@ mod tests {
         let head = build_response_header(
             200,
             hdrs(&[("Content-Length", "999"), ("Transfer-Encoding", "chunked")]),
-            4,
+            Some(4),
+            false,
             false,
         )
         .unwrap();
         assert_eq!(head.headers.get("content-length").unwrap().as_bytes(), b"4");
         assert!(head.headers.get("transfer-encoding").is_none());
+    }
+
+    /// The plugin is the sole author of chunked framing, and a Connection
+    /// value cannot strip it (same slot the Content-Length protection uses).
+    #[test]
+    fn chunked_is_authored_here_and_protected() {
+        let head = build_response_header(
+            200,
+            hdrs(&[("Connection", "transfer-encoding"), ("X-Keep", "1")]),
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            head.headers.get("transfer-encoding").unwrap().as_bytes(),
+            b"chunked"
+        );
+        assert!(head.headers.get("content-length").is_none());
+    }
+
+    /// An interim head never carries framing fields.
+    #[test]
+    fn interim_head_carries_no_framing() {
+        let head = build_interim_header(
+            103,
+            hdrs(&[("Link", "</a.css>; rel=preload"), ("Content-Length", "5")]),
+        )
+        .unwrap();
+        assert!(head.headers.get("link").is_some());
+        assert!(head.headers.get("content-length").is_none());
     }
 
     #[test]

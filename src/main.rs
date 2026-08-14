@@ -116,6 +116,17 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     let script: PathBuf = settings.pool.entrypoint.clone();
 
+    // sendFile containment: the configured root, else the entrypoint's
+    // directory. Set pre-fork; workers inherit it.
+    php_sys::set_sendfile_root(
+        settings
+            .http
+            .sendfile_root
+            .clone()
+            .or_else(|| script.parent().map(std::path::Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("/")),
+    );
+
     // rapira_config::Listen and rapira_pingora::Listen are distinct types on purpose: the
     // extension crate stays independent of core's config crate, and core owns the one
     // mapping between them (a From impl is barred by the orphan rule anyway).
@@ -127,6 +138,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         server_name: settings.http.server_name,
         server_port: settings.http.server_port,
         max_body_size: settings.http.max_body_size,
+        write_timeout: settings.http.write_timeout,
         unsafe_field_names: match settings.http.unsafe_field_names {
             UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
             UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,

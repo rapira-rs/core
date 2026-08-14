@@ -128,10 +128,11 @@ try {
             $ex->writeHead(101, ['upgrade' => ['example/1']]);
             try {
                 $ex->writeHead(200);
-            } catch (HeadAlreadyWrittenError) {
-                $out[] = 'locked';
+            } catch (HeadAlreadyWrittenError $e) {
+                \Rapira\log('101-locked', context: ['class' => $e::class]);
             }
-            $ex->writeBody(implode(';', $out));
+            // accepted and dropped: a 1xx response has no body
+            $ex->writeBody('dropped');
             continue;
         }
         if ($probe === 'multi') {

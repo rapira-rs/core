@@ -12,6 +12,13 @@ extern bool rapira_rs_exchange_write_head(void *job, int64_t status,
 extern bool rapira_rs_exchange_write_body(void *job, const char *p, size_t len,
                                           bool eos);
 extern bool rapira_rs_exchange_is_finalized(const void *job);
+extern bool rapira_rs_exchange_is_cancelled(const void *job);
+extern bool rapira_rs_exchange_flush(void *job);
+extern bool rapira_rs_exchange_send_file(void *job, const char *path,
+                                         size_t path_len, int64_t offset,
+                                         int64_t length, bool length_is_null,
+                                         bool eos);
+extern bool rapira_rs_exchange_write_trailers(void *job, HashTable *trailers);
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, __construct) {
     zend_throw_error(NULL, "host-created");
@@ -75,24 +82,65 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, isFinalized) {
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, isCancelled) {
     ZEND_PARSE_PARAMETERS_NONE();
-    // Host-closed detection (deadline, gone client, drain) is not wired yet;
-    // until it is, no unit is ever cancelled.
-    RETURN_FALSE;
+    void *job = exchange_job(ZEND_THIS);
+    if (job == NULL) {
+        RETURN_THROWS();
+    }
+    RETURN_BOOL(rapira_rs_exchange_is_cancelled(job));
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {
-    zend_throw_error(NULL, "sendFile() is not implemented");
-    RETURN_THROWS();
+    zend_string *path;
+    zend_long offset = 0;
+    zend_long length = 0;
+    bool length_is_null = true;
+    bool eos = true;
+    ZEND_PARSE_PARAMETERS_START(1, 4)
+    Z_PARAM_PATH_STR(path)
+    Z_PARAM_OPTIONAL
+    Z_PARAM_LONG(offset)
+    Z_PARAM_LONG_OR_NULL(length, length_is_null)
+    Z_PARAM_BOOL(eos)
+    ZEND_PARSE_PARAMETERS_END();
+
+    void *job = exchange_job(ZEND_THIS);
+    if (job == NULL) {
+        RETURN_THROWS();
+    }
+    if (!rapira_rs_exchange_send_file(job, ZSTR_VAL(path), ZSTR_LEN(path),
+                                      (int64_t)offset, (int64_t)length,
+                                      length_is_null, eos)) {
+        rapira_throw_or_backstop("sendFile");
+        RETURN_THROWS();
+    }
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers) {
-    zend_throw_error(NULL, "writeTrailers() is not implemented");
-    RETURN_THROWS();
+    HashTable *trailers;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+    Z_PARAM_ARRAY_HT(trailers)
+    ZEND_PARSE_PARAMETERS_END();
+
+    void *job = exchange_job(ZEND_THIS);
+    if (job == NULL) {
+        RETURN_THROWS();
+    }
+    if (!rapira_rs_exchange_write_trailers(job, trailers)) {
+        rapira_throw_or_backstop("writeTrailers");
+        RETURN_THROWS();
+    }
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
-    zend_throw_error(NULL, "flush() is not implemented");
-    RETURN_THROWS();
+    ZEND_PARSE_PARAMETERS_NONE();
+    void *job = exchange_job(ZEND_THIS);
+    if (job == NULL) {
+        RETURN_THROWS();
+    }
+    if (!rapira_rs_exchange_flush(job)) {
+        rapira_throw_or_backstop("flush");
+        RETURN_THROWS();
+    }
 }
 
 // ---- getRequest: the graph builder lives in Rust (exchange.rs); this shell

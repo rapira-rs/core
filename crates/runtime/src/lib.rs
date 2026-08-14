@@ -315,13 +315,12 @@ impl RapiraBackend {
 }
 
 impl extension_api::Backend for RapiraBackend {
-    /// Submit `req` and collect the whole response — the worker seals it into a
-    /// single frame, so the caller wakes once per response (the error contract lives
-    /// on `Php::exec`).
+    /// Submit `req`; the Reply wraps the frame receiver directly, so dropping
+    /// it is the client-gone signal the exchange layer observes.
     fn exec(
         &self,
         req: extension_api::Request,
-    ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::Response>> + Send + '_>>
+    ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::Reply>> + Send + '_>>
     {
         Box::pin(async move {
             // parse/reject happens before handle()'s pending increment — a
@@ -329,7 +328,7 @@ impl extension_api::Backend for RapiraBackend {
             let req = self.to_request(req).await?;
             // shedding is this host's answer, not a gateway fault: 503 for a
             // saturated intake, 500 for a pool that is gone
-            let mut rx = self.rapira.handle(req).await.map_err(|e| {
+            let rx = self.rapira.handle(req).await.map_err(|e| {
                 anyhow::Error::new(extension_api::Rejected {
                     status: match e {
                         php_sys::HandleError::Saturated => 503,
@@ -338,22 +337,48 @@ impl extension_api::Backend for RapiraBackend {
                     reason: e.to_string(),
                 })
             })?;
-            let Some(frame) = rx.recv().await else {
-                return Err(anyhow::anyhow!(
-                    "php worker died mid-response (channel closed without a response)"
-                ));
-            };
-            if frame.truncated {
-                return Err(anyhow::anyhow!("php crashed mid-response; body truncated"));
-            }
-            let Some(head) = frame.head else {
-                return Err(anyhow::anyhow!("php produced no response head"));
-            };
-            // Header/body bytes pass through unchanged: PHP may emit latin1/binary.
-            Ok(extension_api::Response {
-                status: head.status,
-                headers: head.headers,
-                body: frame.body.into(),
+            Ok(extension_api::Reply::new(Box::new(FrameSource(rx))))
+        })
+    }
+}
+
+/// `php_sys::Frame` receiver as a [`extension_api::ReplySource`]; the mapping
+/// is field-for-field.
+struct FrameSource(tokio::sync::mpsc::Receiver<php_sys::Frame>);
+
+impl extension_api::ReplySource for FrameSource {
+    fn next(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Option<extension_api::ReplyEvent>> + Send + '_>> {
+        Box::pin(async move {
+            self.0.recv().await.map(|frame| match frame {
+                php_sys::Frame::Interim(h) => extension_api::ReplyEvent::Interim {
+                    status: h.status,
+                    headers: h.headers,
+                },
+                php_sys::Frame::Head {
+                    head,
+                    content_length,
+                    bodiless,
+                    body_coded,
+                } => extension_api::ReplyEvent::Head {
+                    status: head.status,
+                    headers: head.headers,
+                    content_length,
+                    bodiless,
+                    body_coded,
+                },
+                php_sys::Frame::Chunk(b) => extension_api::ReplyEvent::Chunk(b),
+                php_sys::Frame::File { file, offset, len } => {
+                    extension_api::ReplyEvent::File { file, offset, len }
+                }
+                php_sys::Frame::End {
+                    trailers,
+                    truncated,
+                } => extension_api::ReplyEvent::End {
+                    trailers,
+                    truncated,
+                },
             })
         })
     }
@@ -510,6 +535,78 @@ mod tests {
     fn rapira_runtime_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<ExtensionRuntime>();
+    }
+
+    use extension_api::{Reply, ReplyEvent, ReplySource};
+
+    struct VecSource(std::collections::VecDeque<ReplyEvent>);
+
+    impl ReplySource for VecSource {
+        fn next(&mut self) -> Pin<Box<dyn Future<Output = Option<ReplyEvent>> + Send + '_>> {
+            let ev = self.0.pop_front();
+            Box::pin(async move { ev })
+        }
+    }
+
+    fn reply(events: Vec<ReplyEvent>) -> Reply {
+        Reply::new(Box::new(VecSource(events.into())))
+    }
+
+    fn head() -> ReplyEvent {
+        ReplyEvent::Head {
+            status: 200,
+            headers: vec![("x-a".into(), b"1".to_vec())],
+            content_length: None,
+            bodiless: false,
+            body_coded: false,
+        }
+    }
+
+    fn end(truncated: bool) -> ReplyEvent {
+        ReplyEvent::End {
+            trailers: Vec::new(),
+            truncated,
+        }
+    }
+
+    /// The four stream outcomes map to the three documented errors and Ok.
+    #[tokio::test]
+    async fn collect_maps_stream_outcomes() {
+        let died = reply(Vec::new()).collect().await.unwrap_err();
+        assert!(died.to_string().contains("died mid-response"), "{died:#}");
+
+        let cut = reply(vec![head()]).collect().await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let cut = reply(vec![head(), end(true)]).collect().await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let headless = reply(vec![end(false)]).collect().await.unwrap_err();
+        assert!(
+            headless.to_string().contains("no response head"),
+            "{headless:#}"
+        );
+    }
+
+    /// Chunks concatenate in order; interim heads are dropped.
+    #[tokio::test]
+    async fn collect_concatenates_the_stream() {
+        let r = reply(vec![
+            ReplyEvent::Interim {
+                status: 103,
+                headers: Vec::new(),
+            },
+            head(),
+            ReplyEvent::Chunk(bytes::Bytes::from_static(b"one,")),
+            ReplyEvent::Chunk(bytes::Bytes::from_static(b"two")),
+            end(false),
+        ])
+        .collect()
+        .await
+        .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.headers, vec![("x-a".to_string(), b"1".to_vec())]);
+        assert_eq!(r.body, b"one,two");
     }
 
     /// The pingora front classifies a spool failure by finding an `io::Error`

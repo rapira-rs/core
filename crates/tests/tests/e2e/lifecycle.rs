@@ -438,9 +438,11 @@ fn dispatcher_write_head_reaches_the_wire() {
         "one field line per list value\n{}",
         diagnostics(&srv)
     );
+    // honour-then-enforce: the declared 999 is the framing; the 4-byte body
+    // under-runs it, so the front closes the connection instead of reusing it
     assert!(
-        text.contains("\r\ncontent-length: 4\r\n"),
-        "server framing must win over php's 999\n{}",
+        text.contains("\r\ncontent-length: 999\r\n"),
+        "the declared content-length must be honoured\n{}",
         diagnostics(&srv)
     );
     assert!(text.ends_with("body"), "{text:?}\n{}", diagnostics(&srv));

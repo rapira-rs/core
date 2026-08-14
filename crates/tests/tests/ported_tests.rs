@@ -12,29 +12,39 @@ fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u
     r
 }
 
-/// Like `drain`, but keeps the head: (head presence, status, headers, body).
+/// Like `drain`, but keeps the head and the truncation flag.
 struct Resp {
     heads: u32,
     status: u16,
     headers: Vec<(String, Vec<u8>)>,
     body: String,
+    truncated: bool,
 }
 
 fn recv_all(mut rx: tokio::sync::mpsc::Receiver<Frame>) -> Resp {
-    let (mut heads, mut status, mut headers, mut body) = (0u32, 0u16, Vec::new(), String::new());
-    if let Some(frame) = rx.blocking_recv() {
-        if let Some(h) = frame.head {
-            heads = 1;
-            status = h.status;
-            headers = h.headers;
+    let (mut heads, mut status, mut headers, mut raw, mut truncated) =
+        (0u32, 0u16, Vec::new(), Vec::new(), false);
+    while let Some(frame) = rx.blocking_recv() {
+        match frame {
+            Frame::Interim(_) | Frame::File { .. } => {}
+            Frame::Head { head, .. } => {
+                heads += 1;
+                status = head.status;
+                headers = head.headers;
+            }
+            Frame::Chunk(b) => raw.extend_from_slice(&b),
+            Frame::End { truncated: t, .. } => {
+                truncated = t;
+                break;
+            }
         }
-        body = String::from_utf8_lossy(&frame.body).into_owned();
     }
     Resp {
         heads,
         status,
         headers,
-        body,
+        body: String::from_utf8_lossy(&raw).into_owned(),
+        truncated,
     }
 }
 
@@ -510,25 +520,19 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("ported_tests/flush-worker.php")))?;
     let h = r.handle()?;
     for i in [42, 43] {
-        let mut rx = h.handle_blocking(req(
+        let rx = h.handle_blocking(req(
             &format!("/flush-worker.php?i={i}"),
             "ported_tests/flush-worker.php",
         ))?;
-        let frame = rx
-            .blocking_recv()
-            .expect("worker must seal exactly one frame");
-        assert!(
-            rx.blocking_recv().is_none(),
-            "exactly one frame per response"
-        );
-        let head = frame.head.expect("head must be recorded");
-        assert_eq!(head.status, 200);
+        let resp = recv_all(rx);
+        assert_eq!(resp.heads, 1, "exactly one head per response");
+        assert_eq!(resp.status, 200);
         assert_eq!(
-            &frame.body[..],
-            format!("Hello {i}").as_bytes(),
+            resp.body,
+            format!("Hello {i}"),
             "flushed chunks arrive whole and in order"
         );
-        assert!(!frame.truncated, "clean completion is not truncated");
+        assert!(!resp.truncated, "clean completion is not truncated");
     }
     drop(h);
     r.shutdown();

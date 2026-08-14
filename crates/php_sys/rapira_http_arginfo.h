@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 8370adb65344d4ebdb3244943303cc8db3e6c6d2 */
+ * Stub hash: ea35ffe9b86137d42720daeeb8e3a05752eeef06 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Tls___construct, 0, 0, 7)
 	ZEND_ARG_TYPE_INFO(0, version, IS_STRING, 0)

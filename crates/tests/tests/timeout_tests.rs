@@ -79,23 +79,14 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     // the suite.
     let mut rx = h.handle_blocking(req("/?probe=spin", "dispatcher/verbs-worker.php"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match rx.try_recv() {
-            Ok(frame) => panic!(
-                "a spinning unit must not seal a frame (got status {:?})",
-                frame.head.map(|h| h.status)
-            ),
-            // the unit died unsealed: the timer fired and the cycle recycled
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "spinning unit was never killed — the per-unit budget did not re-arm"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
-    }
+    // the unit must die unsealed: the timer fired and the cycle recycled
+    let resp = tests::drain_resp_deadline(&mut rx, deadline)
+        .expect("spinning unit was never killed — the per-unit budget did not re-arm");
+    assert!(
+        resp.head.is_none() && !resp.ended,
+        "a spinning unit must not seal a response (got status {})",
+        resp.status()
+    );
 
     let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
     assert_eq!(
@@ -138,22 +129,10 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
         "timeout_tests/timeout-worker.php",
     ))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let frame = loop {
-        match rx.try_recv() {
-            Ok(frame) => break frame,
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "spinning job was never killed — max_execution_time did not fire"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                panic!("worker died without sealing a response");
-            }
-        }
-    };
-    let body = String::from_utf8_lossy(&frame.body).into_owned();
+    let resp = tests::drain_resp_deadline(&mut rx, deadline)
+        .expect("spinning job was never killed — max_execution_time did not fire");
+    assert!(resp.ended, "worker died without sealing a response");
+    let body = resp.body_string();
     assert!(
         body.contains("Maximum execution time"),
         "the timeout fatal must reach the body (got: {body:?})"
@@ -162,7 +141,7 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     // 200 before php_error_cb could swap in a 500 (it only does so while no
     // headers are sent) — canonical PHP behavior for a mid-output fatal with
     // display_errors=On.
-    assert_eq!(frame.head.map(|h| h.status), Some(200));
+    assert_eq!(resp.status(), 200);
 
     // The worker recovers: the timeout bailed out and recycled the cycle, and the
     // next job is served normally. (The teardown disarm itself has no PHP-visible

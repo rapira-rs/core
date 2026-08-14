@@ -61,16 +61,134 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
     }
 }
 
-/// Drain a response to `(status, body)`. Status is 0 if no head was produced
-/// (or the worker died before sealing a frame).
-pub fn drain(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
-    match rx.blocking_recv() {
-        Some(f) => (
-            f.head.map_or(0, |h| h.status),
-            String::from_utf8_lossy(&f.body).into_owned(),
-        ),
-        None => (0, String::new()),
+/// A response stream collected to its `End` (or to the producer dying).
+#[derive(Default)]
+pub struct Resp {
+    pub interim: Vec<php_sys::ResponseHead>,
+    pub head: Option<php_sys::ResponseHead>,
+    pub content_length: Option<u64>,
+    pub bodiless: bool,
+    pub body: Vec<u8>,
+    pub trailers: Vec<(String, Vec<u8>)>,
+    pub truncated: bool,
+    /// An `End` frame arrived; false = the producer died first.
+    pub ended: bool,
+}
+
+impl Resp {
+    /// 0 = no head (producer died, or the response never recorded one).
+    pub fn status(&self) -> u16 {
+        self.head.as_ref().map_or(0, |h| h.status)
     }
+
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.head
+            .as_ref()?
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
+    }
+
+    pub fn body_string(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    /// Fold one frame in; true when the stream is over.
+    fn fold(&mut self, frame: Frame) -> bool {
+        match frame {
+            Frame::Interim(h) => self.interim.push(h),
+            Frame::Head {
+                head,
+                content_length,
+                bodiless,
+                ..
+            } => {
+                self.head = Some(head);
+                self.content_length = content_length;
+                self.bodiless = bodiless;
+            }
+            Frame::Chunk(b) => self.body.extend_from_slice(&b),
+            Frame::File { file, offset, len } => match read_slice(&file, offset, len) {
+                Ok(bytes) => self.body.extend_from_slice(&bytes),
+                Err(e) => panic!("reading a File frame: {e}"),
+            },
+            Frame::End {
+                trailers,
+                truncated,
+            } => {
+                self.trailers = trailers;
+                self.truncated = truncated;
+                self.ended = true;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    let mut out = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
+    let mut done = 0usize;
+    while done < out.len() {
+        let n = file.read_at(&mut out[done..], offset + done as u64)?;
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    out.truncate(done);
+    Ok(out)
+}
+
+/// Poll until a first frame arrives (or `deadline` passes), then collect the
+/// stream. None = nothing arrived in time. A producer that died with no
+/// frames yields `Resp::default()` (no head, not ended).
+pub fn drain_resp_deadline(
+    rx: &mut mpsc::Receiver<Frame>,
+    deadline: std::time::Instant,
+) -> Option<Resp> {
+    loop {
+        match rx.try_recv() {
+            Ok(frame) => {
+                let mut resp = Resp::default();
+                if !resp.fold(frame) {
+                    while let Some(f) = rx.blocking_recv() {
+                        if resp.fold(f) {
+                            break;
+                        }
+                    }
+                }
+                return Some(resp);
+            }
+            Err(mpsc::error::TryRecvError::Disconnected) => return Some(Resp::default()),
+            Err(mpsc::error::TryRecvError::Empty) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// Collect a whole response stream.
+pub fn drain_resp(mut rx: mpsc::Receiver<Frame>) -> Resp {
+    let mut resp = Resp::default();
+    while let Some(frame) = rx.blocking_recv() {
+        if resp.fold(frame) {
+            break;
+        }
+    }
+    resp
+}
+
+/// Drain a response to `(status, body)`. Status is 0 if no head was produced
+/// (or the worker died before sealing one).
+pub fn drain(rx: mpsc::Receiver<Frame>) -> (u16, String) {
+    let r = drain_resp(rx);
+    (r.status(), r.body_string())
 }
 
 /// Async sibling of `php_lock` for `#[tokio::test]`.
@@ -79,15 +197,21 @@ pub async fn php_lock_async() -> tokio::sync::MutexGuard<'static, ()> {
     PHP_LOCK_ASYNC.lock().await
 }
 
-/// Async sibling of `drain`: drain a response to `(status, body)` inside a runtime.
-pub async fn drain_async(mut rx: mpsc::Receiver<Frame>) -> (u16, String) {
-    match rx.recv().await {
-        Some(f) => (
-            f.head.map_or(0, |h| h.status),
-            String::from_utf8_lossy(&f.body).into_owned(),
-        ),
-        None => (0, String::new()),
+/// Async sibling of `drain_resp`.
+pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
+    let mut resp = Resp::default();
+    while let Some(frame) = rx.recv().await {
+        if resp.fold(frame) {
+            break;
+        }
     }
+    resp
+}
+
+/// Async sibling of `drain`.
+pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> (u16, String) {
+    let r = drain_resp_async(rx).await;
+    (r.status(), r.body_string())
 }
 
 fn init_php_env() {

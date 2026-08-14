@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use php_sys::{Mode, Rapira, Request};
-use tests::{drain, fixture, php_lock, req};
+use tests::{drain, drain_resp, fixture, php_lock, req};
 
 /// Body source returning at most one byte per read() call — legal `Read`
 /// behavior that streaming bodies (pipes, chunked decoders) exhibit.
@@ -192,16 +192,12 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     )))?;
     let h = r.handle()?;
 
-    let mut rx = h.handle_blocking(req("/", "general_tests/throw-quiet-worker.php"))?;
-    let frame = rx.blocking_recv().expect("worker must seal a response");
-    assert!(
-        rx.blocking_recv().is_none(),
-        "exactly one frame per response"
-    );
+    let resp = drain_resp(h.handle_blocking(req("/", "general_tests/throw-quiet-worker.php"))?);
     drop(h);
     r.shutdown();
 
-    let head = frame.head.expect("error response must record a head");
+    assert!(resp.ended, "worker must seal a response");
+    let head = resp.head.expect("error response must record a head");
     assert_eq!(
         head.status, 500,
         "uncaught throw with display_errors=0 is a 500"

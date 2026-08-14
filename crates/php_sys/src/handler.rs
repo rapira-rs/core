@@ -11,9 +11,10 @@ use crate::{
     types::{Context, Frame, Job, Request},
 };
 
-// `Context::finish` seals the response into exactly one frame, so the channel
-// never holds more than one message.
-const FRAME_CAP: usize = 1;
+// A buffered response is a Head+Chunk+End trio emitted back-to-back; cap 4
+// lets it (plus a stray interim head) queue without parking the PHP thread.
+// Longer streams ride the channel's backpressure.
+const FRAME_CAP: usize = 4;
 
 /// How long a request may wait for an intake slot before it is shed.
 const INTAKE_WAIT: Duration = Duration::from_secs(30);

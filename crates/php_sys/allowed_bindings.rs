@@ -21,6 +21,11 @@ bind! {
     rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,
     rapira_ce_timeout_exception, rapira_ce_closed_exception,
     rapira_ce_not_in_worker_mode_error, zend_argument_value_error, zend_argument_type_error,
+    rapira_ce_work_discarded_exception, rapira_ce_http_content_length_exceeded_error,
+    rapira_ce_http_head_not_written_error, rapira_ce_http_file_not_sendable_exception,
+    // the streaming send-park guard disarms/re-arms the wall timer around a
+    // full-channel wait (zend_unset_timeout is already bound above)
+    zend_set_timeout,
     // writeHead's array walk: the exported position API (the FOREACH macros are
     // header-only); ZVAL_DEREF/Z_TYPE are field reads on the bindgen structs
     zend_hash_internal_pointer_reset_ex, zend_hash_get_current_key_ex,

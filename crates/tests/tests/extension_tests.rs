@@ -10,6 +10,11 @@ use tests::{fixture, php_lock};
 /// Distinct ids so the same type can be registered many times (dup-name check).
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// Buffered exec: dispatch, then collect the whole response stream.
+async fn exec_full(php: &Php, req: Request) -> Result<Response> {
+    php.exec(req).await?.collect().await
+}
+
 /// A bodyless `GET` for `uri` with the defaults every driver here needs.
 fn get_request(uri: &str) -> Request {
     Request {
@@ -52,8 +57,8 @@ impl Extension for Driver {
         // `join!` starts both exec subtasks before awaiting either, so both are in flight
         // through the PHP pool concurrently (both must complete; not a strict parallelism proof).
         let (a, b) = tokio::join!(
-            php.exec(get_request("/?from=a")),
-            php.exec(get_request("/?from=b")),
+            exec_full(&php, get_request("/?from=a")),
+            exec_full(&php, get_request("/?from=b")),
         );
         check(&a?, "ok:a")?;
         check(&b?, "ok:b")?;
@@ -126,7 +131,7 @@ impl Extension for RejectDriver {
             r
         };
 
-        let err = match php.exec(multipart_post(b"no boundary here".to_vec())).await {
+        let err = match exec_full(&php, multipart_post(b"no boundary here".to_vec())).await {
             Err(e) => e,
             Ok(_) => anyhow::bail!("malformed multipart must reject"),
         };
@@ -145,7 +150,7 @@ impl Extension for RejectDriver {
             b"\r\n--B--".to_vec(),
         ]
         .concat();
-        let err = match php.exec(multipart_post(big)).await {
+        let err = match exec_full(&php, multipart_post(big)).await {
             Err(e) => e,
             Ok(_) => anyhow::bail!("over-limit file part must reject"),
         };
@@ -170,7 +175,7 @@ impl Extension for RejectDriver {
                 b"multipart/form-data; boundary=EVIL".to_vec(),
             ),
         ];
-        let err = match php.exec(smuggle).await {
+        let err = match exec_full(&php, smuggle).await {
             Err(e) => e,
             Ok(_) => anyhow::bail!("repeated content-type with a multipart body must reject"),
         };
@@ -187,18 +192,18 @@ impl Extension for RejectDriver {
         // raw (empty) body, and a multipart-shaped body under a non-multipart
         // content-type is delivered raw
         check(
-            &php.exec(multipart_post(Vec::new())).await?,
+            &exec_full(&php, multipart_post(Vec::new())).await?,
             "method=POST body=",
         )?;
         let mut plain = multipart_post(b"--B\r\nnot really\r\n--B--".to_vec());
         plain.headers = vec![("content-type".into(), b"text/plain".to_vec())];
         check(
-            &php.exec(plain).await?,
+            &exec_full(&php, plain).await?,
             "method=POST body=--B\r\nnot really\r\n--B--",
         )?;
 
         check(
-            &php.exec(get_request("/?from=a")).await?,
+            &exec_full(&php, get_request("/?from=a")).await?,
             "method=GET body=",
         )
     }
@@ -274,7 +279,7 @@ impl Extension for ErrorPathDriver {
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
-        let resp = php.exec(get_request("/")).await?;
+        let resp = exec_full(&php, get_request("/")).await?;
         anyhow::ensure!(resp.status == 404, "expected 404, got {}", resp.status);
         anyhow::ensure!(
             resp.headers
@@ -328,7 +333,7 @@ impl Extension for TruncatedDriver {
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
-        let err = match php.exec(get_request("/")).await {
+        let err = match exec_full(&php, get_request("/")).await {
             Ok(resp) => anyhow::bail!(
                 "exec must reject a truncated response, got {} with body {:?}",
                 resp.status,

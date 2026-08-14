@@ -174,8 +174,12 @@ pub struct HttpSettings {
     pub server_port: u16,
     /// Bytes, converted from the config's `max_body_size_mb`.
     pub max_body_size: usize,
+    /// Per-write bound on the response path, from `write_timeout_secs`.
+    pub write_timeout: std::time::Duration,
     pub unsafe_field_names: UnsafeFieldNames,
     pub uploads: UploadSettings,
+    /// `[http.sendfile].root`; None = the entrypoint's directory.
+    pub sendfile_root: Option<PathBuf>,
 }
 
 /// Multipart limits and the spool root (`[http.uploads]`); past a limit the
@@ -256,11 +260,21 @@ struct HttpSection {
     server_name: Option<String>,
     server_port: Option<u16>,
     max_body_size_mb: Option<usize>,
+    write_timeout_secs: Option<u64>,
     /// Unrecognised values are a boot error, not a silent fall back to the default —
     /// a security knob that survives a typo is worse than one that refuses to start.
     unsafe_field_names: Option<UnsafeFieldNames>,
     #[serde(default)]
     uploads: UploadsSection,
+    #[serde(default)]
+    sendfile: SendfileSection,
+}
+
+/// `[http.sendfile]`: the root `sendFile()` paths must stay inside.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendfileSection {
+    root: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -382,6 +396,16 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow::anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
 
+    let write_timeout_secs = file.http.write_timeout_secs.unwrap_or(30);
+    if write_timeout_secs == 0 {
+        bail!("http.write_timeout_secs must be at least 1");
+    }
+
+    let sendfile_root = match file.http.sendfile.root.filter(|r| !r.is_empty()) {
+        Some(r) => Some(config_relative(config_dir, &r)?),
+        None => None,
+    };
+
     let uploads = resolve_uploads(file.http.uploads, config_dir)?;
     let pool = resolve_pool(file.pool, &cli, config_dir, "pool")?;
     let supervisor = resolve_supervisor(file.supervisor, config_dir)?;
@@ -396,8 +420,10 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
                 .unwrap_or_else(|| "localhost".to_owned()),
             server_port,
             max_body_size,
+            write_timeout: std::time::Duration::from_secs(write_timeout_secs),
             unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
             uploads,
+            sendfile_root,
         },
         pool,
         supervisor,

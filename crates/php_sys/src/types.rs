@@ -6,6 +6,10 @@ use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::Sender;
 
+/// Header/trailer fields: one entry per field line, wire order, names as
+/// received, values raw bytes (latin1/binary-safe).
+pub type FieldLines = Vec<(String, Vec<u8>)>;
+
 #[derive(Debug, Clone)]
 pub enum Mode {
     Classic,
@@ -33,10 +37,42 @@ impl Outcome {
     }
 }
 
-pub struct Frame {
-    pub head: Option<ResponseHead>,
-    pub body: Bytes,
-    pub truncated: bool,
+/// One event of a response stream. A well-formed stream is
+/// `Interim* Head? (Chunk|File)* End?`: `End` without a `Head` only happens
+/// when the producer recorded no head at all, and a channel that closes
+/// without `End` means the producer died (truncated when a `Head` was seen).
+pub enum Frame {
+    /// Advisory interim head (100-199, never 101); forwarded where the
+    /// protocol allows, dropped otherwise.
+    Interim(ResponseHead),
+    /// The final head, at most once per response.
+    Head {
+        head: ResponseHead,
+        /// The framing the consumer applies when Some: a declared
+        /// content-length being honoured, or the computed length of a response
+        /// that ends on its first body write. None means the consumer chooses
+        /// (chunked on HTTP/1.1). Never synthesized for a bodiless response.
+        content_length: Option<u64>,
+        /// 204 | 304 | a HEAD request | 1xx: no body bytes and no framing
+        /// fields go on the wire.
+        bodiless: bool,
+        /// The head carried content-encoding: the body is already coded.
+        body_coded: bool,
+    },
+    Chunk(Bytes),
+    /// A file slice the producer opened and validated; the consumer streams it
+    /// and owns the handle.
+    File {
+        file: std::fs::File,
+        offset: u64,
+        len: u64,
+    },
+    /// Terminal, exactly once from a live producer. Trailers ride here; a
+    /// consumer that cannot express them drops the section.
+    End {
+        trailers: FieldLines,
+        truncated: bool,
+    },
 }
 
 pub struct Job {
@@ -97,9 +133,9 @@ impl Drop for SpooledFile {
 }
 
 pub struct FormField {
-    pub name: Vec<u8>,                   // content-disposition name, bytes as received
-    pub value: Vec<u8>,                  // part body, no decoding
-    pub headers: Vec<(String, Vec<u8>)>, // the part's header section, per-value shape
+    pub name: Vec<u8>,       // content-disposition name, bytes as received
+    pub value: Vec<u8>,      // part body, no decoding
+    pub headers: FieldLines, // the part's header section, per-value shape
 }
 
 pub struct UploadedFile {
@@ -109,7 +145,7 @@ pub struct UploadedFile {
     /// content-type value verbatim, parameters included; an empty or OWS-only
     /// value maps to None upstream.
     pub client_media_type: Option<Vec<u8>>,
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: FieldLines,
     pub file: SpooledFile,
     /// Bytes written to disk. A 64-bit zend_long is assumed at the FFI edge.
     pub size: u64,
@@ -151,7 +187,7 @@ pub struct Request {
     pub script_filename: PathBuf,
     /// One entry per field line, wire order per name; values as bytes
     /// (latin1/binary-safe).
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: FieldLines,
     pub server_vars: Vec<(String, String)>,
     /// First content-type field line, raw bytes.
     pub content_type: Option<Vec<u8>>,
@@ -166,7 +202,7 @@ pub struct Request {
 
 pub struct ResponseHead {
     pub status: u16,
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: FieldLines,
 }
 
 fn status_field_code(value: &[u8]) -> Option<u16> {
@@ -192,7 +228,7 @@ pub struct ReqC {
     pub authorization: Option<CString>,
     pub env: HashMap<Box<[u8]>, CString>,
     /// One deterministic value per name for the `HTTP_*` mapping (crate::fold).
-    pub folded_headers: Vec<(String, Vec<u8>)>,
+    pub folded_headers: FieldLines,
     /// Rendered CGI address strings: Inet → ip / port, Unix → "" / "0".
     pub remote_addr: String,
     pub remote_port: String,
@@ -313,7 +349,7 @@ impl Context {
         errored && self.stream == StreamState::BodyStreamed
     }
 
-    pub fn commit_head(&mut self, mut status: u16, mut headers: Vec<(String, Vec<u8>)>) {
+    pub fn commit_head(&mut self, mut status: u16, mut headers: FieldLines) {
         headers.retain(|(name, value)| {
             if !name.eq_ignore_ascii_case("status") {
                 return true;
@@ -334,14 +370,38 @@ impl Context {
         self.stream = StreamState::HeadSent;
     }
 
+    /// Seal the buffered response as a Head+Chunk+End event trio (Head skipped
+    /// when none was recorded, Chunk when the body is empty). `take()` on the
+    /// sender keeps a second call a no-op.
     pub fn finish(&mut self, truncated: bool) {
-        if let Some(tx) = self.sender.take() {
-            let _ = tx.blocking_send(Frame {
-                head: self.head.take(),
-                body: std::mem::take(&mut self.body).into(),
-                truncated,
+        let Some(tx) = self.sender.take() else {
+            return;
+        };
+        let body = std::mem::take(&mut self.body);
+        if let Some(head) = self.head.take() {
+            let bodiless = matches!(head.status, 204 | 304)
+                || (100..200).contains(&head.status)
+                || self.req.method.eq_ignore_ascii_case("HEAD");
+            let body_coded = head
+                .headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("content-encoding"));
+            let content_length = (!bodiless).then_some(body.len() as u64);
+            let _ = tx.blocking_send(Frame::Head {
+                head,
+                content_length,
+                bodiless,
+                body_coded,
             });
+            // bodiless bytes still travel; the wire-side drop is the front's
+            if !body.is_empty() {
+                let _ = tx.blocking_send(Frame::Chunk(body.into()));
+            }
         }
+        let _ = tx.blocking_send(Frame::End {
+            trailers: Vec::new(),
+            truncated,
+        });
     }
 }
 

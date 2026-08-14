@@ -155,6 +155,7 @@ namespace Rapira\Http {
 
         /**
          * @throws Exception\FileNotSendableException
+         * @throws Exception\ContentLengthExceededError
          * @throws \Rapira\Exception\AlreadyFinalizedError
          * @throws \Rapira\Exception\WorkDiscardedException
          * @throws \ValueError

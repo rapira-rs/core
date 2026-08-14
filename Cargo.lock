@@ -580,6 +580,7 @@ name = "extension_api"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "libc",
  "socket2",
 ]
@@ -1659,6 +1660,7 @@ name = "rapira_runtime"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "extension_api",
  "httparse",
  "libc",
