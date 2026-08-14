@@ -1,7 +1,7 @@
 [package]
 name = "php_sys"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 build = "build.rs"
 
 [lints]
@@ -10,7 +10,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
 rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
 
@@ -21,4 +21,3 @@ cc = "1.2"
 
 [features]
 default = []
-

@@ -4,7 +4,7 @@ function fib(int $n): int
     return $n < 2 ? $n : fib($n - 1) + fib($n - 2);
 }
 
-// 1) 300 independent fibers, each entering, recursing, and suspending twice.
+// 300 independent fibers, each entering, recursing, and suspending twice.
 //    Every start/resume crosses the fiber<->worker stack boundary, which is
 //    where PHP swaps EG(stack_base)/EG(stack_limit) in and back out.
 $sum = 0;
@@ -22,7 +22,7 @@ for ($i = 0; $i < 300; $i++) {
 }
 // sum = 300 * 755 = 226500
 
-// 2) 25 DEEPLY NESTED fibers — 25 fiber stacks stacked at once, so base/limit
+// 25 deeply nested fibers — 25 fiber stacks stacked at once, so base/limit
 //    is saved 25 times on the way in and restored 25 times on the way out.
 function nest(int $depth): int
 {
@@ -35,6 +35,6 @@ function nest(int $depth): int
 }
 $sum += nest(25);                     // +144
 
-// If any fiber boundary left a stale stack base, this final compile/echo on the
-// worker thread would have already faulted. Reaching here proves it didn't.
+// A stale stack base from any fiber boundary faults on this final
+// compile/echo.
 echo "fibers ok sum=$sum\n";          // 226644

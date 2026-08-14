@@ -17,6 +17,10 @@ pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
 /// Fallible SDK paths report `anyhow::Error`; the host renders it to a log line.
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
+/// Header/trailer fields: one entry per field line, wire order, names as
+/// received, values raw bytes (latin1/binary-safe).
+pub type FieldLines = Vec<(String, Vec<u8>)>;
+
 /// A native rapira extension: a long-lived service that drives PHP via [`Php`].
 ///
 /// Lifecycle: `init` (construct, injecting [`Extension::Config`]) → `prepare`
@@ -69,9 +73,137 @@ pub trait Extension: Send + 'static {
 /// extension-facing API and not semver-guarded.
 #[doc(hidden)]
 pub trait Backend: Send + Sync + 'static {
-    /// Submit `req` and resolve with the whole response; the error contract lives on
-    /// [`Php::exec`].
-    fn exec(&self, req: Request) -> Pin<Box<dyn Future<Output = Result<Response>> + Send + '_>>;
+    /// Submit `req` and resolve with the response stream once the unit is
+    /// dispatched; the error contract lives on [`Php::exec`].
+    fn exec(&self, req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>>;
+}
+
+/// One event of a response stream, in wire order:
+/// `Interim* Head? (Chunk|File)* End?`. A stream that ends (`next()` → None)
+/// without `End` means the worker died; without `Head`, that it produced no
+/// response at all.
+pub enum ReplyEvent {
+    /// Advisory interim head (100-199): forward it where the protocol allows,
+    /// drop it otherwise. Carries no framing fields.
+    Interim {
+        status: u16,
+        headers: FieldLines,
+    },
+    /// The final head, at most once.
+    Head {
+        status: u16,
+        headers: FieldLines,
+        /// The framing to apply when Some; None means the extension chooses
+        /// (chunked on HTTP/1.1).
+        content_length: Option<u64>,
+        /// 204 | 304 | a HEAD request | 1xx: send no body bytes and no framing
+        /// fields, whatever else the stream carries.
+        bodiless: bool,
+        /// The body is already content-coded; compression must leave it alone.
+        body_coded: bool,
+    },
+    Chunk(bytes::Bytes),
+    /// A file slice the host opened and validated; the extension streams it
+    /// and owns the handle.
+    File {
+        file: std::fs::File,
+        offset: u64,
+        len: u64,
+    },
+    /// Terminal. Trailers ride here; an extension that cannot express them
+    /// drops the section.
+    End {
+        trailers: FieldLines,
+        truncated: bool,
+    },
+}
+
+/// The producer side of a [`Reply`]. Host-internal, like [`Backend`].
+#[doc(hidden)]
+pub trait ReplySource: Send + 'static {
+    fn next(&mut self) -> Pin<Box<dyn Future<Output = Option<ReplyEvent>> + Send + '_>>;
+}
+
+/// A dispatched request's response stream. Dropping it tells the host the
+/// client is gone: the worker's next write raises `WorkDiscardedException`.
+pub struct Reply(Box<dyn ReplySource>);
+
+impl Reply {
+    /// Host-internal constructor, like [`Php::new`].
+    #[doc(hidden)]
+    pub fn new(source: Box<dyn ReplySource>) -> Self {
+        Self(source)
+    }
+
+    /// The next event; None ends the stream (see [`ReplyEvent`]).
+    pub async fn next(&mut self) -> Option<ReplyEvent> {
+        self.0.next().await
+    }
+
+    /// Collect the stream into a buffered [`Response`]. Interim heads are
+    /// dropped (a buffered response has nowhere to carry them). Errors when the
+    /// worker died before any response, when the stream is truncated, or when
+    /// no head was produced.
+    pub async fn collect(mut self) -> Result<Response> {
+        let mut response: Option<Response> = None; // built by Head, grown by the body events
+        let mut end: Option<bool> = None; // Some(truncated) once End arrived
+        while let Some(ev) = self.0.next().await {
+            match ev {
+                ReplyEvent::Interim { .. } => {}
+                ReplyEvent::Head {
+                    status, headers, ..
+                } => {
+                    response = Some(Response {
+                        status,
+                        headers,
+                        body: Vec::new(),
+                    });
+                }
+                ReplyEvent::Chunk(b) => {
+                    if let Some(r) = response.as_mut() {
+                        r.body.extend_from_slice(&b);
+                    }
+                }
+                // synchronous read: collect is the buffered convenience,
+                // streaming consumers pump File themselves
+                ReplyEvent::File { file, offset, len } => {
+                    if let Some(r) = response.as_mut() {
+                        r.body.extend_from_slice(&read_slice(&file, offset, len)?);
+                    }
+                }
+                ReplyEvent::End { truncated, .. } => {
+                    end = Some(truncated);
+                    break;
+                }
+            }
+        }
+        match (response, end) {
+            (None, None) => Err(anyhow::anyhow!(
+                "php worker died mid-response (channel closed without a response)"
+            )),
+            (Some(_), None) | (_, Some(true)) => {
+                Err(anyhow::anyhow!("php crashed mid-response; body truncated"))
+            }
+            (None, Some(false)) => Err(anyhow::anyhow!("php produced no response head")),
+            (Some(r), Some(false)) => Ok(r),
+        }
+    }
+}
+
+/// Read `len` bytes at `offset` (short when the file shrank).
+fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    let mut out = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
+    let mut done = 0usize;
+    while done < out.len() {
+        let n = file.read_at(&mut out[done..], offset + done as u64)?;
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    out.truncate(done);
+    Ok(out)
 }
 
 /// The PHP bridge handed to every extension. Cheap to clone; every clone shares the
@@ -99,83 +231,119 @@ impl Php {
         &self.script
     }
 
-    /// Submit `req` and collect the whole response — the worker seals it into a
-    /// single frame, so the caller wakes once per response. Errors when PHP
-    /// produced no response head, when the worker died mid-response (the channel
-    /// closed without a frame), or when PHP errored after it began writing its
-    /// body (so the body may be incomplete).
-    pub async fn exec(&self, req: Request) -> Result<Response> {
+    /// Submit `req`; resolves with the response stream once the unit is
+    /// dispatched. Errors with a downcastable [`Rejected`] when the host
+    /// refused the request before dispatch (malformed multipart → 400, past a
+    /// configured limit → 413) — nothing rejected ever reaches a worker.
+    /// Response-shape failures surface from [`Reply::next`]/[`Reply::collect`].
+    pub async fn exec(&self, req: Request) -> Result<Reply> {
         self.backend.exec(req).await
     }
 }
 
-/// A request an extension runs through PHP. Pool-internal fields (`query`,
-/// `content_type`, script paths) are derived by the host's backend.
-pub struct Request {
-    pub method: String,
-    pub uri: String, // path + optional ?query → REQUEST_URI
-    pub https: bool,
-    pub protocol: String, // "HTTP/1.1"
-    pub remote_addr: String,
-    pub remote_port: u16,
-    pub server_name: String,
-    pub server_port: u16,
-    /// Header values are raw bytes (latin1/binary-safe), mirroring [`Response`]:
-    /// a client may send octets that are not valid UTF-8 and PHP must see them verbatim.
-    ///
-    /// At most one entry per field name, compared case-insensitively: combine a field's
-    /// repeats with [`field_line_separator`] before submitting. Field names must also be
-    /// `[A-Za-z0-9-]`; `_` and `.` both reach the CGI variable a `-` name owns, so a name
-    /// carrying either lets a client overwrite a field the front set.
-    ///
-    /// The host re-normalises the repeats on the way in, so that violation costs a log line
-    /// rather than a silently wrong `$_SERVER`. Names it takes as given: only the layer
-    /// terminating the connection can answer a bad one with a `400` instead of dropping it
-    /// silently, so the screen belongs in the extension — `rapira_pingora` runs it in a
-    /// downstream module, before anything reads the map.
-    pub headers: Vec<(String, Vec<u8>)>,
-    pub body: Vec<u8>,
+/// One endpoint of an accepted connection, as the socket reports it. The union mirrors
+/// the contract's `InetAddress|UnixAddress`: a port exists exactly when the endpoint is
+/// an IP one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Addr {
+    Inet(std::net::SocketAddr),
+    /// None is an unnamed endpoint — the usual case for a peer connecting to a unix
+    /// listener, which binds no path of its own.
+    Unix(Option<PathBuf>),
 }
 
-/// The separator joining repeats of `name`, or `None` when the field's grammar is one value
-/// and repeats must not be joined — the first line wins and the rest are dropped.
-///
-/// RFC 9110 §5.3 (https://www.rfc-editor.org/rfc/rfc9110#section-5.3) permits combining only
-/// "without changing the semantics of the message", i.e. for fields defined as a comma list.
-/// Joining a singleton field corrupts it: a second `Authorization` folded into the first
-/// lands inside the credential php-src base64-decodes. `Cookie` is a list but not a comma
-/// one — it rejoins on `"; "`, the cookie-string form its parser expects (RFC 6265 §4.2.1,
-/// https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1).
-///
-/// `Host` is deliberately absent: more than one `Host` line is a 400, not a first-wins
-/// (RFC 9112 §3.2, https://www.rfc-editor.org/rfc/rfc9112#section-3.2), which only a front
-/// terminating the connection can answer. The fallback therefore joins it like any other
-/// field: a front that let the repeat through has already skipped the only correct answer.
-/// Joining is the safer of the two wrong answers — `Host = uri-host [ ":" port ]` admits no
-/// comma (RFC 9110 §7.2, https://www.rfc-editor.org/rfc/rfc9110#section-7.2), so the joined
-/// value fails closed in whatever parses `HTTP_HOST`, where a first-wins would instead hand
-/// PHP a clean authority the client picked.
-pub fn field_line_separator(name: &str) -> Option<&'static [u8]> {
-    const SINGLETON: &[&str] = &[
-        "authorization",
-        "proxy-authorization",
-        "content-type",
-        "content-length",
-        "referer",
-        "from",
-    ];
-    if SINGLETON.iter().any(|f| name.eq_ignore_ascii_case(f)) {
-        None
-    } else if name.eq_ignore_ascii_case("cookie") {
-        Some(b"; ")
-    } else {
-        Some(b", ")
+/// The client certificate facts, present only when one was presented (mTLS). Grouped so
+/// the contract's "all null unless one was presented" is a type fact.
+#[derive(Debug, Clone)]
+pub struct ClientCert {
+    /// Serial number, hex.
+    pub serial: String,
+    /// Subject O; absent in some certificates.
+    pub organization: Option<String>,
+    /// SHA-256 over the DER form, lowercase hex.
+    pub fingerprint: String,
+}
+
+/// What the TLS handshake settled, when this listener terminated TLS itself. No Default
+/// on purpose: a Tls value must come from a real handshake.
+#[derive(Debug, Clone)]
+pub struct Tls {
+    /// Protocol version as the TLS stack names it: "TLSv1.3". Must be non-empty.
+    pub version: String,
+    /// Negotiated cipher suite: "TLS_AES_256_GCM_SHA384". Must be non-empty.
+    pub cipher: String,
+    /// What ALPN settled on ("h2"), or None when the client offered no list.
+    /// Maps to `Tls::$negotiatedProtocol`.
+    pub alpn: Option<String>,
+    /// Name the client asked for through SNI, or None if it sent none.
+    /// Maps to `Tls::$requestedServerName`.
+    pub server_name: Option<String>,
+    pub cert: Option<ClientCert>,
+}
+
+/// A request the host rejected before dispatch; the extension answers it in its own
+/// protocol. Surfaces as [`Php::exec`]'s error — downcast from `anyhow::Error`.
+#[derive(Debug)]
+pub struct Rejected {
+    /// 400 for a malformed body, 413 past a configured limit.
+    pub status: u16,
+    /// For the extension's log; never sent to the client verbatim.
+    pub reason: String,
+}
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status, self.reason)
     }
 }
 
-#[derive(Default)]
+impl std::error::Error for Rejected {}
+
+/// A request an extension runs through PHP. Pool-internal fields (`query`,
+/// `content_type`, script paths) are derived by the host's backend.
+///
+/// Every fidelity field is populated or honestly omitted (`Option`/enum) — an extension
+/// with no wire form for a fact passes None, never a fabricated default.
+pub struct Request {
+    pub method: String,
+    pub uri: String, // path + optional ?query → REQUEST_URI
+    /// The request-target byte-for-byte: the h1 request line's target, `:path` on h2/h3.
+    /// None when the extension has no wire form; the host falls back to `uri`'s bytes.
+    pub target: Option<Vec<u8>>,
+    /// The authority the client named, byte-for-byte (`Host` on h1,
+    /// `:authority` on h2/h3). None = named none; never `Some(b"")`. Rejecting
+    /// a Host-less HTTP/1.1 request is the extension's job (RFC 9112 §3.2,
+    /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2).
+    pub authority: Option<Vec<u8>>,
+    pub https: bool,
+    pub protocol: String, // "HTTP/1.1"
+    /// The peer's end of the connection, as the socket reports it.
+    pub remote: Addr,
+    /// The accepting socket — which listener took the call, not configuration.
+    pub server: Addr,
+    /// Configured CGI facts (`SERVER_NAME`/`SERVER_PORT`, RFC 3875) and the `$uri`
+    /// synthesis fallback; distinct from the socket-derived `server`.
+    pub server_name: String,
+    pub server_port: u16,
+    /// What the handshake settled, when this listener terminated TLS itself. None on a
+    /// plaintext listener — `https` may still be true behind a terminating front.
+    pub tls: Option<Tls>,
+    /// Unix seconds when the extension accepted the request: after the head was parsed,
+    /// before the body was read. None when the extension has no ingress stamp; the host
+    /// then stamps at intake.
+    pub received_at: Option<f64>,
+    /// One entry per field line: repeats stay separate entries in wire order,
+    /// names as received (case preserved). Values are raw bytes
+    /// (latin1/binary-safe). The host folds repeats only for the `$_SERVER`
+    /// mapping; nothing is folded on the dispatcher path.
+    pub headers: FieldLines,
+    pub body: Vec<u8>,
+}
+
+// No Default: it would mint status 0, which no wire can carry.
+#[derive(Debug)]
 pub struct Response {
     pub status: u16,
-    pub headers: Vec<(String, Vec<u8>)>, // bytes: latin1/binary-safe
+    pub headers: FieldLines, // bytes: latin1/binary-safe
     pub body: Vec<u8>,
 }

@@ -11,6 +11,5 @@ $handler = static function (): void {
 	}
 	echo 'zlib:' . gzuncompress(gzcompress('rapira zlib'));
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

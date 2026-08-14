@@ -253,8 +253,40 @@ pub fn http_get_raw(
     write!(s, "\r\n")?;
     s.flush()?;
     let mut raw = Vec::new();
+    // a reset with nothing received is a responseless close (the server never
+    // read the request); read_to_end keeps what arrived before the error
+    if let Err(e) = s.read_to_end(&mut raw)
+        && !(raw.is_empty() && e.kind() == io::ErrorKind::ConnectionReset)
+    {
+        return Err(e);
+    }
+    Ok(raw)
+}
+
+/// As [`http_raw`], returning the unparsed response bytes — for asserting on
+/// the header block itself.
+pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
+    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
+    s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(timeout))?;
+    s.write_all(request)?;
+    s.flush()?;
+    let mut raw = Vec::new();
     s.read_to_end(&mut raw)?;
     Ok(raw)
+}
+
+/// A caller-controlled request: no implicit Host or Connection line. For
+/// requests the other helpers cannot express (e.g. a missing Host).
+pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
+    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
+    s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(timeout))?;
+    s.write_all(request)?;
+    s.flush()?;
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw)?;
+    parse_status_and_body(&raw)
 }
 
 /// Sibling of [`http_get`] with a body. `content_type` is bytes, not text: a multipart
@@ -286,6 +318,14 @@ pub fn http_post(
 }
 
 fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {
+    if raw.is_empty() {
+        // distinct from a partial head: zero bytes means the connection closed
+        // responseless, the one failure an idempotent client retries
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "closed before any response byte",
+        ));
+    }
     let head_end = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -538,4 +578,178 @@ fn fixture_path(name: &str) -> PathBuf {
 fn free_port() -> u16 {
     let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     l.local_addr().expect("local_addr").port()
+}
+
+/// An open connection for incremental reads — the streaming assertions the
+/// read-to-EOF helpers cannot express (they would block until the stream ends).
+pub struct Conn {
+    s: TcpStream,
+    buf: Vec<u8>,
+    consumed: usize,
+}
+
+impl Conn {
+    pub fn open(addr: SocketAddr, timeout: Duration) -> io::Result<Self> {
+        let s = TcpStream::connect_timeout(&addr, timeout)?;
+        // short per-read timeout: the deadline loops below own the wall bound
+        s.set_read_timeout(Some(Duration::from_millis(50)))?;
+        s.set_write_timeout(Some(timeout))?;
+        Ok(Self {
+            s,
+            buf: Vec::new(),
+            consumed: 0,
+        })
+    }
+
+    pub fn send(&mut self, request: &[u8]) -> io::Result<()> {
+        self.s.write_all(request)?;
+        self.s.flush()
+    }
+
+    /// Close the write side and drop the socket — the client walking away.
+    pub fn abandon(self) {
+        let _ = self.s.shutdown(std::net::Shutdown::Both);
+    }
+
+    fn unread(&self) -> &[u8] {
+        &self.buf[self.consumed..]
+    }
+
+    /// Pull bytes until `pat` shows up past the consumed mark (or `deadline`).
+    fn fill_until(&mut self, pat: &[u8], deadline: Duration) -> io::Result<usize> {
+        let end = std::time::Instant::now() + deadline;
+        loop {
+            if let Some(pos) = self.unread().windows(pat.len()).position(|w| w == pat) {
+                return Ok(self.consumed + pos);
+            }
+            if std::time::Instant::now() >= end {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "no {pat:?} within {deadline:?}; buffered: {:?}",
+                        self.unread()
+                    ),
+                ));
+            }
+            let mut chunk = [0u8; 4096];
+            match self.s.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("eof before {pat:?}; buffered: {:?}", self.unread()),
+                    ));
+                }
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Read one head block: `(status, lower-cased field lines)`. Interim heads
+    /// are separate blocks — call again for the next one.
+    pub fn read_head(&mut self, deadline: Duration) -> io::Result<(u16, Vec<(String, String)>)> {
+        let head_end = self.fill_until(b"\r\n\r\n", deadline)?;
+        let head = &self.buf[self.consumed..head_end];
+        let text = String::from_utf8_lossy(head).into_owned();
+        self.consumed = head_end + 4;
+        let mut lines = text.split("\r\n");
+        let status = lines
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse::<u16>().ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("bad status line in {text:?}"),
+                )
+            })?;
+        let fields = lines
+            .filter_map(|l| l.split_once(':'))
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
+            .collect();
+        Ok((status, fields))
+    }
+
+    /// Block until `pat` appears in the body stream (proof the bytes are on the
+    /// wire while the response is still open); consumes through it.
+    pub fn read_body_until(&mut self, pat: &[u8], deadline: Duration) -> io::Result<()> {
+        let pos = self.fill_until(pat, deadline)?;
+        self.consumed = pos + pat.len();
+        Ok(())
+    }
+
+    /// Drain to EOF and return everything unread.
+    pub fn read_remaining(&mut self, deadline: Duration) -> io::Result<Vec<u8>> {
+        let end = std::time::Instant::now() + deadline;
+        loop {
+            // checked on the data path too: a peer that keeps sending must
+            // fail the deadline, not spin past it
+            if std::time::Instant::now() >= end {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "no eof in time"));
+            }
+            let mut chunk = [0u8; 4096];
+            match self.s.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let rest = self.unread().to_vec();
+        self.consumed = self.buf.len();
+        Ok(rest)
+    }
+}
+
+/// Decode a chunked body: `(chunks, trailer-section bytes)`. Errors when the
+/// terminating zero chunk is missing — the truncation signal.
+pub fn decode_chunked(mut raw: &[u8]) -> io::Result<(Vec<Vec<u8>>, Vec<u8>)> {
+    let mut chunks = Vec::new();
+    loop {
+        let line_end = raw
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no chunk-size line"))?;
+        let size = usize::from_str_radix(
+            std::str::from_utf8(&raw[..line_end])
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?
+                .trim(),
+            16,
+        )
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?;
+        raw = &raw[line_end + 2..];
+        if size == 0 {
+            // what follows, up to the final CRLF, is the trailer section
+            let trailer = raw.strip_suffix(b"\r\n").unwrap_or(raw).to_vec();
+            return Ok((chunks, trailer));
+        }
+        if raw.len() < size + 2 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short chunk"));
+        }
+        chunks.push(raw[..size].to_vec());
+        raw = &raw[size + 2..];
+    }
+}
+
+/// Poll `server.log` for `needle`, bounded.
+pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool {
+    let path = srv.dir.join("server.log");
+    let end = std::time::Instant::now() + deadline;
+    loop {
+        if std::fs::read_to_string(&path)
+            .map(|s| s.contains(needle))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if std::time::Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

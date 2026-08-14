@@ -577,12 +577,19 @@ dependencies = [
 
 [[package]]
 name = "extension_api"
-version = "0.2.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "libc",
  "socket2",
 ]
+
+[[package]]
+name = "fastrand"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "find-msvc-tools"
@@ -1000,6 +1007,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
 name = "local-ip-address"
 version = "0.6.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1231,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "php_sys"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -1593,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_config"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1602,11 +1615,12 @@ dependencies = [
 
 [[package]]
 name = "rapira_core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
  "extension_api",
+ "libc",
  "mimalloc",
  "php_sys",
  "rapira_config",
@@ -1621,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_master"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -1643,19 +1657,23 @@ dependencies = [
 
 [[package]]
 name = "rapira_runtime"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "extension_api",
+ "httparse",
  "libc",
+ "memchr",
  "php_sys",
+ "tempfile",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "rapira_scoreboard"
-version = "0.1.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -1739,6 +1757,19 @@ name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+
+[[package]]
+name = "rustix"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+dependencies = [
+ "bitflags 2.13.1",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "rustversion"
@@ -1958,6 +1989,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

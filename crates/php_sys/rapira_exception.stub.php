@@ -23,7 +23,12 @@ namespace Rapira\Exception {
     {
     }
 
-    /** get_dispatcher() outside worker mode. */
+    /** get_dispatcher() outside dispatcher mode. */
+    class NotInDispatcherModeError extends \Error implements RapiraThrowable
+    {
+    }
+
+    /** handle_request() outside worker mode. */
     class NotInWorkerModeError extends \Error implements RapiraThrowable
     {
     }

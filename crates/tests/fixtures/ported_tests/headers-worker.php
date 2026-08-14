@@ -8,7 +8,6 @@ $handler = static function (): void {
 	http_response_code(201);
 	echo 'Hello';
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 	gc_collect_cycles();
 }

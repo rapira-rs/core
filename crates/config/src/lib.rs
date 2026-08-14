@@ -84,8 +84,8 @@ impl FromStr for Listen {
 pub struct Overrides {
     pub listen: Option<Listen>,
     pub processes: Option<usize>,
-    /// `--classic`; force-on only (there is no `--no-classic`).
-    pub classic: bool,
+    /// `--mode` (or the `--classic` alias); `Some` overrides the file's `pool.mode`.
+    pub mode: Option<RunMode>,
     /// Positional `SCRIPT`; overrides `pool.entrypoint`.
     pub entrypoint: Option<PathBuf>,
 }
@@ -99,9 +99,9 @@ pub struct Settings {
     pub log: LogSettings,
 }
 
-/// How a pool scales its worker processes.
+/// How a pool scales its worker processes (`pool.scaling`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PoolMode {
+pub enum Scaling {
     /// Fixed pool of `pool.processes` workers.
     Static,
     /// Scale between spare-capacity thresholds, capped by `pool.processes`.
@@ -109,6 +109,48 @@ pub enum PoolMode {
     /// Fork on demand, up to `pool.processes`; idle workers exit after
     /// `process_idle_timeout`.
     Ondemand,
+}
+
+/// Which run mode the pool's workers execute (`pool.mode`).
+// No deny_unknown_fields: it governs struct variants, so it is inert on a unit-only enum.
+// An unrecognised value is already an error because serde has no variant to match it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunMode {
+    /// Re-include the entry script for every request.
+    Classic,
+    /// Resident script; the host hands each request to a PHP handler closure.
+    Worker,
+    /// Resident script driving the dispatcher/exchange surface.
+    #[default]
+    Dispatcher,
+}
+
+impl RunMode {
+    /// The config-vocabulary name, as `pool.mode` spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunMode::Classic => "classic",
+            RunMode::Worker => "worker",
+            RunMode::Dispatcher => "dispatcher",
+        }
+    }
+}
+
+// clap derives its value parser from FromStr, so the CLI shares the config vocabulary.
+impl std::str::FromStr for RunMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "classic" => Ok(RunMode::Classic),
+            "worker" => Ok(RunMode::Worker),
+            "dispatcher" => Ok(RunMode::Dispatcher),
+            other => Err(format!(
+                "unknown mode `{other}` (expected classic, worker, or dispatcher)"
+            )),
+        }
+    }
 }
 
 /// Master-scoped supervision: pid identity on disk and the stop-escalation
@@ -174,7 +216,27 @@ pub struct HttpSettings {
     pub server_port: u16,
     /// Bytes, converted from the config's `max_body_size_mb`.
     pub max_body_size: usize,
+    /// Per-write bound on the response path, from `write_timeout_secs`.
+    pub write_timeout: std::time::Duration,
     pub unsafe_field_names: UnsafeFieldNames,
+    pub uploads: UploadSettings,
+    /// `[http.sendfile].root`; None = the entrypoint's directory.
+    pub sendfile_root: Option<PathBuf>,
+}
+
+/// Multipart limits and the spool root (`[http.uploads]`); past a limit the
+/// host answers 413 before dispatch.
+#[derive(Debug)]
+pub struct UploadSettings {
+    /// Spool root for file parts; workers spool into a per-pid subdirectory.
+    pub dir: PathBuf,
+    /// Bytes, from `max_file_size_mb`.
+    pub max_file_size: u64,
+    /// Bytes, from `max_field_size_kb`.
+    pub max_field_size: usize,
+    pub max_files: usize,
+    pub max_parts: usize,
+    pub max_part_headers: usize,
 }
 
 /// What to do with a request field whose name reaches a CGI variable another name owns:
@@ -206,8 +268,8 @@ pub struct PoolSettings {
     /// Absolute path to the PHP entry script.
     pub entrypoint: PathBuf,
     pub processes: usize,
-    pub classic: bool,
-    pub mode: PoolMode,
+    pub mode: RunMode,
+    pub scaling: Scaling,
     /// Requests a worker serves before recycling itself (with jitter); 0 = unlimited.
     pub max_requests: u64,
     /// Ondemand: idle worker lifetime before the master retires it.
@@ -240,9 +302,33 @@ struct HttpSection {
     server_name: Option<String>,
     server_port: Option<u16>,
     max_body_size_mb: Option<usize>,
+    write_timeout_secs: Option<u64>,
     /// Unrecognised values are a boot error, not a silent fall back to the default —
     /// a security knob that survives a typo is worse than one that refuses to start.
     unsafe_field_names: Option<UnsafeFieldNames>,
+    /// Option so presence is observable: the table configures the host-side
+    /// multipart parser, which only dispatcher mode runs.
+    uploads: Option<UploadsSection>,
+    #[serde(default)]
+    sendfile: SendfileSection,
+}
+
+/// `[http.sendfile]`: the root `sendFile()` paths must stay inside.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendfileSection {
+    root: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UploadsSection {
+    dir: Option<String>,
+    max_file_size_mb: Option<u64>,
+    max_field_size_kb: Option<usize>,
+    max_files: Option<usize>,
+    max_parts: Option<usize>,
+    max_part_headers: Option<usize>,
 }
 
 /// One pool table as written. Embedded by name — never `#[serde(flatten)]`, which
@@ -253,8 +339,8 @@ struct HttpSection {
 struct PoolSection {
     entrypoint: Option<String>,
     processes: Option<usize>,
-    classic: Option<bool>,
-    mode: Option<PoolModeKey>,
+    mode: Option<RunMode>,
+    scaling: Option<ScalingKey>,
     min_spare: Option<usize>,
     max_spare: Option<usize>,
     max_requests: Option<u64>,
@@ -264,7 +350,7 @@ struct PoolSection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum PoolModeKey {
+enum ScalingKey {
     Static,
     Dynamic,
     Ondemand,
@@ -353,7 +439,28 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow::anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
 
+    let write_timeout_secs = file.http.write_timeout_secs.unwrap_or(30);
+    if write_timeout_secs == 0 {
+        bail!("http.write_timeout_secs must be at least 1");
+    }
+    let write_timeout = capped_timeout("http", "write_timeout_secs", write_timeout_secs)?;
+
+    let sendfile_root = match file.http.sendfile.root.filter(|r| !r.is_empty()) {
+        Some(r) => Some(config_relative(config_dir, &r)?),
+        None => None,
+    };
+
     let pool = resolve_pool(file.pool, &cli, config_dir, "pool")?;
+    // The table configures the host-side multipart parser; outside dispatcher
+    // mode php-src parses the body and php.ini owns the limits, so an explicit
+    // table would sit inert — refuse it instead.
+    if file.http.uploads.is_some() && pool.mode != RunMode::Dispatcher {
+        bail!(
+            "http.uploads applies to dispatcher mode only (pool.mode = \"{}\")",
+            pool.mode.as_str()
+        );
+    }
+    let uploads = resolve_uploads(file.http.uploads.unwrap_or_default(), config_dir)?;
     let supervisor = resolve_supervisor(file.supervisor, config_dir)?;
     let log = resolve_log(file.log)?;
 
@@ -366,11 +473,60 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
                 .unwrap_or_else(|| "localhost".to_owned()),
             server_port,
             max_body_size,
+            write_timeout,
             unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
+            uploads,
+            sendfile_root,
         },
         pool,
         supervisor,
         log,
+    })
+}
+
+/// Path/limit resolution only; the binary probes the directory at boot.
+fn resolve_uploads(
+    section: UploadsSection,
+    config_dir: Option<&Path>,
+) -> anyhow::Result<UploadSettings> {
+    let dir = match section.dir.filter(|d| !d.is_empty()) {
+        Some(d) => config_relative(config_dir, &d)?,
+        None => std::env::temp_dir(),
+    };
+    let max_file_size_mb = section.max_file_size_mb.unwrap_or(2);
+    if max_file_size_mb == 0 {
+        bail!("http.uploads.max_file_size_mb must be at least 1");
+    }
+    let max_file_size = max_file_size_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+        anyhow::anyhow!("http.uploads.max_file_size_mb {max_file_size_mb} is too large")
+    })?;
+    let max_field_size_kb = section.max_field_size_kb.unwrap_or(256);
+    if max_field_size_kb == 0 {
+        bail!("http.uploads.max_field_size_kb must be at least 1");
+    }
+    let max_field_size = max_field_size_kb.checked_mul(1024).ok_or_else(|| {
+        anyhow::anyhow!("http.uploads.max_field_size_kb {max_field_size_kb} is too large")
+    })?;
+    let max_parts = section.max_parts.unwrap_or(1024);
+    if max_parts == 0 {
+        bail!("http.uploads.max_parts must be at least 1");
+    }
+    let max_part_headers = section.max_part_headers.unwrap_or(32);
+    if max_part_headers == 0 {
+        bail!("http.uploads.max_part_headers must be at least 1");
+    }
+    let max_files = section.max_files.unwrap_or(20);
+    if max_files == 0 {
+        // zero would 413 every file part while the server boots clean
+        bail!("http.uploads.max_files must be at least 1");
+    }
+    Ok(UploadSettings {
+        dir,
+        max_file_size,
+        max_field_size,
+        max_files,
+        max_parts,
+        max_part_headers,
     })
 }
 
@@ -392,7 +548,7 @@ fn resolve_pool(
         bail!("{table}.processes must be at least 1");
     }
 
-    let classic = cli.classic || section.classic.unwrap_or(false);
+    let mode = cli.mode.or(section.mode).unwrap_or_default();
 
     // Positional SCRIPT is cwd-relative; a config entrypoint is resolved against
     // the config file's directory so the config is relocatable.
@@ -408,11 +564,11 @@ fn resolve_pool(
         bail!("no entrypoint: pass a SCRIPT argument or set {table}.entrypoint in the config file");
     };
 
-    let mode = match section.mode.unwrap_or(PoolModeKey::Static) {
-        PoolModeKey::Dynamic => {
+    let scaling = match section.scaling.unwrap_or(ScalingKey::Static) {
+        ScalingKey::Dynamic => {
             let (Some(min_spare), Some(max_spare)) = (section.min_spare, section.max_spare) else {
                 bail!(
-                    "{table}.mode = \"dynamic\" requires {table}.min_spare and {table}.max_spare"
+                    "{table}.scaling = \"dynamic\" requires {table}.min_spare and {table}.max_spare"
                 );
             };
             if !(1..=max_spare).contains(&min_spare) || max_spare > processes {
@@ -420,22 +576,22 @@ fn resolve_pool(
                     "{table} spares must satisfy 1 <= min_spare ({min_spare}) <= max_spare ({max_spare}) <= {table}.processes ({processes})"
                 );
             }
-            PoolMode::Dynamic {
+            Scaling::Dynamic {
                 min_spare,
                 max_spare,
             }
         }
         other => {
-            // A spare key under static/ondemand is a mode typo, not a tunable.
+            // A spare key under static/ondemand is a scaling typo, not a tunable.
             if section.min_spare.is_some() || section.max_spare.is_some() {
                 bail!(
-                    "{table}.min_spare/{table}.max_spare are only valid with {table}.mode = \"dynamic\""
+                    "{table}.min_spare/{table}.max_spare are only valid with {table}.scaling = \"dynamic\""
                 );
             }
-            if other == PoolModeKey::Static {
-                PoolMode::Static
+            if other == ScalingKey::Static {
+                Scaling::Static
             } else {
-                PoolMode::Ondemand
+                Scaling::Ondemand
             }
         }
     };
@@ -443,8 +599,8 @@ fn resolve_pool(
     Ok(PoolSettings {
         entrypoint,
         processes,
-        classic,
         mode,
+        scaling,
         max_requests: section.max_requests.unwrap_or(0),
         process_idle_timeout: capped_timeout(
             table,
@@ -567,7 +723,7 @@ mod tests {
         let cli = Overrides {
             listen: Some("127.0.0.1:1234".parse().unwrap()),
             processes: Some(7),
-            classic: false,
+            mode: None,
             entrypoint: Some(PathBuf::from("cli.php")),
         };
         let s = merge(file, cli, Some(Path::new("/etc/rapira"))).unwrap();
@@ -667,8 +823,9 @@ mod tests {
         assert!(load_str("[pool]\nbogus = 1\n").is_err());
         assert!(load_str("[nope]\nx = 1\n").is_err());
         assert!(load_str("[supervisor]\nbogus = 1\n").is_err());
-        // pre-1.0 renames: the old keys and tables are gone, not aliased
+        // removed keys and tables are errors, not aliases
         assert!(load_str("[pool]\nthreads = 1\n").is_err());
+        assert!(load_str("[pool]\nclassic = true\n").is_err());
         assert!(load_str("[pm]\nmode = \"static\"\n").is_err());
         // every key has exactly one home
         assert!(load_str("[pool]\npidfile = \"r.pid\"\n").is_err());
@@ -693,6 +850,10 @@ mod tests {
             (
                 "[pool]\nentrypoint = \"a.php\"\n[supervisor]\nprocess_control_timeout_secs = 100000\n",
                 "supervisor.process_control_timeout_secs",
+            ),
+            (
+                "[http]\nwrite_timeout_secs = 100000\n[pool]\nentrypoint = \"a.php\"\n",
+                "http.write_timeout_secs",
             ),
         ] {
             let err = merge(
@@ -738,13 +899,67 @@ mod tests {
         assert!(err.contains("pool.processes must be at least 1"), "{err}");
     }
 
+    /// `[http.uploads]` resolves every knob (with unit conversion, dir relative
+    /// to the config) and rejects a zero max_files like its siblings — zero
+    /// would 413 every file part while booting clean.
+    #[test]
+    fn http_uploads_resolve_and_reject_zero_files() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http.uploads]\ndir = \"spool\"\n\
+             max_file_size_mb = 3\nmax_field_size_kb = 7\nmax_files = 4\n\
+             max_parts = 9\nmax_part_headers = 5\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let u = &s.http.uploads;
+        assert_eq!(u.dir, Path::new("/w/spool"));
+        assert_eq!(u.max_file_size, 3 * 1024 * 1024);
+        assert_eq!(u.max_field_size, 7 * 1024);
+        assert_eq!(u.max_files, 4);
+        assert_eq!(u.max_parts, 9);
+        assert_eq!(u.max_part_headers, 5);
+
+        let file =
+            load_str("[pool]\nentrypoint = \"a.php\"\n[http.uploads]\nmax_files = 0\n").unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("http.uploads.max_files must be at least 1"),
+            "{err}"
+        );
+    }
+
     /// `ondemand` and `static` share one match arm: the arm still has to tell them
     /// apart, and both reject the dynamic-only spare keys.
     #[test]
-    fn pool_ondemand_and_static_modes_resolve() {
+    fn pool_ondemand_and_static_scaling_resolve() {
+        for (key, want) in [("ondemand", Scaling::Ondemand), ("static", Scaling::Static)] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\nscaling = \"{key}\"\n"
+            ))
+            .unwrap();
+            let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+            assert_eq!(s.pool.scaling, want, "{key}");
+        }
+
+        let file =
+            load_str("[pool]\nentrypoint = \"a.php\"\nscaling = \"ondemand\"\nmax_spare = 2\n")
+                .unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("only valid with pool.scaling"), "{err}");
+    }
+
+    /// `pool.mode` picks the run mode; the CLI override wins over the file in
+    /// both directions (`--mode dispatcher` can undo a file's `classic`).
+    #[test]
+    fn pool_run_mode_resolves_with_cli_precedence() {
         for (key, want) in [
-            ("ondemand", PoolMode::Ondemand),
-            ("static", PoolMode::Static),
+            ("classic", RunMode::Classic),
+            ("worker", RunMode::Worker),
+            ("dispatcher", RunMode::Dispatcher),
         ] {
             let file = load_str(&format!(
                 "[pool]\nentrypoint = \"a.php\"\nmode = \"{key}\"\n"
@@ -754,12 +969,51 @@ mod tests {
             assert_eq!(s.pool.mode, want, "{key}");
         }
 
-        let file = load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"ondemand\"\nmax_spare = 2\n")
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        assert_eq!(s.pool.mode, RunMode::Dispatcher, "default");
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"classic\"\n").unwrap();
+        let s = merge(
+            file,
+            Overrides {
+                mode: Some(RunMode::Dispatcher),
+                ..Default::default()
+            },
+            Some(Path::new("/w")),
+        )
+        .unwrap();
+        assert_eq!(s.pool.mode, RunMode::Dispatcher, "CLI beats file");
+
+        assert!(load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"async\"\n").is_err());
+    }
+
+    /// `[http.uploads]` configures the host-side multipart parser, which only
+    /// dispatcher mode runs: an explicit table under any other mode is a boot
+    /// error, absence stays silent.
+    #[test]
+    fn http_uploads_require_dispatcher_mode() {
+        for mode in ["classic", "worker"] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\nmode = \"{mode}\"\n[http.uploads]\nmax_files = 4\n"
+            ))
             .unwrap();
-        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("only valid with pool.mode"), "{err}");
+            let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("dispatcher mode only") && err.contains(mode),
+                "{err}"
+            );
+        }
+
+        // Even an empty table is presence, and the dispatcher default accepts it.
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n[http.uploads]\n").unwrap();
+        assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
+
+        // Absence resolves to defaults under every mode.
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\nmode = \"classic\"\n").unwrap();
+        assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
     }
 
     #[test]
@@ -773,17 +1027,17 @@ mod tests {
         };
 
         // spares required
-        assert!(merged("mode = \"dynamic\"\n", Overrides::default()).is_err());
+        assert!(merged("scaling = \"dynamic\"\n", Overrides::default()).is_err());
         assert!(
             merged(
-                "mode = \"dynamic\"\nmin_spare = 3\nmax_spare = 2\n",
+                "scaling = \"dynamic\"\nmin_spare = 3\nmax_spare = 2\n",
                 Overrides::default()
             )
             .is_err()
         );
 
         let err = merged(
-            "mode = \"dynamic\"\nmin_spare = 1\nmax_spare = 5\n",
+            "scaling = \"dynamic\"\nmin_spare = 1\nmax_spare = 5\n",
             Overrides::default(),
         )
         .unwrap_err()
@@ -794,16 +1048,16 @@ mod tests {
         );
 
         let err = merged(
-            "mode = \"static\"\nmin_spare = 1\nmax_spare = 2\n",
+            "scaling = \"static\"\nmin_spare = 1\nmax_spare = 2\n",
             Overrides::default(),
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("only valid with pool.mode"), "{err}");
+        assert!(err.contains("only valid with pool.scaling"), "{err}");
 
         // --processes lowers the ceiling the spares are validated against.
         let err = merged(
-            "mode = \"dynamic\"\nmin_spare = 1\nmax_spare = 3\n",
+            "scaling = \"dynamic\"\nmin_spare = 1\nmax_spare = 3\n",
             Overrides {
                 processes: Some(2),
                 ..Default::default()
@@ -814,13 +1068,13 @@ mod tests {
         assert!(err.contains("pool.processes (2)"), "{err}");
 
         let s = merged(
-            "mode = \"dynamic\"\nmin_spare = 1\nmax_spare = 3\nmax_requests = 500\n",
+            "scaling = \"dynamic\"\nmin_spare = 1\nmax_spare = 3\nmax_requests = 500\n",
             Overrides::default(),
         )
         .unwrap();
         assert_eq!(
-            s.pool.mode,
-            PoolMode::Dynamic {
+            s.pool.scaling,
+            Scaling::Dynamic {
                 min_spare: 1,
                 max_spare: 3
             }

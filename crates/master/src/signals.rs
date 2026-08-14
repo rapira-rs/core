@@ -1,7 +1,7 @@
 //! Master self-pipe: an async-signal-safe handler translates signals into
-//! bytes on a nonblocking `AF_UNIX` socketpair that the poll loop drains. The
-//! design uses a socketpair self-pipe with a `sigfillset` mask on the handler,
-//! unblock-all after install, and a `getpid` last-resort guard.
+//! bytes on a nonblocking `AF_UNIX` socketpair that the poll loop drains, with
+//! a `sigfillset` mask on the handler, unblock-all after install, and a
+//! `getpid` last-resort guard.
 
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};

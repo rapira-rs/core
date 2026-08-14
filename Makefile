@@ -15,7 +15,7 @@ LOCATE_PHP = PREFIX=$$($(PHP_CONFIG) --prefix 2>/dev/null); test -n "$$PREFIX" |
 GEN_STUB ?= $(shell $(PHP_CONFIG) --prefix)/lib/php/build/gen_stub.php
 PHP_BIN ?= $(shell $(PHP_CONFIG) --prefix)/bin/php
 
-.PHONY: test test_nts test_e2e coverage stubs
+.PHONY: test test_nts test_e2e coverage stubs php
 
 stubs:
 	@test -f "$(GEN_STUB)" || { echo "gen_stub.php not found at $(GEN_STUB); set GEN_STUB=/path/to/gen_stub.php"; exit 1; }
@@ -61,6 +61,31 @@ test_e2e:
 	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
 	RUSTFLAGS="-L native=$$PHPLIB" \
 	cargo test -p tests --test e2e --features e2e -- --test-threads=1
+
+# Rebuild the embed PHP rapira links against, from a php-src checkout, using the
+# same flag set CI builds from (ci/php-configure-flags.txt). distclean (not just
+# clean) because a flag change requires wiping configure caches; it is skipped
+# silently on a fresh checkout. The brew pkg-config paths and SDK iconv override
+# mirror .github/workflows/master.yml — bare --with-iconv cannot locate libiconv
+# on macOS, and the SDK variant is appended after the file flags so autoconf
+# last-wins applies.
+PHP_SRC ?= ../../third-party/php-src
+PHP_PREFIX ?= $(HOME)/.local/share/php-nts
+
+php:
+	@test -d "$(PHP_SRC)" || { echo "php-src not found at $(PHP_SRC); set PHP_SRC=/path/to/php-src"; exit 1; }
+	-@$(MAKE) -C "$(PHP_SRC)" distclean >/dev/null 2>&1
+	@FLAGS="$$(tr '\n' ' ' < ci/php-configure-flags.txt)"; \
+	EXTRA=""; \
+	if [ "$$(uname)" = "Darwin" ]; then \
+		export PKG_CONFIG_PATH="$$(brew --prefix openssl@3)/lib/pkgconfig:$$(brew --prefix curl)/lib/pkgconfig:$$(brew --prefix oniguruma)/lib/pkgconfig:$$(brew --prefix libxml2)/lib/pkgconfig:$$(brew --prefix sqlite)/lib/pkgconfig$${PKG_CONFIG_PATH:+:$$PKG_CONFIG_PATH}"; \
+		EXTRA="--with-iconv=$$(xcrun --show-sdk-path)/usr"; \
+	fi; \
+	cd "$(PHP_SRC)" && \
+	./buildconf --force && \
+	./configure --prefix="$(PHP_PREFIX)" $$FLAGS $$EXTRA
+	@$(MAKE) -C "$(PHP_SRC)" -j"$$(getconf _NPROCESSORS_ONLN)"
+	@$(MAKE) -C "$(PHP_SRC)" install
 
 # Requires: cargo install cargo-llvm-cov && rustup component add llvm-tools-preview
 coverage:

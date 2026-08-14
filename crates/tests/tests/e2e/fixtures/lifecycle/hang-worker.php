@@ -1,15 +1,21 @@
 <?php
 // Echoes like echo-worker, but ?hang=1 blocks the request forever in native
 // sleep — the master's request_terminate_timeout watchdog must kill the worker.
-$handler = static function (): void {
-    if (($_GET['hang'] ?? '') === '1') {
-        while (true) {
-            usleep(100000);
+
+use Rapira\Exception\ClosedException;
+
+$d = \Rapira\get_dispatcher();
+try {
+    while (true) {
+        $ex = $d->receive();
+        parse_str(parse_url($ex->getRequest()->target, PHP_URL_QUERY) ?: '', $q);
+        if (($q['hang'] ?? '') === '1') {
+            while (true) {
+                usleep(100000);
+            }
         }
+        $ex->writeHead(200, ['content-type' => ['text/plain']]);
+        $ex->writeBody('ok:' . getmypid());
     }
-    header('Content-Type: text/plain');
-    echo 'ok:' . getmypid();
-};
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+} catch (ClosedException) {
 }

@@ -19,6 +19,8 @@ use tokio::runtime::Runtime;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
+pub mod multipart;
+
 type Outcome = std::result::Result<(), String>;
 type BoxFuture = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 
@@ -96,12 +98,21 @@ impl ExtensionRuntime {
     /// Spawn every extension on a shared runtime; one `Php` (the single entry script) is
     /// cloned to each. The returned guard drives them to completion / shutdown.
     pub fn run(self, rapira: RapiraHandle, script: PathBuf) -> Running {
-        self.run_with_grace(rapira, script, Duration::from_secs(30))
+        self.run_with_options(rapira, script, RuntimeOptions::default())
     }
 
-    /// As [`run`](Self::run), with a custom per-extension graceful-shutdown budget.
-    pub fn run_with_grace(self, rapira: RapiraHandle, script: PathBuf, grace: Duration) -> Running {
-        let php = Php::new(Arc::new(RapiraBackend::new(rapira, script.clone())), script);
+    /// As [`run`](Self::run), with the backend's request-shaping options.
+    pub fn run_with_options(
+        self,
+        rapira: RapiraHandle,
+        script: PathBuf,
+        opts: RuntimeOptions,
+    ) -> Running {
+        let grace = opts.grace;
+        let php = Php::new(
+            Arc::new(RapiraBackend::new(rapira, script.clone(), opts)),
+            script,
+        );
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_time() // the shutdown timeout in `drive`; extensions own their own IO
@@ -130,6 +141,25 @@ impl ExtensionRuntime {
     }
 }
 
+/// The backend's request-shaping options, threaded from the binary's config.
+pub struct RuntimeOptions {
+    /// Per-extension graceful-shutdown budget.
+    pub grace: Duration,
+    /// Upload limits for host-parsed multipart; read only on a dispatcher
+    /// handle (the worker/superglobals arm feeds php-src's own rfc1867
+    /// through read_post).
+    pub uploads: Arc<multipart::Limits>,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self {
+            grace: Duration::from_secs(30),
+            uploads: Arc::new(multipart::Limits::default()),
+        }
+    }
+}
+
 /// The production [`extension_api::Backend`]: bridges `Php::exec` onto the PHP worker
 /// pool. Owns the entry script's CGI vars, computed once at construction instead of
 /// per request.
@@ -141,10 +171,45 @@ struct RapiraBackend {
     document_root: String,
     /// SCRIPT_NAME, e.g. "/index.php"
     script_name: String,
+    /// Exchange-style delivery, read off the handle: one source of truth for
+    /// the mode.
+    dispatcher: bool,
+    uploads: Arc<multipart::Limits>,
+}
+
+fn map_addr(a: extension_api::Addr) -> php_sys::types::Addr {
+    match a {
+        extension_api::Addr::Inet(sa) => php_sys::types::Addr::Inet(sa),
+        extension_api::Addr::Unix(p) => php_sys::types::Addr::Unix(p),
+    }
+}
+
+fn map_tls(t: extension_api::Tls) -> php_sys::types::TlsView {
+    php_sys::types::TlsView {
+        version: t.version,
+        cipher: t.cipher,
+        alpn: t.alpn,
+        server_name: t.server_name,
+        cert: t.cert.map(|c| php_sys::types::ClientCertView {
+            serial: c.serial,
+            organization: c.organization,
+            fingerprint: c.fingerprint,
+        }),
+    }
+}
+
+fn parse_err(e: multipart::ParseError) -> anyhow::Error {
+    match e {
+        // downcastable: the extension answers 400/413 in its own protocol
+        multipart::ParseError::Rejected(r) => anyhow::Error::new(r),
+        // a host fault (ENOSPC, EACCES…), not the client's — the extension
+        // finds the io::Error in the chain and answers 500
+        multipart::ParseError::Io(io) => anyhow::Error::new(io).context("upload spool failed"),
+    }
 }
 
 impl RapiraBackend {
-    fn new(rapira: RapiraHandle, filename: PathBuf) -> Self {
+    fn new(rapira: RapiraHandle, filename: PathBuf, opts: RuntimeOptions) -> Self {
         let document_root = filename
             .parent()
             .map(|p| p.to_string_lossy().into_owned())
@@ -152,104 +217,168 @@ impl RapiraBackend {
         let script_name = filename
             .file_name()
             .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
+        let dispatcher = rapira.dispatcher();
         Self {
             rapira,
             filename,
             document_root,
             script_name,
+            dispatcher,
+            uploads: opts.uploads,
         }
     }
 
-    /// The one place the `extension_api::Request → php_sys::Request` mapping lives.
-    fn to_request(&self, mut req: extension_api::Request) -> php_sys::Request {
-        req.headers = combine_field_lines(std::mem::take(&mut req.headers));
+    /// The one `extension_api::Request → php_sys::Request` mapping. Multipart
+    /// parses here, pre-enqueue: a rejected body is never dispatched and never
+    /// touches the pending/active counters.
+    async fn to_request(
+        &self,
+        mut req: extension_api::Request,
+    ) -> anyhow::Result<php_sys::Request> {
         let query = req.uri.split_once('?').map_or("", |(_, q)| q).to_string();
-        // Carried as raw bytes, like every other header value: php-src takes the
-        // multipart boundary out of this verbatim, so a lossy decode would turn a
-        // non-UTF-8 boundary into U+FFFD and the body's real boundary would never match.
+        // Carried as raw bytes, like every other header value: the multipart
+        // boundary comes out of this verbatim, so a lossy decode would turn a
+        // non-UTF-8 boundary into U+FFFD and the body's real boundary would
+        // never match.
         let content_type = req
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.clone());
+        // wire byte count, captured before any body move
+        let content_length = req.body.len() as i64;
 
-        php_sys::Request {
+        // Content-type is a singleton field (RFC 9110 §8.3,
+        // https://www.rfc-editor.org/rfc/rfc9110#section-8.3): with a multipart
+        // line anywhere among repeats, the host and a PHP consumer could parse
+        // the body by different boundaries — whichever line comes first.
+        if self.dispatcher && !req.body.is_empty() {
+            let mut ct_lines = 0usize;
+            let mut any_multipart = false;
+            for (k, v) in &req.headers {
+                if k.eq_ignore_ascii_case("content-type") {
+                    ct_lines += 1;
+                    any_multipart = any_multipart || multipart::is_multipart(v);
+                }
+            }
+            if ct_lines > 1 && any_multipart {
+                return Err(anyhow::Error::new(extension_api::Rejected {
+                    status: 400,
+                    reason: "repeated content-type field lines with a multipart body".into(),
+                }));
+            }
+        }
+
+        let body = if self.dispatcher
+            && !req.body.is_empty()
+            && let Some(ct) = content_type.as_deref()
+            && multipart::is_multipart(ct)
+        {
+            let boundary = multipart::boundary(ct).map_err(parse_err)?;
+            let bytes = std::mem::take(&mut req.body);
+            let limits = Arc::clone(&self.uploads);
+            // spool writes are file IO — off the reactor
+            let parsed =
+                tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("multipart parse task failed: {e}"))?;
+            php_sys::types::Body::Multipart(parsed.map_err(parse_err)?)
+        } else {
+            php_sys::types::Body::Raw(Box::new(Cursor::new(std::mem::take(&mut req.body))))
+        };
+
+        Ok(php_sys::Request {
             method: req.method,
             https: req.https,
             query,
             protocol: req.protocol,
-            remote_addr: req.remote_addr,
+            // normalized once at the producer: empty means "named none"
+            target: req.target.filter(|t| !t.is_empty()),
+            authority: req.authority.filter(|a| !a.is_empty()),
+            remote: map_addr(req.remote),
+            server: map_addr(req.server),
             server_name: req.server_name,
-            server_port: req.server_port.to_string(),
-            remote_port: req.remote_port.to_string(),
+            server_port: req.server_port,
             script_name: self.script_name.clone(),
             document_root: self.document_root.clone(),
             script_filename: self.filename.clone(),
             content_type,
-            content_length: req.body.len() as i64,
-            body: Box::new(Cursor::new(req.body)),
+            content_length,
+            body,
             headers: req.headers,
             server_vars: Vec::new(),
             uri: req.uri,
-        }
+            received_at: req.received_at,
+            tls: req.tls.map(map_tls),
+        })
     }
-}
-
-/// Make `php_sys::Request::headers`' "at most one entry per field name" invariant true rather
-/// than merely documented. The front an extension is built on normally groups by name already
-/// (this is a no-op for `rapira_pingora`), but the invariant governs the CGI `$_SERVER` mapping
-/// and every consumer of a violation disagrees about which duplicate wins: `HTTP_*` keeps the
-/// last, the cookie fold keeps all, and the `AUTH_TYPE` lookup keeps the first. Normalising at
-/// the one funnel every extension passes through costs a pass over ~20 short names.
-///
-/// Case-insensitive, because `cgi_header_name` uppercases: `Cookie` and `cookie` are distinct
-/// `String`s that land on one CGI variable.
-fn combine_field_lines(lines: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
-    let mut out: Vec<(String, Vec<u8>)> = Vec::with_capacity(lines.len());
-    for (name, value) in lines {
-        let Some(i) = out.iter().position(|(n, _)| n.eq_ignore_ascii_case(&name)) else {
-            out.push((name, value));
-            continue;
-        };
-        let Some(separator) = extension_api::field_line_separator(&name) else {
-            tracing::warn!("dropped a repeated {name} field line: not a list field");
-            continue;
-        };
-        tracing::warn!("combined a repeated {name} field line; extensions should submit one entry");
-        let combined: &mut Vec<u8> = &mut out[i].1;
-        combined.extend_from_slice(separator);
-        combined.extend_from_slice(&value);
-    }
-    out
 }
 
 impl extension_api::Backend for RapiraBackend {
-    /// Submit `req` and collect the whole response — the worker seals it into a
-    /// single frame, so the caller wakes once per response (the error contract lives
-    /// on `Php::exec`).
+    /// Submit `req`; the Reply wraps the frame receiver directly, so dropping
+    /// it is the client-gone signal the exchange layer observes.
     fn exec(
         &self,
         req: extension_api::Request,
-    ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::Response>> + Send + '_>>
+    ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::Reply>> + Send + '_>>
     {
         Box::pin(async move {
-            let mut rx = self.rapira.handle(self.to_request(req)).await?;
-            let Some(frame) = rx.recv().await else {
-                return Err(anyhow::anyhow!(
-                    "php worker died mid-response (channel closed without a response)"
-                ));
-            };
-            if frame.truncated {
-                return Err(anyhow::anyhow!("php crashed mid-response; body truncated"));
-            }
-            let Some(head) = frame.head else {
-                return Err(anyhow::anyhow!("php produced no response head"));
-            };
-            // Header/body bytes pass through unchanged: PHP may emit latin1/binary.
-            Ok(extension_api::Response {
-                status: head.status,
-                headers: head.headers,
-                body: frame.body.into(),
+            // parse/reject happens before handle()'s pending increment — a
+            // rejected request never touches the counters or the queue
+            let req = self.to_request(req).await?;
+            // shedding is this host's answer, not a gateway fault: 503 for a
+            // saturated intake, 500 for a pool that is gone
+            let rx = self.rapira.handle(req).await.map_err(|e| {
+                anyhow::Error::new(extension_api::Rejected {
+                    status: match e {
+                        php_sys::HandleError::Saturated => 503,
+                        php_sys::HandleError::Stopped => 500,
+                    },
+                    reason: e.to_string(),
+                })
+            })?;
+            Ok(extension_api::Reply::new(Box::new(FrameSource(rx))))
+        })
+    }
+}
+
+/// `php_sys::Frame` receiver as a [`extension_api::ReplySource`]; the mapping
+/// is field-for-field.
+struct FrameSource(tokio::sync::mpsc::Receiver<php_sys::Frame>);
+
+impl extension_api::ReplySource for FrameSource {
+    fn next(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Option<extension_api::ReplyEvent>> + Send + '_>> {
+        Box::pin(async move {
+            self.0.recv().await.map(|frame| match frame {
+                php_sys::Frame::Interim(h) => extension_api::ReplyEvent::Interim {
+                    status: h.status,
+                    headers: h.headers,
+                },
+                php_sys::Frame::Head {
+                    head,
+                    content_length,
+                    bodiless,
+                    body_coded,
+                } => extension_api::ReplyEvent::Head {
+                    status: head.status,
+                    headers: head.headers,
+                    content_length,
+                    bodiless,
+                    body_coded,
+                },
+                php_sys::Frame::Chunk(b) => extension_api::ReplyEvent::Chunk(b),
+                php_sys::Frame::File { file, offset, len } => {
+                    extension_api::ReplyEvent::File { file, offset, len }
+                }
+                php_sys::Frame::End {
+                    trailers,
+                    truncated,
+                } => extension_api::ReplyEvent::End {
+                    trailers,
+                    truncated,
+                },
             })
         })
     }
@@ -408,53 +537,98 @@ mod tests {
         assert_send::<ExtensionRuntime>();
     }
 
-    fn lines(pairs: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), v.as_bytes().to_vec()))
-            .collect()
+    use extension_api::{Reply, ReplyEvent, ReplySource};
+
+    struct VecSource(std::collections::VecDeque<ReplyEvent>);
+
+    impl ReplySource for VecSource {
+        fn next(&mut self) -> Pin<Box<dyn Future<Output = Option<ReplyEvent>> + Send + '_>> {
+            let ev = self.0.pop_front();
+            Box::pin(async move { ev })
+        }
     }
 
-    fn value<'a>(pairs: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
-        pairs
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_slice())
+    fn reply(events: Vec<ReplyEvent>) -> Reply {
+        Reply::new(Box::new(VecSource(events.into())))
     }
 
-    /// `php_sys::Request::headers` promises at most one entry per name, and the consumers of a
-    /// violation disagree about which duplicate wins — `HTTP_*` keeps the last, the cookie fold
-    /// keeps all, `AUTH_TYPE` keeps the first. An extension that submits repeats must not be
-    /// able to produce that split.
-    #[test]
-    fn repeated_field_lines_are_combined_before_php_sees_them() {
-        let combined = combine_field_lines(lines(&[
-            ("Cookie", "a=1"),
-            ("cookie", "b=2"),
-            ("X-Forwarded-For", "1.2.3.4"),
-            ("X-Forwarded-For", "5.6.7.8"),
-            ("Accept", "text/*"),
-        ]));
-        assert_eq!(combined.len(), 3, "one entry per field name");
-        assert_eq!(value(&combined, "cookie"), Some(&b"a=1; b=2"[..]));
-        assert_eq!(
-            value(&combined, "x-forwarded-for"),
-            Some(&b"1.2.3.4, 5.6.7.8"[..])
+    fn head() -> ReplyEvent {
+        ReplyEvent::Head {
+            status: 200,
+            headers: vec![("x-a".into(), b"1".to_vec())],
+            content_length: None,
+            bodiless: false,
+            body_coded: false,
+        }
+    }
+
+    fn end(truncated: bool) -> ReplyEvent {
+        ReplyEvent::End {
+            trailers: Vec::new(),
+            truncated,
+        }
+    }
+
+    /// The four stream outcomes map to the three documented errors and Ok.
+    #[tokio::test]
+    async fn collect_maps_stream_outcomes() {
+        let died = reply(Vec::new()).collect().await.unwrap_err();
+        assert!(died.to_string().contains("died mid-response"), "{died:#}");
+
+        let cut = reply(vec![head()]).collect().await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let cut = reply(vec![head(), end(true)]).collect().await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let headless = reply(vec![end(false)]).collect().await.unwrap_err();
+        assert!(
+            headless.to_string().contains("no response head"),
+            "{headless:#}"
         );
-        assert_eq!(value(&combined, "accept"), Some(&b"text/*"[..]));
     }
 
-    /// Joining a singleton field corrupts it: a second `Authorization` folded into the first
-    /// lands inside the credential php-src base64-decodes.
+    /// Chunks concatenate in order; interim heads are dropped.
+    #[tokio::test]
+    async fn collect_concatenates_the_stream() {
+        let r = reply(vec![
+            ReplyEvent::Interim {
+                status: 103,
+                headers: Vec::new(),
+            },
+            head(),
+            ReplyEvent::Chunk(bytes::Bytes::from_static(b"one,")),
+            ReplyEvent::Chunk(bytes::Bytes::from_static(b"two")),
+            end(false),
+        ])
+        .collect()
+        .await
+        .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.headers, vec![("x-a".to_string(), b"1".to_vec())]);
+        assert_eq!(r.body, b"one,two");
+    }
+
+    /// The pingora front classifies a spool failure by finding an `io::Error`
+    /// in the chain (500, host fault) and a client fault by downcasting
+    /// `Rejected` — parse_err must keep both typed, never stringified.
     #[test]
-    fn repeated_singleton_field_lines_keep_only_the_first() {
-        let combined = combine_field_lines(lines(&[
-            ("Authorization", "Basic dXNlcjpwYXNz"),
-            ("Authorization", "Basic ZXZpbDpldmls"),
-        ]));
+    fn parse_err_keeps_the_typed_causes() {
+        let io = parse_err(multipart::ParseError::Io(std::io::Error::other(
+            "disk full",
+        )));
+        assert!(io.chain().any(|c| c.is::<std::io::Error>()));
+        assert!(io.downcast_ref::<extension_api::Rejected>().is_none());
+
+        let rejected = parse_err(multipart::ParseError::Rejected(extension_api::Rejected {
+            status: 413,
+            reason: "too big".into(),
+        }));
         assert_eq!(
-            value(&combined, "authorization"),
-            Some(&b"Basic dXNlcjpwYXNz"[..])
+            rejected
+                .downcast_ref::<extension_api::Rejected>()
+                .map(|r| r.status),
+            Some(413)
         );
     }
 

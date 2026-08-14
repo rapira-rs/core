@@ -6,7 +6,9 @@ pub mod classic_worker;
 pub mod context;
 pub mod diagnostics;
 pub mod dispatcher;
+pub mod exchange;
 pub mod executor;
+pub(crate) mod fold;
 pub mod handler;
 pub mod module;
 pub mod quota;
@@ -14,11 +16,14 @@ pub mod rapira_worker;
 pub mod scoreboard;
 pub mod start;
 pub mod types;
+pub mod values;
+pub(crate) mod zend;
 
 use std::ffi::c_int;
 
 pub use bindings::*;
-pub use handler::RapiraHandle;
+pub use exchange::set_sendfile_root;
+pub use handler::{HandleError, RapiraHandle};
 pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira};
 pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};
@@ -27,6 +32,11 @@ pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};
 // than bound from the headers.
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
+
+// HASH_KEY_IS_STRING is a #define on PHP 8.4 and an enum constant on 8.5, so the
+// bindgen name and zend_hash_get_current_key_ex's return type differ per version;
+// hardcoded like SUCCESS/FAILURE and compared through i64::from at the call sites.
+pub const HASH_KEY_IS_STRING: i64 = 1;
 
 // The Outcome-typed shims return a C `int`; the discriminant is validated at the call sites via
 // `Outcome::from_c` (unexpected values fall back to `Bailout`) rather than transmuted here.
@@ -43,6 +53,11 @@ unsafe extern "C" {
     pub fn rapira_release_temporary_streams();
     pub fn rapira_request_activate() -> c_int;
     pub fn rapira_request_shutdown() -> c_int;
+    // Receive-loop wall-timer discipline (module.c): disarm while parked in
+    // receive(), re-arm the captured per-cycle budget on unit handout. Plain
+    // zend timer calls - no bailout path, safe to call from Rust.
+    pub fn rapira_receive_untimed();
+    pub fn rapira_receive_timed();
     // C shim (module.c) over rapira_rs_ub_write; raises the client-abort bailout from
     // C so the longjmp doesn't cross the Rust catch_unwind frame.
     // https://man7.org/linux/man-pages/man3/setjmp.3.html

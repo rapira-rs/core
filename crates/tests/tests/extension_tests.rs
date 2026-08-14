@@ -10,17 +10,26 @@ use tests::{fixture, php_lock};
 /// Distinct ids so the same type can be registered many times (dup-name check).
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// Buffered exec: dispatch, then collect the whole response stream.
+async fn exec_full(php: &Php, req: Request) -> Result<Response> {
+    php.exec(req).await?.collect().await
+}
+
 /// A bodyless `GET` for `uri` with the defaults every driver here needs.
 fn get_request(uri: &str) -> Request {
     Request {
         method: "GET".into(),
         uri: uri.into(),
+        target: None,
+        authority: None,
         https: false,
         protocol: "HTTP/1.1".into(),
-        remote_addr: "127.0.0.1".into(),
-        remote_port: 0,
+        remote: extension_api::Addr::Inet(([127, 0, 0, 1], 44123).into()),
+        server: extension_api::Addr::Inet(([127, 0, 0, 1], 80).into()),
         server_name: "localhost".into(),
         server_port: 80,
+        tls: None,
+        received_at: None,
         headers: Vec::new(),
         body: Vec::new(),
     }
@@ -48,8 +57,8 @@ impl Extension for Driver {
         // `join!` starts both exec subtasks before awaiting either, so both are in flight
         // through the PHP pool concurrently (both must complete; not a strict parallelism proof).
         let (a, b) = tokio::join!(
-            php.exec(get_request("/?from=a")),
-            php.exec(get_request("/?from=b")),
+            exec_full(&php, get_request("/?from=a")),
+            exec_full(&php, get_request("/?from=b")),
         );
         check(&a?, "ok:a")?;
         check(&b?, "ok:b")?;
@@ -68,7 +77,6 @@ fn check(res: &Response, want: &str) -> Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     let _guard = php_lock();
     // Worker mode: the resident script answers each exec with "ok:<from>". The two
@@ -83,6 +91,148 @@ fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
         .run(
             rapira.handle()?,
             fixture("extension_tests/ext-driver-worker.php"),
+        )
+        .join();
+    drop(rapira);
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].is_ok(), "driver failed: {:?}", outcomes[0]);
+    Ok(())
+}
+
+/// A rejected body surfaces as a downcastable `Rejected` at exec() and never
+/// reaches the pool; the pool keeps serving afterwards.
+struct RejectDriver {
+    id: String,
+}
+
+impl Extension for RejectDriver {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
+        RejectDriver {
+            id: format!("ext{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.id
+    }
+
+    async fn run(&mut self, php: Php) -> Result<()> {
+        let multipart_post = |body: Vec<u8>| {
+            let mut r = get_request("/?from=a");
+            r.method = "POST".into();
+            r.headers = vec![(
+                "content-type".into(),
+                b"multipart/form-data; boundary=B".to_vec(),
+            )];
+            r.body = body;
+            r
+        };
+
+        let err = match exec_full(&php, multipart_post(b"no boundary here".to_vec())).await {
+            Err(e) => e,
+            Ok(_) => anyhow::bail!("malformed multipart must reject"),
+        };
+        let rejected = err
+            .downcast_ref::<extension_api::Rejected>()
+            .ok_or_else(|| anyhow::anyhow!("expected Rejected, got {err:#}"))?;
+        anyhow::ensure!(
+            rejected.status == 400,
+            "expected 400, got {}",
+            rejected.status
+        );
+
+        let big = [
+            b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\n".to_vec(),
+            vec![b'x'; 8192],
+            b"\r\n--B--".to_vec(),
+        ]
+        .concat();
+        let err = match exec_full(&php, multipart_post(big)).await {
+            Err(e) => e,
+            Ok(_) => anyhow::bail!("over-limit file part must reject"),
+        };
+        let rejected = err
+            .downcast_ref::<extension_api::Rejected>()
+            .ok_or_else(|| anyhow::anyhow!("expected Rejected, got {err:#}"))?;
+        anyhow::ensure!(
+            rejected.status == 413,
+            "expected 413, got {}",
+            rejected.status
+        );
+
+        // repeated content-type lines with a multipart body reject in either
+        // line order: the boundary-disagreement guard must not be positional
+        let plain_line = || ("content-type".to_string(), b"text/plain".to_vec());
+        let multipart_line = || {
+            (
+                "content-type".to_string(),
+                b"multipart/form-data; boundary=EVIL".to_vec(),
+            )
+        };
+        for headers in [
+            vec![plain_line(), multipart_line()],
+            vec![multipart_line(), plain_line()],
+        ] {
+            let mut smuggle = multipart_post(
+                b"--EVIL\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--EVIL--".to_vec(),
+            );
+            smuggle.headers = headers;
+            let err = match exec_full(&php, smuggle).await {
+                Err(e) => e,
+                Ok(_) => anyhow::bail!("repeated content-type with a multipart body must reject"),
+            };
+            let rejected = err
+                .downcast_ref::<extension_api::Rejected>()
+                .ok_or_else(|| anyhow::anyhow!("expected Rejected, got {err:#}"))?;
+            anyhow::ensure!(
+                rejected.status == 400,
+                "expected 400, got {}",
+                rejected.status
+            );
+        }
+
+        // gating negatives: an empty body with a multipart content-type stays a
+        // raw (empty) body, and a multipart-shaped body under a non-multipart
+        // content-type is delivered raw
+        check(
+            &exec_full(&php, multipart_post(Vec::new())).await?,
+            "method=POST body=",
+        )?;
+        let mut plain = multipart_post(b"--B\r\nnot really\r\n--B--".to_vec());
+        plain.headers = vec![("content-type".into(), b"text/plain".to_vec())];
+        check(
+            &exec_full(&php, plain).await?,
+            "method=POST body=--B\r\nnot really\r\n--B--",
+        )?;
+
+        check(
+            &exec_full(&php, get_request("/?from=a")).await?,
+            "method=GET body=",
+        )
+    }
+}
+
+#[test]
+fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    // host-side multipart parsing is a dispatcher-handle behavior
+    let rapira = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
+    let mut host = ExtensionRuntime::new();
+    host.register::<RejectDriver>(())?;
+    let limits = rapira_runtime::multipart::Limits {
+        max_file_size: 1024,
+        ..rapira_runtime::multipart::Limits::default()
+    };
+    let outcomes = host
+        .run_with_options(
+            rapira.handle()?,
+            fixture("dispatcher/echo-loop-worker.php"),
+            rapira_runtime::RuntimeOptions {
+                uploads: std::sync::Arc::new(limits),
+                ..rapira_runtime::RuntimeOptions::default()
+            },
         )
         .join();
     drop(rapira);
@@ -134,8 +284,7 @@ impl Extension for ErrorPathDriver {
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
-        // Before the fix this returned Err("php crashed mid-response; body truncated").
-        let resp = php.exec(get_request("/")).await?;
+        let resp = exec_full(&php, get_request("/")).await?;
         anyhow::ensure!(resp.status == 404, "expected 404, got {}", resp.status);
         anyhow::ensure!(
             resp.headers
@@ -148,7 +297,6 @@ impl Extension for ErrorPathDriver {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Worker(fixture(
@@ -189,7 +337,7 @@ impl Extension for TruncatedDriver {
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
-        let err = match php.exec(get_request("/")).await {
+        let err = match exec_full(&php, get_request("/")).await {
             Ok(resp) => anyhow::bail!(
                 "exec must reject a truncated response, got {} with body {:?}",
                 resp.status,
@@ -206,7 +354,6 @@ impl Extension for TruncatedDriver {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
@@ -303,7 +450,6 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn many_extensions_run() -> anyhow::Result<()> {
     let _guard = php_lock();
     const N: usize = 12;
@@ -466,10 +612,13 @@ fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let mut host = ExtensionRuntime::new();
     host.register::<SlowShutdown>(())?;
     // A tiny grace so the timeout branch fires fast instead of after the 30s default.
-    let running = host.run_with_grace(
+    let running = host.run_with_options(
         rapira.handle()?,
         fixture("extension_tests/ext-driver-classic.php"),
-        Duration::from_millis(100),
+        rapira_runtime::RuntimeOptions {
+            grace: Duration::from_millis(100),
+            ..rapira_runtime::RuntimeOptions::default()
+        },
     );
     // `stop` cancels the pending `run`, then drives `shutdown` — which overruns the grace.
     let start = Instant::now();

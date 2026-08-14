@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 3afbe7fa676fb634eb993636766cd3e975f727c7 */
+ * Stub hash: f16726bf1ebc4cb62f6e2dcdcf0a9d9cd1496ac2 */
 
 static zend_class_entry *register_class_Rapira_Exception_RapiraThrowable(zend_class_entry *class_entry_Throwable)
 {
@@ -40,6 +40,17 @@ static zend_class_entry *register_class_Rapira_Exception_WorkDiscardedException(
 
 	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Exception", "WorkDiscardedException", NULL);
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_RuntimeException, 0);
+	zend_class_implements(class_entry, 1, class_entry_Rapira_Exception_RapiraThrowable);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Rapira_Exception_NotInDispatcherModeError(zend_class_entry *class_entry_Error, zend_class_entry *class_entry_Rapira_Exception_RapiraThrowable)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Exception", "NotInDispatcherModeError", NULL);
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Error, 0);
 	zend_class_implements(class_entry, 1, class_entry_Rapira_Exception_RapiraThrowable);
 
 	return class_entry;

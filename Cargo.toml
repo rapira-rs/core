@@ -1,7 +1,11 @@
+[workspace.package]
+edition = "2024"
+version = "0.7.0"
+
 [package]
 name = "rapira_core"
-version = "0.6.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "PHP application server: embeds NTS PHP via the embed SAPI and serves HTTP directly"
 homepage = "https://rapira.rs"
 documentation = "https://rapira.rs/docs/"
@@ -64,6 +68,7 @@ rapira_runtime = { workspace = true }
 php_sys = { workspace = true }
 rapira_config = { workspace = true }
 rapira_pingora = { workspace = true }
+libc = "0.2"
 mimalloc = "0.1"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }

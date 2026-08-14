@@ -11,6 +11,7 @@
 --enable-tokenizer
 --enable-ctype
 --enable-fileinfo
+--enable-posix
 --enable-phar
 --with-openssl
 --with-curl

@@ -13,7 +13,6 @@ $handler = static function (): void {
 	echo "sid=", session_id();
 	$_SESSION['n'] = 1; // dirty session -> teardown flush -> write() -> bailout
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 	gc_collect_cycles();
 }

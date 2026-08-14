@@ -10,13 +10,13 @@ $handler = static function (): void {
 		return;
 	}
 	ignore_user_abort(true);
-	// The test drops the response receiver right after submitting; the sleep
-	// guarantees the drop has landed before the write observes it.
+	// The test waits for the 'held' record, then drops the receiver; the
+	// sleep guarantees the drop has landed before the write observes it.
+	\Rapira\log('held');
 	usleep(300000);
 	echo "payload\n"; // aborted write: the raised abort must NOT bail
 	TrackIgnore::$reached++; // ignore_user_abort=1: the handler keeps running
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 	gc_collect_cycles();
 }

@@ -1,7 +1,7 @@
 [package]
 name = "extension_api"
-version = "0.2.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 publish = false
 license = "MIT"
 description = "Native rapira extension contract - the API every extension implements to drive PHP"
@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+bytes = { workspace = true }
 # Master-side pre-fork socket binding (sync syscalls; keeps this crate tokio-free).
 socket2 = "0.6"
 

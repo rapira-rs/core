@@ -13,6 +13,5 @@ $handler = static function (): void {
 	$d->loadXML('<r>ok</r>');
 	echo 'dom:' . $d->documentElement->textContent;
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

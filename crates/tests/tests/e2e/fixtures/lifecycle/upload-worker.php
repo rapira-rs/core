@@ -8,6 +8,5 @@ $handler = static function (): void {
     }
     echo $f['name'], '|', $f['error'], '|', file_get_contents($f['tmp_name']), '|', $f['tmp_name'];
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

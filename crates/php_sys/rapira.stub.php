@@ -4,8 +4,9 @@
 
 namespace {
     /**
-     * Classic mode only. Flush the response to the client early; the script may keep
-     * working after it. Same contract as fastcgi_finish_request().
+     * Classic and worker modes. Flush the response to the client early; the script may
+     * keep working after it. In dispatcher mode the Exchange verbs finalize instead,
+     * so the call throws.
      */
     function rapira_finish_request(): bool {}
 }
@@ -39,7 +40,10 @@ namespace Rapira {
         public function activeCount(): int;
     }
 
-    /** The plugin surface this worker's pool serves. Plugins narrow every method. */
+    /**
+     * The plugin surface this worker's pool serves. Plugins narrow receive(),
+     * tryReceive() and getInfo() to their own types.
+     */
     interface Dispatcher
     {
         public function name(): string;
@@ -62,11 +66,46 @@ namespace Rapira {
     }
 
     /**
+     * An IP endpoint. The other arm of the address union is UnixAddress.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class InetAddress
+    {
+        public string $ip;
+        public int $port;
+
+        public function __construct(string $ip, int $port) {}
+    }
+
+    /**
+     * A unix domain socket endpoint. $path is null for an unnamed peer.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class UnixAddress
+    {
+        public ?string $path;
+
+        public function __construct(?string $path) {}
+    }
+
+    /**
      * The same instance for the life of the process.
+     *
+     * @throws Exception\NotInDispatcherModeError Called outside dispatcher mode.
+     */
+    function get_dispatcher(): Dispatcher {}
+
+    /**
+     * Hand one job to $handler, which reads the superglobals and responds through
+     * echo/header(). False means the worker is draining: exit the loop.
      *
      * @throws Exception\NotInWorkerModeError Called outside worker mode.
      */
-    function get_dispatcher(): Dispatcher {}
+    function handle_request(callable $handler): bool {}
 
     function get_version(): string {}
 

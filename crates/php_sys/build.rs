@@ -38,15 +38,19 @@ fn main() -> anyhow::Result<()> {
         println!("cargo:rustc-cfg=php84");
     }
 
+    let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     let mut c = cc::Build::new();
     // Zend fixes the parameter list of every entry point it declares through a
     // macro (INTERNAL_FUNCTION_PARAMETERS' `return_value`, PHP_MINIT_FUNCTION's
     // INIT_FUNC_ARGS `type`/`module_number`), so an unused one is never actionable here.
     c.flag_if_supported("-Wno-unused-parameter");
+    c.define("RAPIRA_VERSION", format!("\"{version}\"").as_str());
     c.file("wrapper.c")
         .file("module.c")
         .file("rapira_classes.c")
-        .file("rapira_dispatcher.c");
+        .file("rapira_http.c")
+        .file("rapira_dispatcher.c")
+        .file("rapira_exchange.c");
     for d in &php.includes {
         c.include(d);
     }
@@ -82,11 +86,15 @@ fn main() -> anyhow::Result<()> {
         "wrapper.h",
         "module.c",
         "wrapper.c",
+        "rapira_http.c",
+        "rapira_http_arginfo.h",
+        "rapira_http.stub.php",
         "rapira_arginfo.h",
         "allowed_bindings.rs",
         "rapira_classes.c",
         "rapira_classes.h",
         "rapira_dispatcher.c",
+        "rapira_exchange.c",
         "rapira.stub.php",
         "rapira_exception_arginfo.h",
         "rapira_exception.stub.php",
@@ -99,8 +107,8 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn macos_sysroot(bindings: bindgen::Builder) -> bindgen::Builder {
-    // The libclang 19+ that reports the preserve_none convention no longer infers the SDK path, so
-    // point it at the active SDK or the parse fails to find <stdlib.h> and friends.
+    // libclang 19+ does not infer the macOS SDK path: point it at the active
+    // SDK or the parse fails to find <stdlib.h> and friends.
     if let Ok(out) = Command::new("xcrun").args(["--show-sdk-path"]).output()
         && out.status.success()
     {

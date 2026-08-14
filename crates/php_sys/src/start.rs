@@ -1,7 +1,10 @@
 use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
 use std::thread;
 use std::thread::JoinHandle;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 use tracing::{error, info, trace};
 use types::Job;
 
@@ -11,18 +14,19 @@ use crate::scoreboard::{Event, ScoreboardSnapshot, sb_set, sb_update};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 thread_local! {
-    // Owned by the single PHP worker thread; installed once by worker_main and
-    // reused across worker restarts on the same OS thread. One receiver per
-    // worker process in the fork-based pool.
-    static JOB_RX: RefCell<Option<Receiver<Job>>> = const { RefCell::new(None) };
+    static JOB_RX: RefCell<Option<JobRx>> = const { RefCell::new(None) };
 }
 
-/// Proof that sapi_startup + php_module_startup (MINIT) succeeded in THIS
-/// process. Drop runs the module teardown, so exactly one place holds it:
-/// - fused path: inside `Rapira` (single-process semantics);
-/// - fork mode: the master, for its whole life (opcache SHM mmap'd at MINIT is
-///   shared by every fork). Forked workers NEVER drop it — they leave via
-///   process exit, which skips Drop; the master owns the single engine teardown.
+pub(crate) struct Intake {
+    pub(crate) tx: SyncSender<Job>,
+    pub(crate) pending: Arc<AtomicUsize>,
+}
+
+struct JobRx {
+    rx: Receiver<Job>,
+    pending: Arc<AtomicUsize>,
+}
+
 pub struct PhpModule {}
 
 impl Drop for PhpModule {
@@ -35,17 +39,19 @@ impl Drop for PhpModule {
 }
 
 pub struct Rapira {
-    pub(crate) intake: Option<Sender<Job>>,
+    pub(crate) intake: Option<Intake>,
+    /// The mode serves superglobals per job (classic/worker); the dispatcher
+    /// path skips the whole ReqC materialization.
+    pub(crate) superglobals: bool,
+    /// Exchange-style delivery (`Mode::Dispatcher`); the handle carries it so
+    /// the runtime never re-derives the mode.
+    pub(crate) dispatcher: bool,
     worker: Option<JoinHandle<()>>,
-    /// Some = fused/private board (tests, single-process); None = external slot.
     board: Option<rapira_scoreboard::Scoreboard>,
-    /// Some = this value owns module teardown (fused path); None = worker flavor.
     module: Option<PhpModule>,
 }
 
 impl Rapira {
-    /// Master-side boot: MINIT only, on the calling (still single-threaded)
-    /// thread. No worker thread, no channels. Once per process, pre-fork.
     pub fn boot_master() -> anyhow::Result<PhpModule> {
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
@@ -67,9 +73,6 @@ impl Rapira {
         Ok(PhpModule {})
     }
 
-    /// Worker-side (post-fork) start: job channel + the single PHP worker
-    /// thread, against the engine inherited from `boot_master` in the parent.
-    /// No module startup here; the returned value never tears the module down.
     pub fn start_worker(mode: Mode, hooks: WorkerHooks) -> anyhow::Result<Self> {
         let WorkerHooks {
             max_requests,
@@ -85,26 +88,49 @@ impl Rapira {
             }
         };
         slot.bind(std::process::id());
+        let pending = Arc::new(AtomicUsize::new(0));
+        let (intake_tx, intake_rx) = sync_channel::<Job>(1024);
+        let intake = Intake {
+            tx: intake_tx,
+            pending: pending.clone(),
+        };
 
-        let (intake, intake_rx) = mpsc::channel::<Job>(1024);
+        // $_SERVER is a per-job build for classic and worker; the dispatcher
+        // path never reads it.
+        let superglobals = !matches!(mode, Mode::Dispatcher(_));
+        let dispatcher = matches!(mode, Mode::Dispatcher(_));
+        // SAFETY: safe, trust me, I'm a developer
+        unsafe {
+            crate::rapira_mode = match &mode {
+                Mode::Classic => RAPIRA_MODE_CLASSIC,
+                Mode::Worker(_) => RAPIRA_MODE_WORKER,
+                Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
+            } as c_int;
+        };
 
         trace!(target: "rapira", "spawning worker thread");
         let worker: JoinHandle<()> = thread::spawn(move || {
             sb_set(slot);
             quota::install(max_requests, on_quota, on_unhealthy);
-            worker_main(mode, intake_rx)
+            worker_main(
+                mode,
+                JobRx {
+                    rx: intake_rx,
+                    pending,
+                },
+            )
         });
 
         Ok(Self {
             intake: Some(intake),
+            superglobals,
+            dispatcher,
             worker: Some(worker),
             board,
             module: None,
         })
     }
 
-    /// Fused single-process boot — module + worker in one. The in-process
-    /// integration tests run through here.
     pub fn start(mode: Mode) -> anyhow::Result<Self> {
         info!(target: "rapira", "booting with mode: {mode:?}");
         let module = Self::boot_master()?;
@@ -130,16 +156,10 @@ impl Drop for Rapira {
         info!(target: "rapira", "shutting down, dropping");
         self.intake = None;
         let Some(worker) = self.worker.take() else {
-            // No thread to wait for; preserve "no teardown" exactly.
             std::mem::forget(self.module.take());
             return;
         };
 
-        // The worker may never come back: the Zend timer only fires when max_execution_time > 0
-        // (and only exists on Linux/FreeBSD), and a leaked RapiraHandle keeps the intake open,
-        // parking the worker in pull_job. Bound the wait and, if it is still running, skip
-        // the C teardown - php_module_shutdown on a live PHP thread is UB - and let process
-        // exit reclaim it.
         // https://www.php.net/manual/en/info.configuration.php#ini.max-execution-time
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !worker.is_finished() {
@@ -156,12 +176,12 @@ impl Drop for Rapira {
         }
 
         let _ = worker.join();
-        // Fused: module teardown, same order as before the split; worker flavor: no-op.
+        // Module teardown; the worker flavor holds no module and no-ops.
         drop(self.module.take());
     }
 }
 
-fn worker_main(mode: Mode, rx: Receiver<Job>) {
+fn worker_main(mode: Mode, rx: JobRx) {
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
     loop {
         unsafe {
@@ -175,31 +195,80 @@ fn worker_main(mode: Mode, rx: Receiver<Job>) {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker(script) => rapira_worker(script.clone()),
+            Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;
         }
-        // Restart: loop back on this same OS thread — JOB_RX stays installed and
-        // the worker re-bootstraps with a fresh request cycle.
     }
 }
 
-/// Block for the next job (shutdown-aware): `None` means the intake channel
-/// closed — every `Sender`/`RapiraHandle` was dropped, i.e. Rapira is shutting
-/// down. The single place the receiver is consumed; the classic loop,
-/// worker-mode `next_job`, and the boot-failure drain all go through here.
-/// Also the scoreboard idle/active hinge: parked here = spare capacity.
+/// Untimed pull as a plain Option; Closed maps to None.
 pub(crate) fn pull_job() -> Option<Job> {
-    // Holding the RefCell borrow across the blocking recv is safe: the thread is
-    // parked inside it and pull_job is never re-entered on this thread.
-    JOB_RX.with_borrow_mut(|rx| {
-        let rx = rx.as_mut()?;
+    match pull_job_wait(None) {
+        Pulled::Job(job) => Some(*job),
+        _ => None,
+    }
+}
+
+pub(crate) enum Pulled {
+    // Boxed: a Job is ~600 bytes and the other variants are empty
+    Job(Box<Job>),
+    Timeout,
+    Empty,
+    Closed,
+}
+
+/// receive(-1) / receive(n): block up to `timeout` (None = forever). Idle
+/// covers only the park; control returns to PHP as Active on every arm, or the
+/// master watchdog would skip a worker spinning after a no-unit return.
+pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
+    JOB_RX.with_borrow_mut(|slot| {
+        let Some(job_r) = slot.as_mut() else {
+            return Pulled::Closed;
+        };
         sb_update(Event::Idle);
-        let job = rx.blocking_recv();
-        if job.is_some() {
-            sb_update(Event::Active);
+        let got = match timeout {
+            None => job_r.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(t) => job_r.rx.recv_timeout(t),
+        };
+        sb_update(Event::Active);
+        match got {
+            Ok(job) => {
+                job_r.pending.fetch_sub(1, Ordering::Relaxed);
+                Pulled::Job(Box::new(job))
+            }
+            Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
+            Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
         }
-        job
+    })
+}
+
+/// tryReceive() / receive(0): never blocks. The Idle/Active pair still runs — a
+/// polling worker must refresh last_activity_ms or the master watchdog
+/// TERMs it as a stuck request (master/src/events.rs:509-517).
+pub(crate) fn pull_job_try() -> Pulled {
+    JOB_RX.with_borrow_mut(|slot| {
+        let Some(job_r) = slot.as_mut() else {
+            return Pulled::Closed;
+        };
+        sb_update(Event::Idle);
+        let got = job_r.rx.try_recv();
+        sb_update(Event::Active);
+        match got {
+            Ok(job) => {
+                job_r.pending.fetch_sub(1, Ordering::Relaxed);
+                Pulled::Job(Box::new(job))
+            }
+            Err(TryRecvError::Empty) => Pulled::Empty,
+            Err(TryRecvError::Disconnected) => Pulled::Closed,
+        }
+    })
+}
+
+pub(crate) fn pending_depth() -> usize {
+    JOB_RX.with_borrow(|slot| {
+        slot.as_ref()
+            .map_or(0, |job_r| job_r.pending.load(Ordering::Relaxed))
     })
 }

@@ -14,6 +14,5 @@ $handler = static function (): void {
 	$db->exec("INSERT INTO t VALUES ('ok')");
 	echo 'pdo:' . $db->query('SELECT v FROM t')->fetchColumn();
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

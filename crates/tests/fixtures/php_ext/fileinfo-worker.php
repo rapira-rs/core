@@ -12,6 +12,5 @@ $handler = static function (): void {
 	}
 	echo 'finfo:' . (new finfo(FILEINFO_MIME_TYPE))->buffer('hello');
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

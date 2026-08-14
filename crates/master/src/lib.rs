@@ -1,5 +1,5 @@
-//! `rapira_master`: a single-threaded, pre-fork process master. No tokio, no
-//! async, no thread spawns — just `libc` + `std` + the shared-memory scoreboard.
+//! `rapira_master`: a single-threaded, pre-fork process master built on
+//! `libc` + `std` + the shared-memory scoreboard.
 //!
 //! The master boots PHP once (caller side), then forks workers that inherit the
 //! warm image. It supervises them with configurable pool modes (static /
@@ -41,10 +41,10 @@ pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// error (gen-0 worker died unhealthy before handling any request).
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
 
-/// Pool mode. `processes` in [`MasterConfig`] is the static count for
+/// Pool scaling policy. `processes` in [`MasterConfig`] is the static count for
 /// `Static`, and the max-children ceiling for `Dynamic`/`Ondemand`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PoolMode {
+pub enum Scaling {
     Static,
     Dynamic { min_spare: usize, max_spare: usize },
     Ondemand,
@@ -56,7 +56,7 @@ pub enum PoolMode {
 pub struct MasterConfig {
     /// Static worker count / dynamic-ondemand max_children.
     pub processes: usize,
-    pub pool_mode: PoolMode,
+    pub scaling: Scaling,
     /// Ondemand: idle worker lifetime before a QUIT.
     pub process_idle_timeout: Duration,
     /// Stop/reload QUIT→TERM escalation grace.

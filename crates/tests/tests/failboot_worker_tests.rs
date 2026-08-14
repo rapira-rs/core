@@ -3,11 +3,10 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tests::{drain, fixture, php_lock, req};
 
-// A6: a worker script that fatals before its `handleRequest` loop can
-// never read the intake channel from PHP. The Rust boot-failure drain must
-// (a) answer the queued job with 503 and (b) observe channel closure so
-// `Drop for Rapira` returns instead of joining a worker that retries the boot
-// forever. Pre-fix (retry-forever loop) BOTH the response and Drop hang.
+// A worker script that fatals before its receive loop can never read the
+// intake channel from PHP. The Rust boot-failure drain must (a) answer the
+// queued job with 503 and (b) observe channel closure so `Drop for Rapira`
+// returns instead of joining a worker that retries the boot forever.
 #[test]
 fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -17,14 +16,14 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
     // thread only enforces a deadline so a regression fails loudly instead of
     // hanging the whole suite.
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
-        let r = Rapira::start(Mode::Worker(fixture(
+        let r = Rapira::start(Mode::Dispatcher(fixture(
             "failboot_worker_tests/failboot-worker.php",
         )))?;
         let h = r.handle()?;
         let rx = h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php"))?;
         drop(h); // last non-Rapira intake sender — lets the channel close on drop(r)
-        let (status, body) = drain(rx); // pre-fix: blocks forever (no 503 ever sent)
-        drop(r); // pre-fix: joins a worker stuck in the retry loop -> hangs
+        let (status, body) = drain(rx);
+        drop(r); // drops the last sender so the worker's boot retry exits
         let _ = done_tx.send((status, body));
         Ok(())
     });
@@ -47,7 +46,7 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
     let (done_tx, done_rx) = mpsc::sync_channel::<(usize, Vec<u16>)>(1);
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
-        let r = Rapira::start(Mode::Worker(fixture(
+        let r = Rapira::start(Mode::Dispatcher(fixture(
             "failboot_worker_tests/failboot-worker.php",
         )))?;
         let h = r.handle()?;

@@ -37,6 +37,7 @@ fn classic_executor(job: &mut Job) -> (Event, bool) {
             unbind_server_context();
             return (Event::Handled(true), false);
         }
+        crate::context::apply_proto_num(&job.ctx);
 
         let exec_err: bool = match File::open(&job.ctx.req.script_filename) {
             Err(e) => {

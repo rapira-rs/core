@@ -6,10 +6,15 @@ use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::Sender;
 
+/// Header/trailer fields: one entry per field line, wire order, names as
+/// received, values raw bytes (latin1/binary-safe).
+pub type FieldLines = Vec<(String, Vec<u8>)>;
+
 #[derive(Debug, Clone)]
 pub enum Mode {
     Classic,
     Worker(PathBuf),
+    Dispatcher(PathBuf),
 }
 
 #[repr(C)]
@@ -22,9 +27,6 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// The C shims hand back a plain `int`. A value outside this enum's range can't be a valid
-    /// `#[repr(C)]` discriminant (constructing one would be UB), so map anything unexpected to
-    /// `Bailout` — the conservative outcome, forcing a worker recycle instead of trusting it.
     pub fn from_c(v: c_int) -> Self {
         match v {
             0 => Self::Ok,
@@ -36,60 +38,174 @@ impl Outcome {
     }
 }
 
-/// The complete response for one job, sealed and delivered as a single message
-/// by [`Context::finish`] — one consumer wakeup per response. A channel that
-/// closes without a frame means the worker died (panic / dropped job / pool
-/// shutdown).
-pub struct Frame {
-    /// `None`: PHP produced no response head (it bailed before any output and
-    /// the teardown flush emitted none).
-    pub head: Option<ResponseHead>,
-    pub body: Bytes,
-    /// PHP errored after body output had begun during the handler, so the
-    /// body may be incomplete. A response whose output is flushed whole at
-    /// teardown (buffered output) or synthesized as a head-only error is
-    /// complete, not truncated.
-    pub truncated: bool,
+/// One event of a response stream. A well-formed stream is
+/// `Interim* Head? (Chunk|File)* End?`: `End` without a `Head` only happens
+/// when the producer recorded no head at all, and a channel that closes
+/// without `End` means the producer died (truncated when a `Head` was seen).
+pub enum Frame {
+    /// Advisory interim head (100-199, never 101); forwarded where the
+    /// protocol allows, dropped otherwise.
+    Interim(ResponseHead),
+    /// The final head, at most once per response.
+    Head {
+        head: ResponseHead,
+        /// The framing the consumer applies when Some: a declared
+        /// content-length being honoured, or the computed length of a response
+        /// that ends on its first body write. None means the consumer chooses
+        /// (chunked on HTTP/1.1). Never synthesized for a bodiless response.
+        content_length: Option<u64>,
+        /// 204 | 304 | a HEAD request | 1xx: no body bytes and no framing
+        /// fields go on the wire.
+        bodiless: bool,
+        /// The head carried content-encoding: the body is already coded.
+        body_coded: bool,
+    },
+    Chunk(Bytes),
+    /// A file slice the producer opened and validated; the consumer streams it
+    /// and owns the handle.
+    File {
+        file: std::fs::File,
+        offset: u64,
+        len: u64,
+    },
+    /// Terminal, exactly once from a live producer. Trailers ride here; a
+    /// consumer that cannot express them drops the section.
+    End {
+        trailers: FieldLines,
+        truncated: bool,
+    },
 }
 
 pub struct Job {
     pub ctx: Context,
 }
 
+/// One endpoint of an accepted connection, as the socket reports it. Mirror of
+/// `extension_api::Addr` — php_sys does not depend on extension_api, the runtime
+/// mapping is the one bridge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Addr {
+    Inet(std::net::SocketAddr),
+    /// None is an unnamed endpoint — the usual case for a peer connecting to a
+    /// unix listener.
+    Unix(Option<PathBuf>),
+}
+
+pub struct ClientCertView {
+    pub serial: String,
+    pub organization: Option<String>,
+    pub fingerprint: String,
+}
+
+pub struct TlsView {
+    pub version: String,
+    pub cipher: String,
+    pub alpn: Option<String>,
+    pub server_name: Option<String>,
+    pub cert: Option<ClientCertView>,
+}
+
+/// A file part spooled by the host. `unlink` is the one remover — seal calls
+/// it at finalize, Drop is the abnormal-path net.
+pub struct SpooledFile {
+    pub path: PathBuf,
+}
+
+impl SpooledFile {
+    /// Takes the path, so a Drop after an explicit unlink is a no-op and a
+    /// recycled file name is never removed twice.
+    pub fn unlink(&mut self) {
+        let path = std::mem::take(&mut self.path);
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(target: "rapira", "removing spool file {}: {e}", path.display());
+        }
+    }
+}
+
+impl Drop for SpooledFile {
+    fn drop(&mut self) {
+        self.unlink();
+    }
+}
+
+pub struct FormField {
+    pub name: Vec<u8>,       // content-disposition name, bytes as received
+    pub value: Vec<u8>,      // part body, no decoding
+    pub headers: FieldLines, // the part's header section, per-value shape
+}
+
+pub struct UploadedFile {
+    pub name: Vec<u8>,
+    /// Byte-for-byte as sent; empty is a browser submitting an empty file input.
+    pub client_filename: Vec<u8>,
+    /// content-type value verbatim, parameters included; an empty or OWS-only
+    /// value maps to None upstream.
+    pub client_media_type: Option<Vec<u8>>,
+    pub headers: FieldLines,
+    pub file: SpooledFile,
+    /// Bytes written to disk. A 64-bit zend_long is assumed at the FFI edge.
+    pub size: u64,
+}
+
+pub struct MultipartBody {
+    pub fields: Vec<FormField>,
+    pub files: Vec<UploadedFile>,
+}
+
+pub enum Body {
+    /// Classic-path bodies and non-multipart dispatcher bodies.
+    Raw(Box<dyn Read + Send>),
+    /// Dispatcher-path multipart, parsed by the host before enqueue.
+    Multipart(MultipartBody),
+}
+
 pub struct Request {
     pub method: String,
     pub uri: String,
+    /// Raw request-target bytes; None falls back to `uri`'s bytes (empty was
+    /// normalized to None at the producer).
+    pub target: Option<Vec<u8>>,
+    /// The authority the client named, byte-for-byte; None = named none.
+    pub authority: Option<Vec<u8>>,
     pub https: bool,
     pub query: String,
+    /// Wire/CGI spelling ("HTTP/2.0"); mapped to the contract spelling at the
+    /// exchange view.
     pub protocol: String,
-    pub remote_addr: String,
+    pub remote: Addr,
+    /// The accepting socket.
+    pub server: Addr,
+    /// Configured CGI SERVER_NAME/SERVER_PORT and the $uri synthesis fallback.
     pub server_name: String,
-    pub server_port: String,
-    pub remote_port: String,
+    pub server_port: u16,
     pub script_name: String,
     pub document_root: String,
     pub script_filename: PathBuf,
-    /// At most one entry per field name, compared case-insensitively — a field's repeats are
-    /// combined before this point. A repeated name would register the CGI variable twice and
-    /// `php_register_variable_safe` keeps only the last, while the `Cookie` and `AUTH_TYPE`
-    /// readers below would each pick a different one.
-    pub headers: Vec<(String, Vec<u8>)>, // values as bytes: latin1/binary-safe
+    /// One entry per field line, wire order per name; values as bytes
+    /// (latin1/binary-safe).
+    pub headers: FieldLines,
     pub server_vars: Vec<(String, String)>,
-    /// Raw bytes like every other header value: php-src builds the multipart boundary
-    /// straight out of this, so it must match the body's bytes exactly.
+    /// First content-type field line, raw bytes.
     pub content_type: Option<Vec<u8>>,
-    pub content_length: i64, // -1 if unknown
-    pub body: Box<dyn Read + Send>,
+    /// Wire byte count; captured before any body move, never re-derived from
+    /// parsed parts. -1 if unknown.
+    pub content_length: i64,
+    pub body: Body,
+    /// Unix seconds; None = not yet stamped (the handler stamps).
+    pub received_at: Option<f64>,
+    pub tls: Option<TlsView>,
 }
 
 pub struct ResponseHead {
     pub status: u16,
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: FieldLines,
 }
 
-/// The leading integer of a `Status:` value — `404`, or `404 Not Found` — when it is a
-/// plausible response status. Anything else leaves the status untouched; the field is
-/// dropped either way, since no client should be shown it.
 fn status_field_code(value: &[u8]) -> Option<u16> {
     let digits: &[u8] = value
         .split(|b| b.is_ascii_whitespace())
@@ -98,65 +214,102 @@ fn status_field_code(value: &[u8]) -> Option<u16> {
     (100..=599).contains(&code).then_some(code)
 }
 
+/// The $_SERVER-facing materialization of a Request: SAPI CStrings, the folded
+/// header table, the rendered address strings. Built once, superglobals modes
+/// only. `register_server_variables` registers from borrows into this storage —
+/// that frame may not hold owned Rust values (a bailout longjmp over pending
+/// drops is UB).
 pub struct ReqC {
     pub method: CString,
     pub query: CString,
     pub uri: CString,
     pub script: CString,
     pub ctype: Option<CString>,
-    /// `None` when the request carried no `Cookie` header — `read_cookies`
-    /// then hands PHP a NULL, the SAPI convention for "no cookies".
     pub cookie: Option<CString>,
-    /// `None` when absent; `php_handle_auth_data` is NULL-safe (main.c guards).
     pub authorization: Option<CString>,
     pub env: HashMap<Box<[u8]>, CString>,
+    /// One deterministic value per name for the `HTTP_*` mapping (crate::fold).
+    pub folded_headers: FieldLines,
+    /// Rendered CGI address strings: Inet → ip / port, Unix → "" / "0".
+    pub remote_addr: String,
+    pub remote_port: String,
+    pub server_port: String,
+}
+
+fn cgi_addr_strings(addr: &Addr) -> (String, String) {
+    match addr {
+        Addr::Inet(sa) => (sa.ip().to_string(), sa.port().to_string()),
+        // A unix peer has no network address, but REMOTE_ADDR must hold a
+        // hostnumber (RFC 3875 §4.1.8); loopback is the conventional stand-in.
+        // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.8
+        Addr::Unix(_) => ("127.0.0.1".to_owned(), "0".to_owned()),
+    }
+}
+
+/// A NUL byte cannot cross the CGI boundary; the value degrades to empty, and
+/// the warn names the field so the degrade is visible.
+fn cgi_cstring(field: &str, bytes: &[u8]) -> CString {
+    CString::new(bytes).unwrap_or_else(|_| {
+        tracing::warn!(target: "rapira", "{field} carries a NUL byte; registered empty");
+        CString::default()
+    })
 }
 
 impl ReqC {
     pub fn build(r: &Request) -> Self {
-        // One entry per field name by the time a request gets here, and repeats of Cookie
-        // were already rejoined on "; ", so this reads the single entry. Folding here as
-        // well would leave $_COOKIE and $_SERVER['HTTP_COOKIE'] disagreeing.
-        let cookie: Option<Vec<u8>> = r
-            .headers
+        let folded_headers = crate::fold::fold_field_lines(&r.headers);
+
+        // Cookie repeats rejoin on "; ", the cookie-string form php-src's parser
+        // expects; the folded table already applied that rule.
+        let cookie: Option<CString> = folded_headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
-            .map(|(_, v)| v.clone());
+            .map(|(_, v)| cgi_cstring("Cookie", v));
 
-        // Build the CStrings straight from the header bytes — no owned-String detour.
+        // Authorization is a singleton field: the first line wins.
         let authorization: Option<CString> = r
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-            .map(|(_, v)| CString::new(v.as_slice()).unwrap_or_default());
+            .map(|(_, v)| cgi_cstring("Authorization", v));
 
         let env: HashMap<Box<[u8]>, CString> = r
             .server_vars
             .iter()
-            .filter_map(|(k, v)| Some((k.as_bytes().into(), CString::new(v.as_bytes()).ok()?)))
+            .filter_map(|(k, v)| match CString::new(v.as_bytes()) {
+                Ok(v) => Some((k.as_bytes().into(), v)),
+                Err(_) => {
+                    tracing::warn!(target: "rapira", "server var {k} carries a NUL byte; dropped");
+                    None
+                }
+            })
             .collect();
 
+        let (remote_addr, remote_port) = cgi_addr_strings(&r.remote);
+
         Self {
-            method: CString::new(r.method.as_bytes()).unwrap_or_default(),
-            query: CString::new((r.query).as_bytes()).unwrap_or_default(),
-            uri: CString::new(r.uri.as_bytes()).unwrap_or_default(),
-            script: CString::new(r.script_filename.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            cookie: cookie.map(|c| CString::new(c).unwrap_or_default()),
+            method: cgi_cstring("REQUEST_METHOD", r.method.as_bytes()),
+            query: cgi_cstring("QUERY_STRING", r.query.as_bytes()),
+            uri: cgi_cstring("REQUEST_URI", r.uri.as_bytes()),
+            script: cgi_cstring(
+                "SCRIPT_FILENAME",
+                r.script_filename.to_string_lossy().as_bytes(),
+            ),
+            cookie,
             authorization,
             ctype: r
                 .content_type
                 .as_deref()
-                .map(|s| CString::new(s).unwrap_or_default()),
+                .map(|s| cgi_cstring("CONTENT_TYPE", s)),
             env,
+            folded_headers,
+            remote_addr,
+            remote_port,
+            server_port: r.server_port.to_string(),
         }
     }
 }
 
-/// How far the response has progressed. Monotonic
-/// (`NotSent` → `HeadSent` → `BodyStreamed`), which makes the illegal
-/// "body before head" state unrepresentable and replaces separate
-/// `headers_sent`/`body_started` flags with a single source of truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamState {
     /// Nothing recorded yet.
@@ -169,23 +322,19 @@ pub enum StreamState {
 
 pub struct Context {
     pub req: Request,
-    pub c: ReqC,
+    /// CGI materialization; None on the dispatcher path, which binds no server
+    /// context and never runs the CGI callbacks.
+    pub c: Option<ReqC>,
     pub sender: Option<Sender<Frame>>,
-    /// The head recorded by the first `send_headers`/`send_head` (first write
-    /// wins); delivered by [`Self::finish`].
     pub head: Option<ResponseHead>,
-    /// Body accumulated by `ub_write` until [`Self::finish`] seals the frame.
     pub body: Vec<u8>,
     pub stream: StreamState,
-    /// True once the handler has returned and the teardown flush is running, so a
-    /// buffered body pushed out by the teardown flush does not advance `stream` to
-    /// `BodyStreamed` — only body written *during* the handler counts as truncation.
     pub tearing_down: bool,
 }
 
 impl Context {
-    pub fn new(req: Request, sender: Sender<Frame>) -> Self {
-        let c = ReqC::build(&req);
+    pub fn new(req: Request, sender: Sender<Frame>, superglobals: bool) -> Self {
+        let c = superglobals.then(|| ReqC::build(&req));
         Self {
             req,
             c,
@@ -197,26 +346,11 @@ impl Context {
         }
     }
 
-    /// The response body is truncated iff the request `errored` *after* body output
-    /// had begun during the handler. A buffered or head-only response — whose
-    /// head/body are flushed atomically at teardown — is complete, not truncated.
-    /// Order-independent: [`Self::tearing_down`] keeps `stream` from advancing to
-    /// `BodyStreamed` during the teardown flush, so this can be read at any point.
     pub fn is_truncated(&self, errored: bool) -> bool {
         errored && self.stream == StreamState::BodyStreamed
     }
 
-    /// Record the response head (first write wins is enforced by the callers' `stream` guards)
-    /// and advance `stream` to `HeadSent`.
-    ///
-    /// A `Status:` field is consumed here rather than forwarded. `sapi_header_op` gives it no
-    /// special handling — it screens only `HTTP/`, `Content-Type`, `Content-Length`, `Location`
-    /// and `WWW-Authenticate` — so the field arrives verbatim, and converting it is the origin
-    /// server's job (RFC 3875 §6.2.1: "The server MUST make any appropriate modifications to
-    /// the script's output to ensure that the response to the client complies with the response
-    /// protocol version", https://www.rfc-editor.org/rfc/rfc3875#section-6.2.1). Here the SAPI
-    /// and the origin server are one process. It must not reach the client under its own name.
-    pub fn commit_head(&mut self, mut status: u16, mut headers: Vec<(String, Vec<u8>)>) {
+    pub fn commit_head(&mut self, mut status: u16, mut headers: FieldLines) {
         headers.retain(|(name, value)| {
             if !name.eq_ignore_ascii_case("status") {
                 return true;
@@ -237,17 +371,38 @@ impl Context {
         self.stream = StreamState::HeadSent;
     }
 
-    /// Seal the response: deliver the accumulated head/body as the single
-    /// [`Frame`], then drop the sender. Pass the truncation flag from
-    /// [`Self::is_truncated`] (see [`Frame`]).
+    /// Seal the buffered response as a Head+Chunk+End event trio (Head skipped
+    /// when none was recorded, Chunk when the body is empty). `take()` on the
+    /// sender keeps a second call a no-op.
     pub fn finish(&mut self, truncated: bool) {
-        if let Some(tx) = self.sender.take() {
-            let _ = tx.blocking_send(Frame {
-                head: self.head.take(),
-                body: std::mem::take(&mut self.body).into(),
-                truncated,
+        let Some(tx) = self.sender.take() else {
+            return;
+        };
+        let body = std::mem::take(&mut self.body);
+        if let Some(head) = self.head.take() {
+            let bodiless = matches!(head.status, 204 | 304)
+                || (100..200).contains(&head.status)
+                || self.req.method.eq_ignore_ascii_case("HEAD");
+            let body_coded = head
+                .headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("content-encoding"));
+            let content_length = (!bodiless).then_some(body.len() as u64);
+            let _ = tx.blocking_send(Frame::Head {
+                head,
+                content_length,
+                bodiless,
+                body_coded,
             });
+            // bodiless bytes still travel; the wire-side drop is the front's
+            if !body.is_empty() {
+                let _ = tx.blocking_send(Frame::Chunk(body.into()));
+            }
         }
+        let _ = tx.blocking_send(Frame::End {
+            trailers: Vec::new(),
+            truncated,
+        });
     }
 }
 
@@ -278,13 +433,15 @@ mod tests {
             req: Request {
                 method: String::new(),
                 uri: String::new(),
+                target: None,
+                authority: None,
                 https: false,
                 query: String::new(),
                 protocol: String::new(),
-                remote_addr: String::new(),
+                remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+                server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server_name: String::new(),
-                server_port: String::new(),
-                remote_port: String::new(),
+                server_port: 8080,
                 script_name: String::new(),
                 document_root: String::new(),
                 script_filename: PathBuf::new(),
@@ -292,18 +449,11 @@ mod tests {
                 server_vars: Vec::new(),
                 content_type: None,
                 content_length: -1,
-                body: Box::new(std::io::empty()),
+                body: Body::Raw(Box::new(std::io::empty())),
+                received_at: None,
+                tls: None,
             },
-            c: ReqC {
-                method: CString::default(),
-                query: CString::default(),
-                uri: CString::default(),
-                script: CString::default(),
-                ctype: None,
-                cookie: None,
-                authorization: None,
-                env: HashMap::new(),
-            },
+            c: None,
             sender: None,
             head: None,
             body: Vec::new(),

@@ -17,6 +17,5 @@ $handler = static function (): void {
 	outer();
 	echo 'ok';
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

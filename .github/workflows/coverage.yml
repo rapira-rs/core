@@ -26,7 +26,7 @@ jobs:
           coverage: none
           # keep in sync with ci.yml and ci/php-configure-flags.txt — an extension missing here
           # makes its php_ext test skip rather than fail, so coverage silently stops measuring it
-          extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, opcache, openssl, pdo_sqlite, phar, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
+          extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, opcache, openssl, pdo_sqlite, phar, posix, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
           phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning

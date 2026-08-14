@@ -38,8 +38,8 @@ pub enum WorkerExit {
     Restart, // worker_main drops PhpThread and builds a fresh one
 }
 
-// What the C `HttpHandler::handleRequest` does after a worker-loop turn. Keep in
-// sync with plugin_handler.c.
+// What the C handle_request shell does after a loop turn; wrapper.h's
+// RAPIRA_HANDLE_* values mirror this - keep in sync.
 #[repr(i32)]
 enum HandleAction {
     Stop = 0,     // clean loop exit (intake channel closed) -> RETURN_BOOL(false)
@@ -65,11 +65,16 @@ fn set_worker_recycle() {
 }
 
 fn run_cycle(script: &Path) -> Cycle {
+    crate::exchange::cycle_reset();
     let started = unsafe { php_request_startup() } == SUCCESS;
-    if !started {
+    if started {
+        // php_execute_script's flag is unused here: it reports false for
+        // exit() and an uncaught throw (true for a plain return), but the exit
+        // decision needs the closed/served/received signals below either way.
+        unsafe { run_script(script) };
+    } else {
         error!(target: "rapira", "php_request_startup() failed");
     }
-    let completed = started && unsafe { run_script(script) };
 
     let recycle = WORKER.with_borrow_mut(|w| {
         w.as_mut().is_some_and(|wc| {
@@ -77,6 +82,13 @@ fn run_cycle(script: &Path) -> Cycle {
             std::mem::take(&mut wc.recycle)
         })
     });
+
+    // Serving anything proves PHP is functional: clear a stale unhealthy flag
+    // (nothing else emits Healthy on the dispatcher path). Before the shutdown
+    // check, so a served cycle counts even when shutdown bails into Restart.
+    if crate::exchange::served_any() {
+        sb_update(scoreboard::Event::Healthy);
+    }
 
     // php_request_shutdown frees PG(last_error_message) (main.c:2024) —
     // log the bootstrap fatal before it disappears
@@ -89,11 +101,43 @@ fn run_cycle(script: &Path) -> Cycle {
         return Cycle::Restart;
     }
 
-    if completed && !recycle {
+    classify(CycleEnd {
+        closed: crate::exchange::closed_seen(),
+        recycle,
+        served: crate::exchange::served_any(),
+        received: crate::exchange::received_any(),
+    })
+}
+
+/// Everything run_cycle knows when the script has wound down. Both resident
+/// modes feed the same latches: the dispatcher from the exchange verbs, worker
+/// mode from its pull/serve path.
+struct CycleEnd {
+    /// Closure observed (dispatcher receive saw Closed / worker pull hit it).
+    closed: bool,
+    /// A contained bailout was flagged (a job, or the first-call teardown).
+    recycle: bool,
+    /// A unit was finalized this cycle.
+    served: bool,
+    /// A unit was handed out this cycle.
+    received: bool,
+}
+
+/// Terminal classification for one cycle; Restart (a shutdown bailout) is
+/// decided before this runs.
+fn classify(end: CycleEnd) -> Cycle {
+    if end.closed {
+        // closure observed and the script wound down: clean stop
         Cycle::Stop
-    } else if recycle {
+    } else if end.recycle || end.served || end.received {
+        // A bailout mid-serving, or the script ended after real work. A cycle
+        // that received a unit and then fataled is an app failure, not a boot
+        // failure — Failed would shed the next queued request.
         Cycle::Recycle
     } else {
+        // never received a unit and never saw closure: boot failure — the shed +
+        // unhealthy-after-5 machinery applies (a script that exits without ever
+        // receiving lands here by design)
         Cycle::Failed
     }
 }
@@ -111,7 +155,12 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
         match run_cycle(&script) {
             Cycle::Stop => break WorkerExit::Closed,
             Cycle::Restart => break WorkerExit::Restart,
-            Cycle::Recycle => failures = 0,
+            Cycle::Recycle => {
+                // the scoreboard's recycle counter has no other emitter on the
+                // dispatcher path
+                sb_update(scoreboard::Event::Recycled);
+                failures = 0;
+            }
             Cycle::Failed => {
                 failures += 1;
                 if failures == UNHEALTHY_AFTER {
@@ -132,15 +181,18 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
             }
         }
     };
+    // A WorkerExit can leave a live ExchangeState behind (e.g. a Restart with a
+    // unit still out); reclaim it so its Frame sender never leaks.
+    crate::exchange::reclaim_current();
     log_and_clear_last_error();
     exit
 }
 
 /// # Safety
-/// Invoked from C (`HttpHandler::handleRequest`) once per worker-loop
-/// iteration. `fci` and `fcc` must be valid, non-null pointers produced by
-/// `Z_PARAM_FUNC` and remain valid for the call. Must run on the resident worker
-/// thread whose `WORKER` thread-local is initialized, inside its active request.
+/// Invoked from the C handle_request shell once per loop iteration. `fci` and
+/// `fcc` must be valid, non-null pointers produced by `Z_PARAM_FUNC` and remain
+/// valid for the call. Must run on the resident worker thread whose `WORKER`
+/// thread-local is initialized, inside its active request.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_handle_request(
     fci: *mut zend_fcall_info,
@@ -175,7 +227,10 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 
     let mut outcome = Outcome::from_c(unsafe { rapira_request_activate() });
     if outcome != Outcome::Bailout {
-        outcome = Outcome::from_c(unsafe { rapira_run_handler(fci, fcc) });
+        unsafe {
+            crate::context::apply_proto_num(&job.ctx);
+            outcome = Outcome::from_c(rapira_run_handler(fci, fcc));
+        }
     }
 
     // The handler has returned: from here every ub_write is a teardown flush, not
@@ -204,10 +259,12 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     unbind_server_context();
     sb_update(scoreboard::Event::Handled(errored));
     if recycle {
-        sb_update(scoreboard::Event::Recycled);
+        // Recycled is emitted once per cycle by the rapira_worker loop; the
+        // flag ends this cycle, so emitting here too would double-count.
         set_worker_recycle();
     }
     job.ctx.finish(truncated);
+    crate::exchange::note_served();
     // Recycle tells C to zend_bailout so no PHP runs over the post-longjmp state; the response was
     // already sealed by job.ctx.finish() above. Continue keeps the resident loop going.
     if recycle {
@@ -217,7 +274,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     }
 }
 
-// worker-mode wrapper, called from inside the PHP loop (via HttpHandler::handleRequest):
+// worker-mode wrapper, called from inside the resident PHP loop:
 fn next_job() -> Option<Job> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;
@@ -235,7 +292,25 @@ fn next_job() -> Option<Job> {
             sb_update(scoreboard::Event::Healthy);
         }
         log_and_clear_last_error();
-        pull_job()
+        loop {
+            match pull_job() {
+                Some(job) => {
+                    // a client that vanished while queued: fail the unit instead
+                    // of handing it out (mirrors receive_into's pre-handout probe)
+                    if job.ctx.sender.as_ref().is_some_and(|s| s.is_closed()) {
+                        sb_update(scoreboard::Event::Handled(true));
+                        continue;
+                    }
+                    crate::exchange::note_received();
+                    return Some(job);
+                }
+                None => {
+                    // the untimed pull only returns None on closure: the clean-stop latch
+                    crate::exchange::note_closed();
+                    return None;
+                }
+            }
+        }
     })
 }
 
