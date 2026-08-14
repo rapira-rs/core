@@ -1,0 +1,45 @@
+<?php
+// Synchronous dispatcher, RoadRunner-2 style: one request at a time. receive()
+// blocks the thread, so the worker either waits for a request or handles one.
+
+use Rapira\Exception\ClosedException;
+use Rapira\Exception\RapiraThrowable;
+use Rapira\Http\Request;
+
+final class PageNotFound extends \RuntimeException {}
+
+/** Routes a request to a response body */
+function handle(Request $req): string
+{
+    return match ($req->target) {
+        '/' => "hello from the sync dispatcher\n",
+        '/echo' => \is_string($req->body) ? $req->body : '',
+        '/boom' => throw new \RuntimeException('the handler blew up'),
+        default => throw new PageNotFound("no route for {$req->target}"),
+    };
+}
+
+$d = \Rapira\get_dispatcher();
+
+while (true) {
+    try {
+        while (true) {
+            $ex = $d->receive();
+
+            $body = handle($ex->getRequest());
+            $ex->writeHead(200, ['content-type' => ['text/plain']]);
+            $ex->writeBody($body);
+        }
+    } catch (PageNotFound $e) {
+        $ex->writeHead(404, ['content-type' => ['text/plain']]);
+        $ex->writeBody("not found: {$e->getMessage()}\n");
+    } catch (ClosedException) {
+        // Drained: no more work will ever arrive.
+        break;
+    } catch (RapiraThrowable) {
+        // The host closed the exchange first — nothing to answer, move on.
+    } catch (\Throwable $e) {
+        $ex->writeHead(500, ['content-type' => ['text/plain']]);
+        $ex->writeBody("internal error: {$e->getMessage()}\n");
+    }
+}
