@@ -400,6 +400,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
     if write_timeout_secs == 0 {
         bail!("http.write_timeout_secs must be at least 1");
     }
+    let write_timeout = capped_timeout("http", "write_timeout_secs", write_timeout_secs)?;
 
     let sendfile_root = match file.http.sendfile.root.filter(|r| !r.is_empty()) {
         Some(r) => Some(config_relative(config_dir, &r)?),
@@ -420,7 +421,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
                 .unwrap_or_else(|| "localhost".to_owned()),
             server_port,
             max_body_size,
-            write_timeout: std::time::Duration::from_secs(write_timeout_secs),
+            write_timeout,
             unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
             uploads,
             sendfile_root,
@@ -796,6 +797,10 @@ mod tests {
             (
                 "[pool]\nentrypoint = \"a.php\"\n[supervisor]\nprocess_control_timeout_secs = 100000\n",
                 "supervisor.process_control_timeout_secs",
+            ),
+            (
+                "[http]\nwrite_timeout_secs = 100000\n[pool]\nentrypoint = \"a.php\"\n",
+                "http.write_timeout_secs",
             ),
         ] {
             let err = merge(

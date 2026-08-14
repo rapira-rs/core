@@ -111,8 +111,9 @@ fn content_length_exceeded_serves_the_declared_prefix() {
         text.to_ascii_lowercase().contains("content-length: 5"),
         "declared length must be honoured: {text}"
     );
+    // anchored to the head terminator: the body is exactly the 5 bytes
     assert!(
-        text.ends_with("01234"),
+        text.ends_with("\r\n\r\n01234"),
         "exactly the fitting prefix: {text}"
     );
 }

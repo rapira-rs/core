@@ -101,11 +101,17 @@ pub fn worker_body(
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
     // Per-pid spool subdir: SpooledFile drops cover destructor paths; the
-    // master's boot sweep reclaims dirs a SIGKILLed worker left behind.
+    // master's boot sweep reclaims dirs a SIGKILLed worker left behind. The
+    // leaf must be freshly created, owner-only: a pre-planted entry at the
+    // predictable name in the shared root must fail, never be traversed
+    // (the root itself exists — the master created and probed it pre-fork).
     uploads.dir = uploads
         .dir
         .join(format!("rapira-spool-{}", std::process::id()));
-    if let Err(e) = std::fs::create_dir_all(&uploads.dir) {
+    if let Err(e) = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&uploads.dir)
+    } {
         tracing::error!(
             target: "rapira",
             "creating spool dir {}: {e}",

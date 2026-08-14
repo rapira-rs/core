@@ -158,6 +158,9 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
             if entry.is_null() {
                 break;
             }
+            // see through a by-reference slot, or a referenced Throwable
+            // would skip the flattener and encode as {}
+            let entry = zend::deref(entry);
             let mut skey: *mut zend_string = null_mut();
             let mut nkey = 0;
             let kt = zend_hash_get_current_key_ex(context, &mut skey, &mut nkey, &pos);

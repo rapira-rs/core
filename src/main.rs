@@ -158,12 +158,20 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let probe = uploads
         .dir
         .join(format!(".rapira-probe-{}", std::process::id()));
-    std::fs::write(&probe, b"").map_err(|e| {
-        anyhow::anyhow!(
-            "http.uploads.dir {} is not writable: {e}",
-            uploads.dir.display()
-        )
-    })?;
+    // stale probe from a crashed same-pid boot; unlink never follows symlinks
+    let _ = std::fs::remove_file(&probe);
+    // O_CREAT|O_EXCL: a symlink planted at the predictable name in the shared
+    // spool root must fail the probe, never be followed and truncated
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "http.uploads.dir {} is not writable: {e}",
+                uploads.dir.display()
+            )
+        })?;
     let _ = std::fs::remove_file(&probe);
     match std::fs::read_dir(&uploads.dir) {
         Ok(entries) => {

@@ -671,18 +671,18 @@ impl Conn {
     pub fn read_remaining(&mut self, deadline: Duration) -> io::Result<Vec<u8>> {
         let end = std::time::Instant::now() + deadline;
         loop {
+            // checked on the data path too: a peer that keeps sending must
+            // fail the deadline, not spin past it
+            if std::time::Instant::now() >= end {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "no eof in time"));
+            }
             let mut chunk = [0u8; 4096];
             match self.s.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
                 Err(e)
                     if e.kind() == io::ErrorKind::WouldBlock
-                        || e.kind() == io::ErrorKind::TimedOut =>
-                {
-                    if std::time::Instant::now() >= end {
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, "no eof in time"));
-                    }
-                }
+                        || e.kind() == io::ErrorKind::TimedOut => {}
                 Err(e) => return Err(e),
             }
         }

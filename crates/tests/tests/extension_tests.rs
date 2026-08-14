@@ -164,29 +164,35 @@ impl Extension for RejectDriver {
         );
 
         // repeated content-type lines with a multipart body reject in either
-        // line order: the boundary-disagreement guard
-        let mut smuggle = multipart_post(
-            b"--EVIL\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--EVIL--".to_vec(),
-        );
-        smuggle.headers = vec![
-            ("content-type".into(), b"text/plain".to_vec()),
+        // line order: the boundary-disagreement guard must not be positional
+        let plain_line = || ("content-type".to_string(), b"text/plain".to_vec());
+        let multipart_line = || {
             (
-                "content-type".into(),
+                "content-type".to_string(),
                 b"multipart/form-data; boundary=EVIL".to_vec(),
-            ),
-        ];
-        let err = match exec_full(&php, smuggle).await {
-            Err(e) => e,
-            Ok(_) => anyhow::bail!("repeated content-type with a multipart body must reject"),
+            )
         };
-        let rejected = err
-            .downcast_ref::<extension_api::Rejected>()
-            .ok_or_else(|| anyhow::anyhow!("expected Rejected, got {err:#}"))?;
-        anyhow::ensure!(
-            rejected.status == 400,
-            "expected 400, got {}",
-            rejected.status
-        );
+        for headers in [
+            vec![plain_line(), multipart_line()],
+            vec![multipart_line(), plain_line()],
+        ] {
+            let mut smuggle = multipart_post(
+                b"--EVIL\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--EVIL--".to_vec(),
+            );
+            smuggle.headers = headers;
+            let err = match exec_full(&php, smuggle).await {
+                Err(e) => e,
+                Ok(_) => anyhow::bail!("repeated content-type with a multipart body must reject"),
+            };
+            let rejected = err
+                .downcast_ref::<extension_api::Rejected>()
+                .ok_or_else(|| anyhow::anyhow!("expected Rejected, got {err:#}"))?;
+            anyhow::ensure!(
+                rejected.status == 400,
+                "expected 400, got {}",
+                rejected.status
+            );
+        }
 
         // gating negatives: an empty body with a multipart content-type stays a
         // raw (empty) body, and a multipart-shaped body under a non-multipart

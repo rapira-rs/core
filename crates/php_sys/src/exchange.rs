@@ -1023,7 +1023,16 @@ fn discard_unit(st: &mut ExchangeState) {
 static SENDFILE_ROOT: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 
 pub fn set_sendfile_root(root: std::path::PathBuf) {
-    let canonical = std::fs::canonicalize(&root).unwrap_or(root);
+    let canonical = std::fs::canonicalize(&root).unwrap_or_else(|e| {
+        // fail closed but not silently: a raw root never matches the
+        // canonicalized candidate, so every sendFile() will be rejected
+        tracing::warn!(
+            target: "rapira",
+            "sendfile root {} cannot be canonicalized ({e}); sendFile() will reject every path",
+            root.display()
+        );
+        root
+    });
     *SENDFILE_ROOT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(canonical);
