@@ -442,15 +442,23 @@ int rapira_request_activate(void) {
     return outcome;
 }
 
-// header_register_callback's zval: sapi_activate ZVAL_UNDEFs the slot without
-// releasing (main/SAPI.c:441) and only executor teardown reclaims it, so in a
-// resident cycle an unfired callback would leak one closure per job. Runs
-// after php_output_deactivate - that flush is what fires a pending callback.
+// header_register_callback's stored callback: sapi_activate resets the slot
+// without releasing (main/SAPI.c) and only executor teardown reclaims it, so
+// in a resident cycle an unfired callback would leak once per job. Runs after
+// php_output_deactivate - that flush is what fires a pending callback.
+// 8.6 replaced the zval + fci_cache pair with one FCC field:
+// https://github.com/php/php-src/commit/1805822555e38f6b75eb74be7c8b6856e3eb3d10
 static void rapira_release_header_callback(void) {
+#if PHP_VERSION_ID >= 80600
+    if (ZEND_FCC_INITIALIZED(SG(send_header_fcc))) {
+        zend_fcc_dtor(&SG(send_header_fcc)); // self-resets to empty_fcall_info_cache
+    }
+#else
     if (!Z_ISUNDEF(SG(callback_func))) {
         zval_ptr_dtor(&SG(callback_func));
         ZVAL_UNDEF(&SG(callback_func));
     }
+#endif
 }
 
 // per-request sapi teardown, returns 1 if any of the methods bailed out,
