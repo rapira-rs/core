@@ -107,12 +107,17 @@ fn max_requests_recycles() {
     // front closes it before any response byte, like any graceful stop. A real
     // client retries an idempotent request whose connection died responseless,
     // and the retry lands in the shared backlog for the next worker: model
-    // that with one retry on connection-level failure only. A bad status
-    // still fails hard.
+    // exactly that. Partial responses, timeouts and bad statuses stay fatal.
     for _ in 0..40 {
         let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10))
-            .or_else(|_| http_get(srv.addr, "/", Duration::from_secs(10)))
-            .expect("GET / (after one client retry)");
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    http_get(srv.addr, "/", Duration::from_secs(10))
+                } else {
+                    Err(e)
+                }
+            })
+            .expect("GET / (after one responseless-close retry)");
         assert_eq!(
             code,
             200,

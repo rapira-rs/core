@@ -253,7 +253,13 @@ pub fn http_get_raw(
     write!(s, "\r\n")?;
     s.flush()?;
     let mut raw = Vec::new();
-    s.read_to_end(&mut raw)?;
+    // a reset with nothing received is a responseless close (the server never
+    // read the request); read_to_end keeps what arrived before the error
+    if let Err(e) = s.read_to_end(&mut raw)
+        && !(raw.is_empty() && e.kind() == io::ErrorKind::ConnectionReset)
+    {
+        return Err(e);
+    }
     Ok(raw)
 }
 
@@ -312,6 +318,14 @@ pub fn http_post(
 }
 
 fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {
+    if raw.is_empty() {
+        // distinct from a partial head: zero bytes means the connection closed
+        // responseless, the one failure an idempotent client retries
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "closed before any response byte",
+        ));
+    }
     let head_end = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")

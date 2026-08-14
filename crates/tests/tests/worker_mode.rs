@@ -176,7 +176,13 @@ fn never_looping_script_sheds_503() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/never-loop-worker.php")))?;
     let h = r.handle()?;
-    let resp = drain_resp(h.handle_blocking(req("/", "worker/never-loop-worker.php"))?);
+    // deadline-bounded: the no-hang claim must fail as a test, not block the suite
+    let mut rx = h.handle_blocking(req("/", "worker/never-loop-worker.php"))?;
+    let resp = tests::drain_resp_deadline(
+        &mut rx,
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+    )
+    .expect("the shed 503 never arrived");
     assert_eq!(resp.status(), 503, "a never-serving bootstrap must shed");
     drop(h);
     r.shutdown();
@@ -278,7 +284,13 @@ fn nested_handle_request_is_refused() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/nested-worker.php")))?;
     let h = r.handle()?;
-    let resp = drain_resp(h.handle_blocking(req("/", "worker/nested-worker.php"))?);
+    // deadline-bounded: a guard regression that deadlocks must fail, not hang
+    let mut rx = h.handle_blocking(req("/", "worker/nested-worker.php"))?;
+    let resp = tests::drain_resp_deadline(
+        &mut rx,
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+    )
+    .expect("the outer response never arrived");
     assert_eq!(resp.status(), 200);
     assert!(
         resp.body_string()
