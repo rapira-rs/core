@@ -95,14 +95,15 @@ impl Rapira {
             pending: pending.clone(),
         };
 
-        // $_SERVER is a per-job build for classic (and the future worker arm);
-        // the dispatcher path never reads it.
-        let superglobals = matches!(mode, Mode::Classic);
+        // $_SERVER is a per-job build for classic and worker; the dispatcher
+        // path never reads it.
+        let superglobals = !matches!(mode, Mode::Dispatcher(_));
         let dispatcher = matches!(mode, Mode::Dispatcher(_));
         // SAFETY: safe, trust me, I'm a developer
         unsafe {
             crate::rapira_mode = match &mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,
+                Mode::Worker(_) => RAPIRA_MODE_WORKER,
                 Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
             } as c_int;
         };
@@ -194,7 +195,7 @@ fn worker_main(mode: Mode, rx: JobRx) {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Dispatcher(script) => rapira_worker(script.clone()),
+            Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;

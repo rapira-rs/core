@@ -73,6 +73,9 @@ pub struct Resp {
     pub truncated: bool,
     /// An `End` frame arrived; false = the producer died first.
     pub ended: bool,
+    /// Head frames seen; `head` keeps only the last, so a duplicate would
+    /// otherwise be invisible.
+    pub heads: u32,
 }
 
 impl Resp {
@@ -104,6 +107,7 @@ impl Resp {
                 bodiless,
                 ..
             } => {
+                self.heads += 1;
                 self.head = Some(head);
                 self.content_length = content_length;
                 self.bodiless = bodiless;

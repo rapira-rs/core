@@ -16,12 +16,9 @@ fn observer_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
     let _guard = observer_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "observer_tests/observer-bailout.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("observer_tests/observer-bailout.php")))?;
     let h = r.handle()?;
 
     let (_, probe) =

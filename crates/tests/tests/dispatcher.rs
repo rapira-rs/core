@@ -3,17 +3,18 @@
 use php_sys::{Mode, Rapira};
 use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 
-/// Outside worker mode nothing feeds this process work, so the call must throw
-/// the specific `NotInWorkerModeError` — catchable by its own name, branded
-/// `RapiraThrowable` — and the `RuntimeException` family must be catchable by
-/// its stock parent. Hierarchy is asserted through catch behavior: a wrong
-/// parent CE passed to a registrar compiles fine and only fails here.
+/// Outside dispatcher mode nothing feeds this process units, so the call must
+/// throw the specific `NotInDispatcherModeError` — catchable by its own name,
+/// branded `RapiraThrowable` — and the `RuntimeException` family must be
+/// catchable by its stock parent. Hierarchy is asserted through catch behavior:
+/// a wrong parent CE passed to a registrar compiles fine and only fails here.
 #[test]
-fn get_dispatcher_outside_worker_mode_throws() -> anyhow::Result<()> {
+fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle()?;
-    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/not-in-worker-mode.php"))?);
+    let (status, body) =
+        drain(h.handle_blocking(req("/", "dispatcher/not-in-dispatcher-mode.php"))?);
     drop(h);
     r.shutdown();
 
@@ -22,7 +23,7 @@ fn get_dispatcher_outside_worker_mode_throws() -> anyhow::Result<()> {
         "every throw in the script must be caught (body: {body:?})"
     );
     for line in [
-        "class: Rapira\\Exception\\NotInWorkerModeError",
+        "class: Rapira\\Exception\\NotInDispatcherModeError",
         "rapira: yes",
         "timeout-as-runtime: yes",
         "done",

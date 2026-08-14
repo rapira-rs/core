@@ -13,6 +13,7 @@ pub type FieldLines = Vec<(String, Vec<u8>)>;
 #[derive(Debug, Clone)]
 pub enum Mode {
     Classic,
+    Worker(PathBuf),
     Dispatcher(PathBuf),
 }
 

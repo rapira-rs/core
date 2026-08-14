@@ -64,6 +64,14 @@ int rapira_finish_output(void) {
 
 PHP_FUNCTION(rapira_finish_request) {
     ZEND_PARSE_PARAMETERS_NONE();
+    if (rapira_mode == RAPIRA_MODE_DISPATCHER) {
+        // ungated it would tear down userland ob buffers into the log and
+        // report success; dispatcher units finalize through their Exchange
+        zend_throw_error(
+            NULL, "rapira_finish_request() is not available in dispatcher "
+                  "mode; finalize through the Exchange");
+        RETURN_THROWS();
+    }
     if (rapira_finish_output()) { // non-zero == BAILOUT: re-raise so
         zend_bailout(); // rapira_run_handler classifies + 500s + recycles
     }
@@ -174,6 +182,10 @@ void rapira_receive_timed(void) {
 }
 
 // Per-request state php_request_startup() resets that the worker path skips.
+// Executor state only a contained bailout can strand (EG(error_handling),
+// EG(record_errors), the filename/lineno overrides) needs no entry here:
+// every contained bailout recycles the cycle, and php_request_shutdown's
+// executor teardown reclaims it there.
 static void rapira_request_init(void) {
     PG(connection_status) = PHP_CONNECTION_NORMAL;
     PG(header_is_being_sent) = 0;
@@ -197,7 +209,7 @@ static void rapira_request_init(void) {
     // reset_signals=0: the SIGRTMIN handler is already installed process-wide
     // (php_request_startup ran zend_set_timeout(..., 1) at cycle boot) and
     // nothing re-blocks it between jobs; same per-request re-arm as
-    // php_execute_script (main.c:2630).
+    // php_execute_script (main.c:2634).
     // https://man7.org/linux/man-pages/man7/signal.7.html
     // https://man7.org/linux/man-pages/man2/sigaction.2.html
     // https://man7.org/linux/man-pages/man2/sigprocmask.2.html
@@ -243,8 +255,16 @@ static void rapira_activate_auto_globals(void) {
     zend_auto_global *auto_global = NULL;
     zend_string *_env = ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV);
 
-    // Re-arm every superglobal so a later access rebuilds it.
+    // Re-arm every superglobal so a later access rebuilds it. $_ENV stays
+    // untouched: its create callback dtors the array before checking
+    // variables_order (php-src main/php_variables.c php_auto_globals_create_env),
+    // so re-arming would let the first newly compiled file mentioning $_ENV
+    // wipe bootstrap-populated entries mid-cycle. The environment is constant
+    // per process; once php-src fired the callback it stays disarmed.
     ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
+        if (auto_global->name == _env) {
+            continue;
+        }
         auto_global->armed =
             ((auto_global->jit || auto_global->auto_global_callback) != 0);
     }
@@ -307,6 +327,10 @@ static void rapira_reset_session(void) {
     PS(mod_user_is_open) = 0;
     PS(in_save_handler) = 0;
     PS(set_handler) = 0;
+    // a cookie-sourced id clears it (session.c:1564) and only RINIT restores
+    // the default (session.c:121); php_session_start re-derives it (:1692) so
+    // this is parity with RINIT for readers outside that path
+    PS(define_sid) = 1;
 }
 #else
 static void rapira_reset_session(void) {}
@@ -418,6 +442,17 @@ int rapira_request_activate(void) {
     return outcome;
 }
 
+// header_register_callback's zval: sapi_activate ZVAL_UNDEFs the slot without
+// releasing (main/SAPI.c:441) and only executor teardown reclaims it, so in a
+// resident cycle an unfired callback would leak one closure per job. Runs
+// after php_output_deactivate - that flush is what fires a pending callback.
+static void rapira_release_header_callback(void) {
+    if (!Z_ISUNDEF(SG(callback_func))) {
+        zval_ptr_dtor(&SG(callback_func));
+        ZVAL_UNDEF(&SG(callback_func));
+    }
+}
+
 // per-request sapi teardown, returns 1 if any of the methods bailed out,
 // 0 otherwise.
 // main/main.c:1985,2002,2031 (source)
@@ -434,6 +469,7 @@ int rapira_request_teardown(void) {
     RAPIRA_GUARD(rapira_modules_request(false), bailed, observed_base);
     RAPIRA_GUARD(rapira_reset_session(), bailed, observed_base);
     RAPIRA_GUARD(php_output_deactivate(), bailed, observed_base);
+    RAPIRA_GUARD(rapira_release_header_callback(), bailed, observed_base);
     RAPIRA_GUARD(sapi_deactivate(), bailed, observed_base);
 
     zend_try { zend_unset_timeout(); }
@@ -457,7 +493,7 @@ int rapira_request_teardown(void) {
 
 // Free the captured last error so it doesn't pin request objects across jobs
 // and doesn't trip core_globals_dtor's ZEND_ASSERT(!last_error_message) at
-// shutdown (main/main.c:2099).
+// shutdown (main/main.c:2102).
 void rapira_clear_last_error(void) {
     if (PG(last_error_message)) {
         PG(last_error_type) = 0;

@@ -42,7 +42,6 @@ $handler = static function (): void {
 };
 
 // Resident loop: each iteration handles one request through $handler.
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 	gc_collect_cycles();
 }

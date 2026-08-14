@@ -2,7 +2,6 @@ use crate::harness::*;
 use std::time::Duration;
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn usr2_reload_zero_downtime() {
     let srv = spawn_with_config("shared/echo-worker.php", 3, "");
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "3 workers", |p| p.len() == 3);

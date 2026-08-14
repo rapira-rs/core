@@ -10,7 +10,8 @@ bind! {
     php_module_startup, php_module_shutdown, php_request_startup, php_request_shutdown,
     php_execute_script, zend_error, zend_stream_init_filename, zend_destroy_file_handle,
     php_register_variable_safe, php_output_activate, php_output_deactivate, php_output_end_all,
-    zend_activate_auto_globals, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_DISPATCHER,
+    zend_activate_auto_globals, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
+    RAPIRA_MODE_DISPATCHER,
     // the embedded-object layouts; wrapper.h is the source of truth
     rapira_exchange_obj, rapira_dispatcher_info_obj,
     // MINIT-written class-entry globals the Rust builder reads (static mut)
@@ -20,7 +21,8 @@ bind! {
     rapira_ce_http_head_already_written_error, rapira_ce_internal_http_exchange,
     rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,
     rapira_ce_timeout_exception, rapira_ce_closed_exception,
-    rapira_ce_not_in_worker_mode_error, zend_argument_value_error, zend_argument_type_error,
+    rapira_ce_not_in_worker_mode_error, rapira_ce_not_in_dispatcher_mode_error,
+    zend_argument_value_error, zend_argument_type_error,
     rapira_ce_work_discarded_exception, rapira_ce_http_content_length_exceeded_error,
     rapira_ce_http_head_not_written_error, rapira_ce_http_file_not_sendable_exception,
     // the streaming send-park guard disarms/re-arms the wall timer around a

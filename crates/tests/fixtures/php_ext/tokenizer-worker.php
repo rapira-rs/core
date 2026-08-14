@@ -11,6 +11,5 @@ $handler = static function (): void {
 	}
 	echo 'tok:' . count(token_get_all('<?php echo 1;'));
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

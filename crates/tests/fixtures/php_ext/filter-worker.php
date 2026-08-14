@@ -12,6 +12,5 @@ $handler = static function (): void {
 	}
 	echo 'filter:' . filter_var('a@b.com', FILTER_VALIDATE_EMAIL);
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

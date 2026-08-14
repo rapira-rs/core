@@ -101,15 +101,12 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     let _guard = php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "timeout_tests/timeout-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("timeout_tests/timeout-worker.php")))?;
     let h = r.handle()?;
 
     // Job 1: a fast request is untouched by the 1s cap.

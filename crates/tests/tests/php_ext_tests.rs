@@ -6,7 +6,7 @@ use tests::{drain, fixture, php_lock, req};
 // uncaught extension throw leaves the worker serving.
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(name)))?;
+    let r = Rapira::start(Mode::Worker(fixture(name)))?;
     let h = r.handle()?;
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
@@ -56,188 +56,154 @@ fn exception(name: &str, token: &str) -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn zlib_success() -> anyhow::Result<()> {
     success("php_ext/zlib-worker.php", "zlib:rapira zlib")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn zlib_exception() -> anyhow::Result<()> {
     exception("php_ext/zlib-worker.php", "zlib:rapira zlib")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn curl_success() -> anyhow::Result<()> {
     success("php_ext/curl-worker.php", "curl:")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn curl_exception() -> anyhow::Result<()> {
     exception("php_ext/curl-worker.php", "curl:")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn ctype_success() -> anyhow::Result<()> {
     success("php_ext/ctype-worker.php", "ctype:1")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn ctype_exception() -> anyhow::Result<()> {
     exception("php_ext/ctype-worker.php", "ctype:1")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn mbstring_success() -> anyhow::Result<()> {
     success("php_ext/mbstring-worker.php", "mb:HÉLLO")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn mbstring_exception() -> anyhow::Result<()> {
     exception("php_ext/mbstring-worker.php", "mb:HÉLLO")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn iconv_success() -> anyhow::Result<()> {
     success("php_ext/iconv-worker.php", "iconv:iconv ok")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn iconv_exception() -> anyhow::Result<()> {
     exception("php_ext/iconv-worker.php", "iconv:iconv ok")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn openssl_success() -> anyhow::Result<()> {
     success("php_ext/openssl-worker.php", "openssl:64")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn openssl_exception() -> anyhow::Result<()> {
     exception("php_ext/openssl-worker.php", "openssl:64")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn fileinfo_success() -> anyhow::Result<()> {
     success("php_ext/fileinfo-worker.php", "finfo:text/plain")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn fileinfo_exception() -> anyhow::Result<()> {
     exception("php_ext/fileinfo-worker.php", "finfo:text/plain")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn tokenizer_success() -> anyhow::Result<()> {
     success("php_ext/tokenizer-worker.php", "tok:")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn tokenizer_exception() -> anyhow::Result<()> {
     exception("php_ext/tokenizer-worker.php", "tok:")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn phar_success() -> anyhow::Result<()> {
     success("php_ext/phar-worker.php", "phar:")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn phar_exception() -> anyhow::Result<()> {
     exception("php_ext/phar-worker.php", "phar:")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn dom_success() -> anyhow::Result<()> {
     success("php_ext/dom-worker.php", "dom:ok")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn dom_exception() -> anyhow::Result<()> {
     exception("php_ext/dom-worker.php", "dom:ok")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn simplexml_success() -> anyhow::Result<()> {
     success("php_ext/simplexml-worker.php", "sxml:ok")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn simplexml_exception() -> anyhow::Result<()> {
     exception("php_ext/simplexml-worker.php", "sxml:ok")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn xml_success() -> anyhow::Result<()> {
     success("php_ext/xml-worker.php", "xml:1")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn xml_exception() -> anyhow::Result<()> {
     exception("php_ext/xml-worker.php", "xml:1")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn xmlreader_success() -> anyhow::Result<()> {
     success("php_ext/xmlreader-worker.php", "xr:a")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn xmlreader_exception() -> anyhow::Result<()> {
     exception("php_ext/xmlreader-worker.php", "xr:a")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn xmlwriter_success() -> anyhow::Result<()> {
     success("php_ext/xmlwriter-worker.php", "xw:<v>ok</v>")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn xmlwriter_exception() -> anyhow::Result<()> {
     exception("php_ext/xmlwriter-worker.php", "xw:<v>ok</v>")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn pdo_sqlite_success() -> anyhow::Result<()> {
     success("php_ext/pdo_sqlite-worker.php", "pdo:ok")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn pdo_sqlite_exception() -> anyhow::Result<()> {
     exception("php_ext/pdo_sqlite-worker.php", "pdo:ok")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn sqlite3_success() -> anyhow::Result<()> {
     success("php_ext/sqlite3-worker.php", "sqlite:42")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn sqlite3_exception() -> anyhow::Result<()> {
     exception("php_ext/sqlite3-worker.php", "sqlite:42")
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn filter_success() -> anyhow::Result<()> {
     success("php_ext/filter-worker.php", "filter:a@b.com")
 }
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn filter_exception() -> anyhow::Result<()> {
     exception("php_ext/filter-worker.php", "filter:a@b.com")
 }
@@ -245,7 +211,6 @@ fn filter_exception() -> anyhow::Result<()> {
 // No `exception` counterpart: this guards that OPcache actually started under our SAPI
 // name, which PHP <= 8.4 gates on an allowlist (see build_sapi_module). Nothing to throw.
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn opcache_success() -> anyhow::Result<()> {
     success("php_ext/opcache-worker.php", "opcache:enabled")
 }

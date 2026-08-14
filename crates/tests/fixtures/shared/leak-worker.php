@@ -10,7 +10,6 @@ $handler = static function (): void {
     echo "counter=" . Counter::$n . " session=" . (isset($_SESSION['seen']) ? 'leaked' : 'clean');
     $_SESSION['seen'] = true;
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
     gc_collect_cycles();
 }

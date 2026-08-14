@@ -16,7 +16,7 @@ use crate::pctl::{KillTarget, Pctl, PctlState, ReloadPhase, SignalAction};
 use crate::process::{ExitVerdict, KillIntent, ProcTable, WorkerProc, spawn_worker};
 use crate::scaling::{DynAction, DynInput, dynamic_start_count, dynamic_tick, ondemand_armed};
 use crate::signals::{SIG_CHLD, SelfPipe, errno_get};
-use crate::{MasterConfig, PoolMode, StopReason, WorkerEnv};
+use crate::{MasterConfig, Scaling, StopReason, WorkerEnv};
 
 /// While an overlap reload waits for a replacement to report IDLE or ACTIVE,
 /// the scoreboard is re-checked on this short cadence. The total wait is bounded
@@ -252,13 +252,13 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
 
     fn fork_initial(&mut self) {
         let now: Instant = Instant::now();
-        let count: usize = match self.cfg.pool_mode {
-            PoolMode::Static => self.cfg.processes,
-            PoolMode::Dynamic {
+        let count: usize = match self.cfg.scaling {
+            Scaling::Static => self.cfg.processes,
+            Scaling::Dynamic {
                 min_spare,
                 max_spare,
             } => dynamic_start_count(min_spare, max_spare, self.cfg.processes),
-            PoolMode::Ondemand => 0,
+            Scaling::Ondemand => 0,
         };
         for _ in 0..count {
             match self.find_spawn_slot() {
@@ -334,7 +334,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     /// come from demand.
     fn reload_enter_await(&mut self, slot: Option<usize>, now: Instant) {
         match slot {
-            Some(s) if !matches!(self.cfg.pool_mode, PoolMode::Ondemand) => {
+            Some(s) if !matches!(self.cfg.scaling, Scaling::Ondemand) => {
                 self.spawn_into(s, now);
                 self.pctl.set_reload_await(Some(s));
                 self.reload_await_until = Some(now + self.cfg.process_control_timeout);
@@ -472,7 +472,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     /// they suppress forking into the slot until they expire (see
     /// `fire_due_deadlines`), throttling a fork-crash loop.
     fn apply_respawn_gate(&mut self, slot: usize) {
-        if matches!(self.cfg.pool_mode, PoolMode::Ondemand) {
+        if matches!(self.cfg.scaling, Scaling::Ondemand) {
             self.table.slots[slot].cancel_respawn();
         }
     }
@@ -535,13 +535,13 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         // before any exit can clear a slot.
         self.latch_served();
         self.watchdog_tick();
-        match self.cfg.pool_mode {
-            PoolMode::Static => self.static_refill(now),
-            PoolMode::Dynamic {
+        match self.cfg.scaling {
+            Scaling::Static => self.static_refill(now),
+            Scaling::Dynamic {
                 min_spare,
                 max_spare,
             } => self.dynamic_maintenance(min_spare, max_spare, now),
-            PoolMode::Ondemand => self.ondemand_maintenance(now),
+            Scaling::Ondemand => self.ondemand_maintenance(now),
         }
     }
 
@@ -680,7 +680,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 self.table.slots[slot].cancel_respawn();
                 // Ondemand: the expired backoff only lifts the fork suppression;
                 // the next connection forks, never the timer.
-                if !matches!(self.cfg.pool_mode, PoolMode::Ondemand) {
+                if !matches!(self.cfg.scaling, Scaling::Ondemand) {
                     self.spawn_into(slot, now);
                 }
             }
@@ -698,7 +698,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     }
 
     fn compute_armed(&self) -> bool {
-        if !matches!(self.cfg.pool_mode, PoolMode::Ondemand) {
+        if !matches!(self.cfg.scaling, Scaling::Ondemand) {
             return false;
         }
         // Arm only when a fork could actually land: with every free slot in
@@ -855,11 +855,11 @@ mod tests {
         }
     }
 
-    fn test_master(nslots: usize, pool_mode: PoolMode) -> Master<impl FnMut(WorkerEnv) -> i32> {
+    fn test_master(nslots: usize, scaling: Scaling) -> Master<impl FnMut(WorkerEnv) -> i32> {
         let scoreboard: Scoreboard = Scoreboard::create(nslots).unwrap();
         let cfg: MasterConfig = MasterConfig {
             processes: 3,
-            pool_mode,
+            scaling,
             process_idle_timeout: Duration::from_secs(10),
             process_control_timeout: Duration::from_secs(30),
             request_terminate_timeout: Duration::ZERO,
@@ -897,7 +897,7 @@ mod tests {
 
     #[test]
     fn reload_gate_holds_until_replacement_idle() {
-        let mut m = test_master(6, PoolMode::Static);
+        let mut m = test_master(6, Scaling::Static);
         let t0 = Instant::now();
         m.table.generation = 1; // begin_reload already bumped the generation
         // Three old-gen workers (ascending spawn time), all idle.
@@ -931,7 +931,7 @@ mod tests {
     fn reload_gate_opens_on_active_replacement() {
         // Under load a replacement can be ACTIVE at every probe; the gate must
         // accept that as serving rather than stall to the control timeout.
-        let mut m = test_master(6, PoolMode::Static);
+        let mut m = test_master(6, Scaling::Static);
         let t0 = Instant::now();
         m.table.generation = 1;
         push_proc(&mut m, P_OLD0, 0, 0, t0);
@@ -950,7 +950,7 @@ mod tests {
 
     #[test]
     fn reload_gate_forces_past_stuck_replacement_at_safety_cap() {
-        let mut m = test_master(6, PoolMode::Static);
+        let mut m = test_master(6, Scaling::Static);
         let t0 = Instant::now();
         m.table.generation = 1;
         push_proc(&mut m, P_OLD0, 0, 0, t0);
@@ -971,7 +971,7 @@ mod tests {
 
     #[test]
     fn reload_gate_rearms_probe_before_safety_cap() {
-        let mut m = test_master(6, PoolMode::Static);
+        let mut m = test_master(6, Scaling::Static);
         let t0 = Instant::now();
         m.table.generation = 1;
         push_proc(&mut m, P_OLD0, 0, 0, t0);
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn reload_finishes_when_last_old_worker_reaped() {
-        let mut m = test_master(6, PoolMode::Static);
+        let mut m = test_master(6, Scaling::Static);
         let t0 = Instant::now();
         m.table.generation = 1;
         // Current-gen worker up, drained old worker already reaped: no old-gen
@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn ondemand_reload_paces_one_at_a_time_without_spawning() {
-        let mut m = test_master(6, PoolMode::Ondemand);
+        let mut m = test_master(6, Scaling::Ondemand);
         let t0 = Instant::now();
         for (i, &pid) in [P_OLD0, P_OLD1].iter().enumerate() {
             push_proc(&mut m, pid, i, 0, t0 + Duration::from_millis(i as u64));
@@ -1070,7 +1070,7 @@ mod tests {
 
     #[test]
     fn unhealthy_after_ever_served_respawns_not_failboot() {
-        let mut m = test_master(3, PoolMode::Static);
+        let mut m = test_master(3, Scaling::Static);
         let t0 = Instant::now();
         m.ever_served = true; // the pool has already served successfully
         let w = dead_worker(4242, 0, 0, t0);
@@ -1082,7 +1082,7 @@ mod tests {
 
     #[test]
     fn gen0_unhealthy_never_served_failboots() {
-        let mut m = test_master(3, PoolMode::Static);
+        let mut m = test_master(3, Scaling::Static);
         let t0 = Instant::now();
         assert!(!m.ever_served);
         // Fresh pool, nothing served → unrecoverable boot failure → Err.
@@ -1095,7 +1095,7 @@ mod tests {
     fn gen1_unhealthy_never_served_respawns_not_failboot() {
         // A reload replacement dying unhealthy before the pool served anything
         // must back off and respawn, never kill the healthy old generation.
-        let mut m = test_master(3, PoolMode::Static);
+        let mut m = test_master(3, Scaling::Static);
         let t0 = Instant::now();
         m.table.generation = 1;
         assert!(!m.ever_served);
@@ -1109,7 +1109,7 @@ mod tests {
 
     #[test]
     fn watchdog_terms_overdue_active_worker_then_escalates() {
-        let mut m = test_master(3, PoolMode::Static);
+        let mut m = test_master(3, Scaling::Static);
         m.cfg.request_terminate_timeout = Duration::from_secs(2);
         let t0 = Instant::now();
         push_proc(&mut m, P_OLD0, 0, 0, t0);
@@ -1133,7 +1133,7 @@ mod tests {
 
     #[test]
     fn watchdog_spares_fresh_active_and_idle_workers() {
-        let mut m = test_master(3, PoolMode::Static);
+        let mut m = test_master(3, Scaling::Static);
         m.cfg.request_terminate_timeout = Duration::from_secs(2);
         let t0 = Instant::now();
         // ACTIVE but fresh: within the limit.
@@ -1155,7 +1155,7 @@ mod tests {
 
     #[test]
     fn timeout_kill_respawns_immediately_without_failboot() {
-        let mut m = test_master(3, PoolMode::Static);
+        let mut m = test_master(3, Scaling::Static);
         let t0 = Instant::now();
         assert!(!m.ever_served);
         // A gen-0 timeout kill before any served request must respawn
@@ -1173,7 +1173,7 @@ mod tests {
         // A crash under ondemand keeps its backoff deadline as fork suppression:
         // the slot is not spawnable (loop stays disarmed) until the deadline,
         // whose expiry only lifts the suppression — it never forks.
-        let mut m = test_master(2, PoolMode::Ondemand);
+        let mut m = test_master(2, Scaling::Ondemand);
         let t0 = Instant::now();
         let w = dead_worker(4245, 0, 0, t0);
         m.on_child_exit(w, ExitVerdict::Crash, t0 + Duration::from_secs(1))
@@ -1217,7 +1217,7 @@ mod tests {
     fn dynamic_ceiling_warns_once_and_never_spawns() {
         let mut m = test_master(
             4,
-            PoolMode::Dynamic {
+            Scaling::Dynamic {
                 min_spare: 2,
                 max_spare: 4,
             },
@@ -1247,7 +1247,7 @@ mod tests {
     fn static_refill_counts_pending_respawn_as_committed() {
         // A slot holding a respawn deadline is already committed to the target,
         // so refill must not spawn a second worker into the spare free slot.
-        let mut m = test_master(2, PoolMode::Static);
+        let mut m = test_master(2, Scaling::Static);
         let t0 = Instant::now();
         m.cfg.processes = 1;
         m.table.slots[0].schedule_immediate(t0);
@@ -1266,7 +1266,7 @@ mod tests {
 
     #[test]
     fn ondemand_arms_only_when_a_fork_can_land() {
-        let mut m = test_master(2, PoolMode::Ondemand);
+        let mut m = test_master(2, Scaling::Ondemand);
         // Nothing running, no idle worker to take the connection, a spawnable
         // slot: the listeners are worth polling.
         assert!(m.compute_armed());
@@ -1283,7 +1283,7 @@ mod tests {
     #[test]
     fn ondemand_disarms_while_stopping() {
         // Draining down: a late connection must not fork a fresh worker.
-        let mut m = test_master(2, PoolMode::Ondemand);
+        let mut m = test_master(2, Scaling::Ondemand);
         assert!(m.compute_armed());
         m.pctl.on_signal(SIG_TERM);
         assert!(!m.compute_armed());
@@ -1293,7 +1293,7 @@ mod tests {
     fn non_ondemand_never_arms_listeners() {
         // Static/dynamic workers accept in the children; the master watches only
         // its self-pipe however spawnable the pool looks.
-        let m = test_master(2, PoolMode::Static);
+        let m = test_master(2, Scaling::Static);
         assert!(!m.compute_armed());
     }
 }

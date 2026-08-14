@@ -40,26 +40,22 @@ All options, tarballs, checksums and what exactly is bundled: [rapira.rs/docs/in
 // worker.php — booted once, serving many requests
 require __DIR__ . '/vendor/autoload.php';
 
-use Rapira\Plugin\Http\HttpHandlerConfig;
-use function Rapira\create_plugin_handler;
-
-$http = create_plugin_handler(new HttpHandlerConfig());
-$app  = new App(); // resident: survives across requests
+$app = new App(); // resident: survives across requests
 
 $handler = static function () use ($app): void {
     echo $app->handle($_SERVER['REQUEST_URI']);
 };
 
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }
 ```
 
 ```sh
-rapira serve worker.php
+rapira serve --mode worker worker.php
 curl http://127.0.0.1:8000/
 ```
 
-Front-controller apps run unchanged: `rapira serve --classic public/index.php` — see [classic mode](https://rapira.rs/docs/classic).
+Front-controller apps run unchanged: `rapira serve --mode classic public/index.php` — see [classic mode](https://rapira.rs/docs/classic).
 
 ## Contributing
 

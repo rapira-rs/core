@@ -25,7 +25,7 @@ use crate::{
     rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_tls,
     rapira_ce_http_uploaded_file, rapira_ce_inet_address, rapira_ce_internal_http_dispatcher,
     rapira_ce_internal_http_dispatcher_info, rapira_ce_internal_http_exchange,
-    rapira_ce_not_in_worker_mode_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
+    rapira_ce_not_in_dispatcher_mode_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
     rapira_ce_work_discarded_exception, rapira_dispatcher_info_obj, rapira_eg, rapira_exchange_obj,
     rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
@@ -104,6 +104,21 @@ pub(crate) fn reclaim_current() {
 
 pub(crate) fn closed_seen() -> bool {
     CYCLE.get().closed_seen
+}
+
+// Worker-mode latch writers: the worker pull/serve path feeds the same
+// per-cycle state the dispatcher verbs write, so run_cycle's classifier
+// covers both resident modes.
+pub(crate) fn note_closed() {
+    update(|c| c.closed_seen = true);
+}
+
+pub(crate) fn note_received() {
+    update(|c| c.received = true);
+}
+
+pub(crate) fn note_served() {
+    update(|c| c.served = true);
 }
 
 pub(crate) fn served_any() -> bool {
@@ -796,8 +811,8 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
     guard(false, || unsafe {
         if crate::rapira_mode != RAPIRA_MODE_DISPATCHER as c_int {
             zend::throw_exception(
-                rapira_ce_not_in_worker_mode_error,
-                c"nothing dispatches work to this process outside worker mode",
+                rapira_ce_not_in_dispatcher_mode_error,
+                c"nothing dispatches work to this process outside dispatcher mode",
             );
             return false;
         }

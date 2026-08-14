@@ -39,10 +39,9 @@ fn fibers_stress_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn hello_world_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/worker.php")))?; // single interpreter => same one for both reqs
+    let r = Rapira::start(Mode::Worker(fixture("shared/worker.php")))?; // single interpreter => same one for both reqs
     let h = r.handle()?;
     let (_, body1) = drain(h.handle_blocking(req("/?x=1", "shared/worker.php"))?);
     assert!(
@@ -55,10 +54,9 @@ fn hello_world_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_request_isolation() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/leak-worker.php")))?; // single interpreter => same one for both reqs
+    let r = Rapira::start(Mode::Worker(fixture("shared/leak-worker.php")))?; // single interpreter => same one for both reqs
     let h = r.handle()?;
     let (_, body1) = drain(h.handle_blocking(req("/?x=1", "shared/leak-worker.php"))?);
     let (_, body2) = drain(h.handle_blocking(req("/?x=2", "shared/leak-worker.php"))?);
@@ -80,11 +78,10 @@ fn worker_request_isolation() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_survives_exit() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/bailout-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/bailout-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain(h.handle_blocking(req("/?boom=0", "shared/bailout-worker.php"))?); // normal
     let (s2, b2) = drain(h.handle_blocking(req("/?boom=1", "shared/bailout-worker.php"))?); // exit(1) -> unwind-exit
@@ -115,11 +112,10 @@ fn worker_survives_exit() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn fibers_stress_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/fibers-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/fibers-worker.php")))?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "shared/fibers-worker.php"))?);
     drop(h);
@@ -137,13 +133,10 @@ fn fibers_stress_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "shared/teardown-bailout-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/teardown-bailout-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain(h.handle_blocking(req("/?boom=0", "shared/teardown-bailout-worker.php"))?); // normal
     let (s2, b2) = drain(h.handle_blocking(req("/?boom=1", "shared/teardown-bailout-worker.php"))?); // bail in teardown
@@ -179,11 +172,10 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn many_producers_test() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/worker.php")))?;
 
     let producers: Vec<_> = (0..24)
         .map(|t| {
@@ -217,11 +209,10 @@ fn many_producers_test() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_basic_auth() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/auth-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/auth-worker.php")))?;
     let h = r.handle()?;
 
     // Authorization: Basic base64("user:pass")
@@ -254,11 +245,10 @@ fn worker_basic_auth() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn server_variables() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r: Rapira = Rapira::start(Mode::Dispatcher(fixture("shared/server-variables.php")))?;
+    let r: Rapira = Rapira::start(Mode::Worker(fixture("shared/server-variables.php")))?;
     let h: php_sys::RapiraHandle = r.handle()?;
 
     let mut request: php_sys::Request = req(
@@ -302,13 +292,10 @@ fn server_variables() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_finish_request() -> anyhow::Result<()> {
     let _guard = php_lock();
 
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "shared/finish-request-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/finish-request-worker.php")))?;
     let h = r.handle()?;
 
     let (s1, b1) = drain(h.handle_blocking(req("/", "shared/finish-request-worker.php"))?);
@@ -360,13 +347,12 @@ fn getenv_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn getenv_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     unsafe {
         std::env::set_var("FOO", "BAR");
     }
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/env-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/env-worker.php")))?;
     let h = r.handle()?;
     let (status, body) = drain(h.handle_blocking(req("/", "shared/env-worker.php"))?);
     drop(h);
@@ -393,10 +379,9 @@ fn failboot_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn scoreboard_counts_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/throw-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/throw-worker.php")))?;
     let h = r.handle()?;
     let _ = drain(h.handle_blocking(req("/?boom=0", "shared/throw-worker.php"))?); // ok
     let _ = drain(h.handle_blocking(req("/?boom=0", "shared/throw-worker.php"))?); // ok
@@ -414,12 +399,9 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "shared/shutdown-fatal-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/shutdown-fatal-worker.php")))?;
     let h = r.handle()?;
     // the shutdown-fn fatal bails in php_call_shutdown_functions -> recycle
     let _ = drain(h.handle_blocking(req("/?boom=1", "shared/shutdown-fatal-worker.php"))?);
@@ -467,10 +449,9 @@ fn scoreboard_counts_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_session_isolation() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/session-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/session-worker.php")))?;
     let h = r.handle()?;
     let (s1, b1) = drain(h.handle_blocking(req("/", "shared/session-worker.php"))?);
     let (s2, b2) = drain(h.handle_blocking(req("/", "shared/session-worker.php"))?);
@@ -498,15 +479,12 @@ fn worker_session_isolation() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
     captured().clear(); // drop anything captured by earlier tests
 
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "basic_tests/boot-output-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("basic_tests/boot-output-worker.php")))?;
     let h = r.handle()?;
     let (status, _) = drain(h.handle_blocking(req("/", "basic_tests/boot-output-worker.php"))?);
     drop(h);
@@ -532,15 +510,12 @@ fn php_levels(logged: &[tests::Captured], mark: &str) -> Vec<tracing::Level> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "basic_tests/error-levels-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("basic_tests/error-levels-worker.php")))?;
     let h = r.handle()?;
     for step in ["deprecated", "warn", "boom"] {
         let uri = format!("/?step={step}");
@@ -573,16 +548,13 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
 // error_reporting(0) masks every type php-src would mask, fatals included; the recycle it
 // causes still has to be explained, so fatals are exempt from the mask.
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
     captured().clear();
 
     // own worker: error_reporting(0) is restored per cycle, so it would leak into later jobs
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "basic_tests/error-levels-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("basic_tests/error-levels-worker.php")))?;
     let h = r.handle()?;
     let _ = drain(h.handle_blocking(req(
         "/?step=silent-fatal",
@@ -603,15 +575,12 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
 // log_errors routes the diagnostic through the SAPI log callback too; both paths must agree.
 // Assumes php_error_cb owns that callback: an extension that hooks it reports at its own level.
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "basic_tests/error-levels-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("basic_tests/error-levels-worker.php")))?;
     let h = r.handle()?;
     let (status, _) =
         drain(h.handle_blocking(req("/?step=logged", "basic_tests/error-levels-worker.php"))?);
@@ -651,10 +620,9 @@ fn sapi_ini_entries_applied() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn status_code_does_not_leak_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture("basic_tests/status-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("basic_tests/status-worker.php")))?;
     let h = r.handle()?;
     let (s1, _) = drain(h.handle_blocking(req("/?code=404", "basic_tests/status-worker.php"))?);
     let (s2, b2) = drain(h.handle_blocking(req("/", "basic_tests/status-worker.php"))?);
@@ -688,10 +656,9 @@ fn status_code_does_not_leak_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_finish_request_header_only() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
+    let r = Rapira::start(Mode::Worker(fixture(
         "basic_tests/finish-request-headers-worker.php",
     )))?;
     let h = r.handle()?;
@@ -705,12 +672,9 @@ fn worker_finish_request_header_only() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "basic_tests/gc-protect-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("basic_tests/gc-protect-worker.php")))?;
     let h = r.handle()?;
     let (_, b1) = drain(h.handle_blocking(req("/?seed=1", "basic_tests/gc-protect-worker.php"))?);
     assert!(
@@ -731,12 +695,9 @@ fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "basic_tests/last-error-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("basic_tests/last-error-worker.php")))?;
     let h = r.handle()?;
     // req1 raises a non-fatal warning (does NOT bail, so no recycle masks the reset)
     let (_, b1) =
@@ -754,7 +715,6 @@ fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() -> anyhow::Result<()>
 {
     let _guard = php_lock();
@@ -765,9 +725,7 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
     let _ = std::fs::remove_file(&sentinel);
     let _ = std::fs::remove_file(&boot);
 
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "basic_tests/h2-boot-bail-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("basic_tests/h2-boot-bail-worker.php")))?;
     let h = r.handle()?;
     // The bootstrap's session save handler fatals on the first-call teardown
     // flush; that bailout recycles and re-bootstraps, so the counter reads "2".
@@ -786,10 +744,9 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
 // A post-loop warning left in PG(last_error_message) trips the core_globals_dtor assertion
 // at php_module_shutdown (main.c:2102).
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
+    let r = Rapira::start(Mode::Worker(fixture(
         "basic_tests/warn-after-loop-worker.php",
     )))?;
     let h = r.handle()?;
@@ -802,12 +759,9 @@ fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "basic_tests/filter-leak-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("basic_tests/filter-leak-worker.php")))?;
     let h = r.handle()?;
     let mem = |b: String| -> i64 {
         b.trim()
@@ -848,10 +802,9 @@ fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn worker_finish_request_flush_bailout_recycles() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
+    let r = Rapira::start(Mode::Worker(fixture(
         "basic_tests/finish-request-bailout-worker.php",
     )))?;
     let h = r.handle()?;
@@ -887,5 +840,33 @@ fn worker_finish_request_flush_bailout_recycles() -> anyhow::Result<()> {
         b3.contains("ok counter=1"),
         "recycle resets statics (got: {b3:?})"
     );
+    Ok(())
+}
+
+/// classic keeps the early-flush capability: pre-finish output ships,
+/// post-finish output is dropped, and the script keeps running after the
+/// response closed.
+#[test]
+fn classic_finish_request() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+
+    let r = Rapira::start(Mode::Classic)?;
+    let h = r.handle()?;
+    let (status, body) = drain(h.handle_blocking(req("/", "shared/finish-request-classic.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("BEFORE") && !body.contains("AFTER"),
+        "post-finish output must not reach the client (got: {body:?})"
+    );
+    let ran = captured()
+        .iter()
+        .filter(|c| c.target == "app" && c.message == "post-finish-ran")
+        .count();
+    assert_eq!(ran, 1, "the script must keep running after the early flush");
     Ok(())
 }

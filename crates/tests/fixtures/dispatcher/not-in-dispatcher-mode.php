@@ -3,7 +3,7 @@
 try {
     \Rapira\get_dispatcher();
     echo "returned\n";
-} catch (\Rapira\Exception\NotInWorkerModeError $e) {
+} catch (\Rapira\Exception\NotInDispatcherModeError $e) {
     echo 'class: ', $e::class, "\n";
     echo 'rapira: ', $e instanceof \Rapira\Exception\RapiraThrowable ? 'yes' : 'no', "\n";
     echo 'message: ', $e->getMessage(), "\n";

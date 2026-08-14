@@ -11,6 +11,5 @@ $handler = static function (): void {
 	}
 	echo 'mb:' . mb_strtoupper('héllo', 'UTF-8');
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

@@ -4,6 +4,5 @@ $handler = static function (): void {
 	http_response_code(302);
 	\rapira_finish_request();
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

@@ -49,6 +49,13 @@ enum {
 };
 extern int rapira_mode;
 
+// HandleAction in rapira_worker.rs - keep in sync
+enum {
+    RAPIRA_HANDLE_STOP = 0,
+    RAPIRA_HANDLE_CONTINUE = 1,
+    RAPIRA_HANDLE_RECYCLE = 2,
+};
+
 // Object layouts with embedded C data, declared here so bindgen generates them
 // and Rust reads named fields instead of a hardcoded offset.
 // https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
@@ -81,6 +88,7 @@ extern zend_class_entry *rapira_ce_dispatcher;
 extern zend_class_entry *rapira_ce_closed_exception;
 extern zend_class_entry *rapira_ce_timeout_exception;
 extern zend_class_entry *rapira_ce_work_discarded_exception;
+extern zend_class_entry *rapira_ce_not_in_dispatcher_mode_error;
 extern zend_class_entry *rapira_ce_not_in_worker_mode_error;
 extern zend_class_entry *rapira_ce_already_finalized_error;
 // http

@@ -38,8 +38,8 @@ pub enum WorkerExit {
     Restart, // worker_main drops PhpThread and builds a fresh one
 }
 
-// What the worker-mode C handleRequest shim does after a loop turn; that C
-// surface is pending restore (mode 2), the values stay its contract.
+// What the C handle_request shell does after a loop turn; wrapper.h's
+// RAPIRA_HANDLE_* values mirror this - keep in sync.
 #[repr(i32)]
 enum HandleAction {
     Stop = 0,     // clean loop exit (intake channel closed) -> RETURN_BOOL(false)
@@ -101,10 +101,35 @@ fn run_cycle(script: &Path) -> Cycle {
         return Cycle::Restart;
     }
 
-    if crate::exchange::closed_seen() {
-        // the dispatcher reported closure and the script wound down: clean stop
+    classify(CycleEnd {
+        closed: crate::exchange::closed_seen(),
+        recycle,
+        served: crate::exchange::served_any(),
+        received: crate::exchange::received_any(),
+    })
+}
+
+/// Everything run_cycle knows when the script has wound down. Both resident
+/// modes feed the same latches: the dispatcher from the exchange verbs, worker
+/// mode from its pull/serve path.
+struct CycleEnd {
+    /// Closure observed (dispatcher receive saw Closed / worker pull hit it).
+    closed: bool,
+    /// A contained bailout was flagged (a job, or the first-call teardown).
+    recycle: bool,
+    /// A unit was finalized this cycle.
+    served: bool,
+    /// A unit was handed out this cycle.
+    received: bool,
+}
+
+/// Terminal classification for one cycle; Restart (a shutdown bailout) is
+/// decided before this runs.
+fn classify(end: CycleEnd) -> Cycle {
+    if end.closed {
+        // closure observed and the script wound down: clean stop
         Cycle::Stop
-    } else if recycle || crate::exchange::served_any() || crate::exchange::received_any() {
+    } else if end.recycle || end.served || end.received {
         // A bailout mid-serving, or the script ended after real work. A cycle
         // that received a unit and then fataled is an app failure, not a boot
         // failure — Failed would shed the next queued request.
@@ -164,10 +189,10 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
 }
 
 /// # Safety
-/// Invoked from the worker-mode C surface (pending restore) once per loop
-/// iteration. `fci` and `fcc` must be valid, non-null pointers produced by
-/// `Z_PARAM_FUNC` and remain valid for the call. Must run on the resident worker
-/// thread whose `WORKER` thread-local is initialized, inside its active request.
+/// Invoked from the C handle_request shell once per loop iteration. `fci` and
+/// `fcc` must be valid, non-null pointers produced by `Z_PARAM_FUNC` and remain
+/// valid for the call. Must run on the resident worker thread whose `WORKER`
+/// thread-local is initialized, inside its active request.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_handle_request(
     fci: *mut zend_fcall_info,
@@ -202,7 +227,10 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 
     let mut outcome = Outcome::from_c(unsafe { rapira_request_activate() });
     if outcome != Outcome::Bailout {
-        outcome = Outcome::from_c(unsafe { rapira_run_handler(fci, fcc) });
+        unsafe {
+            crate::context::apply_proto_num(&job.ctx);
+            outcome = Outcome::from_c(rapira_run_handler(fci, fcc));
+        }
     }
 
     // The handler has returned: from here every ub_write is a teardown flush, not
@@ -236,6 +264,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         set_worker_recycle();
     }
     job.ctx.finish(truncated);
+    crate::exchange::note_served();
     // Recycle tells C to zend_bailout so no PHP runs over the post-longjmp state; the response was
     // already sealed by job.ctx.finish() above. Continue keeps the resident loop going.
     if recycle {
@@ -263,7 +292,25 @@ fn next_job() -> Option<Job> {
             sb_update(scoreboard::Event::Healthy);
         }
         log_and_clear_last_error();
-        pull_job()
+        loop {
+            match pull_job() {
+                Some(job) => {
+                    // a client that vanished while queued: fail the unit instead
+                    // of handing it out (mirrors receive_into's pre-handout probe)
+                    if job.ctx.sender.as_ref().is_some_and(|s| s.is_closed()) {
+                        sb_update(scoreboard::Event::Handled(true));
+                        continue;
+                    }
+                    crate::exchange::note_received();
+                    return Some(job);
+                }
+                None => {
+                    // the untimed pull only returns None on closure: the clean-stop latch
+                    crate::exchange::note_closed();
+                    return None;
+                }
+            }
+        }
     })
 }
 

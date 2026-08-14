@@ -12,6 +12,5 @@ $handler = static function (): void {
 	}
 	echo 'sqlite:' . (new SQLite3(':memory:'))->querySingle('SELECT 40+2');
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
 }

@@ -13,15 +13,12 @@ use tests::{drain, fixture, php_lock_with_ini, req};
 // stay off — printing them hides the fault. Needs --enable-zend-test.
 // https://github.com/php/php-src/pull/5857
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()> {
     let _guard = php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/ini/observer_teardown_tests/observer-quiet.ini"
     )));
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "shared/session-bailout-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/session-bailout-worker.php")))?;
     let h = r.handle()?;
 
     // each job bails in teardown and recycles; the cycle end walks the observer chain

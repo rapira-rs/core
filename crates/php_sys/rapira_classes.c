@@ -22,6 +22,7 @@ zend_class_entry *rapira_ce_dispatcher;
 zend_class_entry *rapira_ce_closed_exception;
 zend_class_entry *rapira_ce_timeout_exception;
 zend_class_entry *rapira_ce_work_discarded_exception;
+zend_class_entry *rapira_ce_not_in_dispatcher_mode_error;
 zend_class_entry *rapira_ce_not_in_worker_mode_error;
 zend_class_entry *rapira_ce_already_finalized_error;
 
@@ -92,6 +93,9 @@ void rapira_register_classes(void) {
     rapira_ce_work_discarded_exception =
         register_class_Rapira_Exception_WorkDiscardedException(
             spl_ce_RuntimeException, throwable);
+    rapira_ce_not_in_dispatcher_mode_error =
+        register_class_Rapira_Exception_NotInDispatcherModeError(zend_ce_error,
+                                                                 throwable);
     rapira_ce_not_in_worker_mode_error =
         register_class_Rapira_Exception_NotInWorkerModeError(zend_ce_error,
                                                              throwable);

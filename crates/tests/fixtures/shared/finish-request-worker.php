@@ -10,7 +10,6 @@ $handler = static function (): void {
     echo " AFTER";             // stream already closed -> dropped, never reaches the client
     State::$n++;               // post-response work still executes; the next request observes it
 };
-$http = Rapira\create_plugin_handler(new Rapira\Plugin\Http\HttpHandlerConfig());
-while ($http->handleRequest($handler)) {
+while (\Rapira\handle_request($handler)) {
     gc_collect_cycles();
 }

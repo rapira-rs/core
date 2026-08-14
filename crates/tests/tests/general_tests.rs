@@ -1,7 +1,23 @@
 use std::io::Read;
 
 use php_sys::{Mode, Rapira, Request};
-use tests::{drain, drain_resp, fixture, php_lock, req};
+use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
+
+/// Block until the fixture's app record lands (the held-sync pattern: the
+/// handler must provably be executing before the client walks away).
+fn wait_app_record(message: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if captured()
+            .iter()
+            .any(|c| c.target == "app" && c.message == message)
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("no app record {message:?} within 10s");
+}
 
 /// Body source returning at most one byte per read() call — legal `Read`
 /// behavior that streaming bodies (pipes, chunked decoders) exhibit.
@@ -27,10 +43,9 @@ fn post(fixture_name: &str, body: Box<dyn Read + Send>, len: i64) -> Request {
 // (SG(post_read)=1, main/SAPI.c) - the callback must fill the buffer until
 // real EOF or partial reads truncate the POST body.
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn post_body_survives_partial_reads() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture("general_tests/input-worker.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("general_tests/input-worker.php")))?;
     let h = r.handle()?;
 
     let payload = b"hello rapira post".to_vec(); // 17 bytes
@@ -58,15 +73,18 @@ fn post_body_survives_partial_reads() -> anyhow::Result<()> {
 // short (default ignore_user_abort=0), and the ABORTED status must not leak
 // into the next request.
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture("general_tests/abort-worker.php")))?;
+    init_log_capture();
+    captured().clear();
+    let r = Rapira::start(Mode::Worker(fixture("general_tests/abort-worker.php")))?;
     let h = r.handle()?;
 
-    // Drop the receiver before the fixture's first write (it sleeps to hand us
-    // the window): the write then observes the closed channel and aborts.
-    drop(h.handle_blocking(req("/", "general_tests/abort-worker.php"))?); // client disconnects
+    // Drop the receiver only once the handler is provably executing —
+    // dropping earlier hits the pre-handout probe and the handler never runs.
+    let rx = h.handle_blocking(req("/", "general_tests/abort-worker.php"))?;
+    wait_app_record("held");
+    drop(rx); // client disconnects mid-handler
 
     let (s2, b2) = drain(h.handle_blocking(req("/?probe=1", "general_tests/abort-worker.php"))?);
     drop(h);
@@ -88,12 +106,9 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
 // resident worker request nothing reclaims the temp stream resource, so every
 // POST grows EG(regular_list) until a sweep is in place.
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "general_tests/resources-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("general_tests/resources-worker.php")))?;
     let h = r.handle()?;
 
     let send = |h: &php_sys::RapiraHandle| -> anyhow::Result<i64> {
@@ -124,10 +139,9 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn https_server_vars() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture("shared/server-variables.php")))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/server-variables.php")))?;
     let h = r.handle()?;
     let mut request = req("/", "shared/server-variables.php");
     request.https = true;
@@ -151,10 +165,9 @@ fn https_server_vars() -> anyhow::Result<()> {
 // throwables (zend_execute_scripts); the worker path must do the same. A
 // handled exception is not an error: no 500, no scoreboard error.
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
+    let r = Rapira::start(Mode::Worker(fixture(
         "general_tests/exception-handler-worker.php",
     )))?;
     let h = r.handle()?;
@@ -184,10 +197,9 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
 // produces no output before the error path, so the rust-side 500 head and the
 // teardown header flush must not fight over it (first write wins).
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
+    let r = Rapira::start(Mode::Worker(fixture(
         "general_tests/throw-quiet-worker.php",
     )))?;
     let h = r.handle()?;
@@ -197,6 +209,10 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     r.shutdown();
 
     assert!(resp.ended, "worker must seal a response");
+    assert_eq!(
+        resp.heads, 1,
+        "the 500 and the teardown flush must not both head"
+    );
     let head = resp.head.expect("error response must record a head");
     assert_eq!(
         head.status, 500,
@@ -210,12 +226,9 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
 // guard the bailed flush leaves the session active and the next request
 // reuses the previous session id.
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "shared/session-bailout-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/session-bailout-worker.php")))?;
     let h = r.handle()?;
     let (_, b1) = drain(h.handle_blocking(req("/", "shared/session-bailout-worker.php"))?);
     let (_, b2) = drain(h.handle_blocking(req("/", "shared/session-bailout-worker.php"))?);
@@ -239,10 +252,9 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
+    let r = Rapira::start(Mode::Worker(fixture(
         "general_tests/fatal-exception-handler-worker.php",
     )))?;
     let h = r.handle()?;
@@ -261,12 +273,9 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "general_tests/stuck-flag-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("general_tests/stuck-flag-worker.php")))?;
     let h = r.handle()?;
     // req1: fatal inside the include-wrapper -> bailout strands in_user_include (returning proves no hang)
     let _ = drain(h.handle_blocking(req("/?step=boom", "general_tests/stuck-flag-worker.php"))?);
@@ -284,10 +293,9 @@ fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
+    let r = Rapira::start(Mode::Worker(fixture(
         "general_tests/fatal-backtrace-worker.php",
     )))?;
     let h = r.handle()?;
@@ -326,12 +334,9 @@ fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
-        "shared/shutdown-fatal-worker.php",
-    )))?;
+    let r = Rapira::start(Mode::Worker(fixture("shared/shutdown-fatal-worker.php")))?;
     let h = r.handle()?;
     let (_, b1) = drain(h.handle_blocking(req("/?boom=1", "shared/shutdown-fatal-worker.php"))?);
     let (s2, b2) = drain(h.handle_blocking(req("/", "shared/shutdown-fatal-worker.php"))?);
@@ -347,16 +352,19 @@ fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Dispatcher(fixture(
+    init_log_capture();
+    captured().clear();
+    let r = Rapira::start(Mode::Worker(fixture(
         "general_tests/abort-ignore-worker.php",
     )))?;
     let h = r.handle()?;
-    // Drop the receiver before the fixture's write (it sleeps to hand us the
-    // window): the write observes the closed channel and raises the abort.
-    drop(h.handle_blocking(req("/", "general_tests/abort-ignore-worker.php"))?); // client disconnects
+    // Drop the receiver only once the handler is provably executing —
+    // dropping earlier hits the pre-handout probe and the handler never runs.
+    let rx = h.handle_blocking(req("/", "general_tests/abort-ignore-worker.php"))?;
+    wait_app_record("held");
+    drop(rx); // client disconnects mid-handler
     let (s2, b2) =
         drain(h.handle_blocking(req("/?probe=1", "general_tests/abort-ignore-worker.php"))?);
     drop(h);

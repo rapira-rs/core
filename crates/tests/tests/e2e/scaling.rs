@@ -2,14 +2,13 @@ use crate::harness::*;
 use std::time::{Duration, Instant};
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn dynamic_scales_up_down() {
     // `pool.processes` is the ceiling (max children); dynamic keeps
     // min_spare..max_spare idle.
     let srv = spawn_with_config(
         "scaling/sleep-worker.php",
         4,
-        "mode = \"dynamic\"\nmin_spare = 1\nmax_spare = 2\n",
+        "scaling = \"dynamic\"\nmin_spare = 1\nmax_spare = 2\n",
     );
     let storm = storm(srv.addr, 4);
     wait_workers(
@@ -28,12 +27,11 @@ fn dynamic_scales_up_down() {
 }
 
 #[test]
-#[ignore = "fixture drives the worker-mode handleRequest API, whose C surface is not restored yet"]
 fn ondemand_spawns_on_connect() {
     let srv = spawn_with_config(
         "shared/echo-worker.php",
         2,
-        "mode = \"ondemand\"\nprocess_idle_timeout_secs = 2\n",
+        "scaling = \"ondemand\"\nprocess_idle_timeout_secs = 2\n",
     );
     // The master binds the listener pre-fork, so the harness readiness probe
     // connects — which is itself a demand event that forks one worker. Wait for

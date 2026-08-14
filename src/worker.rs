@@ -83,6 +83,7 @@ pub fn worker_body(
 
     // Boot failure before serving anything is the unhealthy contract: a
     // never-serviceable gen-0 pool must failboot, not respawn forever.
+    let dispatcher = matches!(mode, Mode::Dispatcher(_));
     let rapira = match Rapira::start_worker(mode, hooks) {
         Ok(r) => r,
         Err(e) => {
@@ -100,26 +101,31 @@ pub fn worker_body(
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
-    // Per-pid spool subdir: SpooledFile drops cover destructor paths; the
-    // master's boot sweep reclaims dirs a SIGKILLed worker left behind. The
-    // leaf must be freshly created, owner-only: a pre-planted entry at the
-    // predictable name in the shared root must fail, never be traversed
-    // (the root itself exists — the master created and probed it pre-fork).
-    uploads.dir = uploads
-        .dir
-        .join(format!("rapira-spool-{}", std::process::id()));
-    if let Err(e) = {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new().mode(0o700).create(&uploads.dir)
-    } {
-        tracing::error!(
-            target: "rapira",
-            "creating spool dir {}: {e}",
-            uploads.dir.display()
-        );
-        return WORKER_EXIT_UNHEALTHY;
-    }
-    let spool_dir = uploads.dir.clone();
+    // Per-pid spool subdir (dispatcher only — the other modes never spool):
+    // SpooledFile drops cover destructor paths; the master's boot sweep
+    // reclaims dirs a SIGKILLed worker left behind. The leaf must be freshly
+    // created, owner-only: a pre-planted entry at the predictable name in the
+    // shared root must fail, never be traversed (the root itself exists — the
+    // master created and probed it pre-fork).
+    let spool_dir: Option<PathBuf> = if dispatcher {
+        uploads.dir = uploads
+            .dir
+            .join(format!("rapira-spool-{}", std::process::id()));
+        if let Err(e) = {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&uploads.dir)
+        } {
+            tracing::error!(
+                target: "rapira",
+                "creating spool dir {}: {e}",
+                uploads.dir.display()
+            );
+            return WORKER_EXIT_UNHEALTHY;
+        }
+        Some(uploads.dir.clone())
+    } else {
+        None
+    };
     let running: rapira_runtime::Running = host.run_with_options(
         handle,
         script,
@@ -138,8 +144,10 @@ pub fn worker_body(
     drop(rapira); // joins the PHP thread; module teardown stays with the master
     // Every request has concluded: reclaim this generation's spool dir, or
     // respawns accumulate one per pid (the boot sweep only covers crashes).
-    if let Err(e) = std::fs::remove_dir_all(&spool_dir) {
-        tracing::warn!(target: "rapira", "removing spool dir {}: {e}", spool_dir.display());
+    if let Some(dir) = &spool_dir
+        && let Err(e) = std::fs::remove_dir_all(dir)
+    {
+        tracing::warn!(target: "rapira", "removing spool dir {}: {e}", dir.display());
     }
 
     // A decided protocol code (recycle/unhealthy) wins: those carry supervision

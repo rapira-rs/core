@@ -4,8 +4,9 @@
 
 namespace {
     /**
-     * Classic mode only. Flush the response to the client early; the script may keep
-     * working after it. Same contract as fastcgi_finish_request().
+     * Classic and worker modes. Flush the response to the client early; the script may
+     * keep working after it. In dispatcher mode the Exchange verbs finalize instead,
+     * so the call throws.
      */
     function rapira_finish_request(): bool {}
 }
@@ -94,9 +95,17 @@ namespace Rapira {
     /**
      * The same instance for the life of the process.
      *
-     * @throws Exception\NotInWorkerModeError Called outside worker mode.
+     * @throws Exception\NotInDispatcherModeError Called outside dispatcher mode.
      */
     function get_dispatcher(): Dispatcher {}
+
+    /**
+     * Hand one job to $handler, which reads the superglobals and responds through
+     * echo/header(). False means the worker is draining: exit the loop.
+     *
+     * @throws Exception\NotInWorkerModeError Called outside worker mode.
+     */
+    function handle_request(callable $handler): bool {}
 
     function get_version(): string {}
 
