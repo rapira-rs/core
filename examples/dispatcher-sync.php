@@ -9,14 +9,25 @@ use Rapira\Http\Request;
 final class PageNotFound extends \RuntimeException {}
 
 /** Routes a request to a response body */
-function handle(Request $req): string
+function handle(Request $req): Generator|string
 {
     return match ($req->target) {
         '/' => "hello from the sync dispatcher\n",
         '/echo' => \is_string($req->body) ? $req->body : '',
+        '/stream' => generateStream(),
         '/boom' => throw new \RuntimeException('the handler blew up'),
         default => throw new PageNotFound("no route for {$req->target}"),
     };
+}
+
+function generateStream(): Generator
+{
+    $j = mt_rand(5, 20);
+    for ($i = 0; $i < $j; $i++) {
+        yield "stream chunk {$i}\n";
+    }
+
+    return "stream done\n";
 }
 
 $d = \Rapira\get_dispatcher();
@@ -28,18 +39,32 @@ while (true) {
 
             $body = handle($ex->getRequest());
             $ex->writeHead(200, ['content-type' => ['text/plain']]);
-            $ex->writeBody($body);
+            if ($body instanceof Generator) {
+                foreach ($body as $chunk) {
+                    $ex->writeBody($chunk, eos: false);
+                }
+
+                $ex->writeBody($body->getReturn());
+            } else {
+                $ex->writeBody($body);
+            }
         }
     } catch (PageNotFound $e) {
-        $ex->writeHead(404, ['content-type' => ['text/plain']]);
-        $ex->writeBody("not found: {$e->getMessage()}\n");
+        try {
+            $ex->writeHead(404, ['content-type' => ['text/plain']]);
+            $ex->writeBody("not found: {$e->getMessage()}\n");
+        } catch (\Throwable) {
+        }
     } catch (ClosedException) {
         // Drained: no more work will ever arrive.
         break;
     } catch (RapiraThrowable) {
         // The host closed the exchange first — nothing to answer, move on.
     } catch (\Throwable $e) {
-        $ex->writeHead(500, ['content-type' => ['text/plain']]);
-        $ex->writeBody("internal error: {$e->getMessage()}\n");
+        try {
+            $ex->writeHead(500, ['content-type' => ['text/plain']]);
+            $ex->writeBody("internal error: {$e->getMessage()}\n");
+        } catch (\Throwable) {
+        }
     }
 }
