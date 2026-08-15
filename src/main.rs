@@ -156,6 +156,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         server_port: settings.http.server_port,
         max_body_size: settings.http.max_body_size,
         write_timeout: settings.http.write_timeout,
+        drain_grace: settings.supervisor.drain_grace(),
         unsafe_field_names: match settings.http.unsafe_field_names {
             UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
             UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
@@ -269,6 +270,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         listeners,
     };
     let max_requests: u64 = settings.pool.max_requests;
+    // The extension runtime's own shutdown bound. It wraps the front's drain, so
+    // it is the master's full budget rather than the reduced one the front gets.
+    let grace: std::time::Duration = settings.supervisor.process_control_timeout;
 
     // The closure runs ONLY in freshly-forked children: each child's COW copy
     // of `host_cell` is Some, taken exactly once per child. The parent's copy
@@ -284,6 +288,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 script.clone(),
                 max_requests,
                 upload_limits.clone(),
+                grace,
             )
         });
 

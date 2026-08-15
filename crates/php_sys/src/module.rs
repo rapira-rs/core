@@ -64,7 +64,13 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         treat_data: Some(php_default_treat_data),
         executable_location: null_mut(),
         php_ini_ignore: 0,
-        php_ini_ignore_cwd: 0,
+        // The working directory is not part of ini discovery. A server's cwd is
+        // wherever the operator launched it — under a container, the mounted
+        // application root — so a php.ini sitting there must not reconfigure the
+        // engine for every worker. php-src's own cli and phpdbg set this for the
+        // same reason. PHPRC and the compiled-in config-file path are unaffected.
+        // https://www.php.net/manual/en/configuration.file.php
+        php_ini_ignore_cwd: 1,
         get_fd: None,
         force_http_10: None,
         get_target_gid: None,

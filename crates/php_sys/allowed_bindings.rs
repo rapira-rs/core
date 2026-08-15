@@ -12,6 +12,8 @@ bind! {
     php_register_variable_safe, php_output_activate, php_output_deactivate, php_output_end_all,
     zend_activate_auto_globals, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
     RAPIRA_MODE_DISPATCHER,
+    // the two halves of the linked-libphp version check
+    rapira_headers_php_version_id, php_version_id,
     // the embedded-object layouts; wrapper.h is the source of truth
     rapira_exchange_obj, rapira_dispatcher_info_obj,
     // MINIT-written class-entry globals the Rust builder reads (static mut)

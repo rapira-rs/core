@@ -33,6 +33,40 @@ sudo dnf install ./rapira-php8.5-<version>.x86_64.rpm   # Fedora/RHEL
 
 All options, tarballs, checksums and what exactly is bundled: [rapira.rs/docs/installation](https://rapira.rs/docs/installation).
 
+### Docker
+
+`ghcr.io/rapira-rs/rapira` carries the `rapira` binary and the `libphp.so` it was built against, staged for copying into your own image:
+
+```dockerfile
+FROM php:8.5-cli-trixie
+COPY --from=ghcr.io/rapira-rs/rapira:0.7.0-php8.5 / /
+COPY . /app
+CMD ["rapira", "serve", "--listen", ":8000", "--mode", "classic", "/app/public/index.php"]
+```
+
+The image is `FROM scratch` — it holds `/usr/local/bin/rapira`, `/usr/local/lib/libphp.so`, and opcache (a separate `opcache.so` plus its ini, or linked into libphp, depending on the base). `/usr/local/share/rapira` carries `PHP_VERSION.txt`, the patch level of the bundled libphp, and `debian-packages.txt`, the packages that libphp needs when the base ships no PHP:
+
+```dockerfile
+FROM debian:trixie-slim
+COPY --from=ghcr.io/rapira-rs/rapira:0.7.0-php8.5 /usr/local/share/rapira/debian-packages.txt /tmp/
+RUN apt-get update && xargs -a /tmp/debian-packages.txt apt-get install -y --no-install-recommends
+COPY --from=ghcr.io/rapira-rs/rapira:0.7.0-php8.5 / /
+```
+
+Extensions are the consumer's to add — adding one rebuilds neither `libphp.so` nor rapira. On a PHP base, `RUN docker-php-ext-install …` is enough. On a base without PHP, build them in a stage on the matching minor and copy them across:
+
+```dockerfile
+FROM php:8.5-cli-trixie AS ext
+RUN docker-php-ext-install -j"$(nproc)" pdo_mysql
+
+FROM debian:trixie-slim
+COPY --from=ghcr.io/rapira-rs/rapira:0.7.0-php8.5 / /
+COPY --from=ext /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
+COPY --from=ext /usr/local/etc/php/conf.d/ /usr/local/etc/php/conf.d/
+```
+
+Every tag names its PHP minor — `0.7.0-php8.5`, `0.7-php8.5`, `php8.5`, and the same three for `php8.4` — each covering amd64 and arm64. There is no `latest`: rapira binds Zend structures at compile time, so it checks the linked `libphp.so` at boot and refuses to start against another minor, and a tag that hid which one it carried would only produce containers that fail to boot.
+
 ## A taste
 
 ```php

@@ -151,9 +151,31 @@ fn sigprocmask(how: c_int, set: &libc::sigset_t) {
 /// Block {USR1, USR2, CHLD, HUP} very early — before any handlers exist — so a
 /// stray USR1/USR2/HUP (default disposition: terminate) cannot kill the process
 /// during boot.
+///
+/// As pid 1 the stop signals join them. A pid-namespace init is
+/// SIGNAL_UNKILLABLE: the kernel drops a signal whose disposition is still
+/// SIG_DFL rather than applying the default action, so a stop arriving before
+/// [`install_master_signals`] would be lost outright — `docker stop` during
+/// boot would do nothing until the kill timer fired. Blocked, it stays pending
+/// and the master acts on it the moment it unblocks. Everywhere else SIG_DFL
+/// still terminates, which is what keeps a slow or wedged boot interruptible
+/// from a terminal.
+/// https://man7.org/linux/man-pages/man7/signal.7.html
+///
+/// Workers are unaffected either way: the fork bracket replaces the whole mask
+/// with SIG_SETMASK.
 pub fn block_early_signals() {
-    let set = sigset(&[libc::SIGUSR1, libc::SIGUSR2, libc::SIGCHLD, libc::SIGHUP]);
-    sigprocmask(libc::SIG_BLOCK, &set);
+    sigprocmask(
+        libc::SIG_BLOCK,
+        &sigset(&[libc::SIGUSR1, libc::SIGUSR2, libc::SIGCHLD, libc::SIGHUP]),
+    );
+    // SAFETY: getpid is always safe.
+    if unsafe { libc::getpid() } == 1 {
+        sigprocmask(
+            libc::SIG_BLOCK,
+            &sigset(&[libc::SIGTERM, libc::SIGINT, libc::SIGQUIT]),
+        );
+    }
 }
 
 /// Install the master sigaction set on a fresh self-pipe, then unblock all
@@ -218,6 +240,34 @@ pub(crate) fn master_pid() -> c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_block_covers_the_terminate_by_default_signals() {
+        block_early_signals();
+        let mut mask: libc::sigset_t = sigset(&[]);
+        // SAFETY: mask is a live sigset_t; a null `set` makes this a read.
+        unsafe { libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut mask) };
+        for sig in [libc::SIGUSR1, libc::SIGUSR2, libc::SIGCHLD, libc::SIGHUP] {
+            // SAFETY: mask is a live sigset_t.
+            assert_eq!(
+                unsafe { libc::sigismember(&mask, sig) },
+                1,
+                "signal {sig} is not blocked during boot"
+            );
+        }
+        // The stop trio is pid-1-only, and a test runner is pid 1 whenever the
+        // suite runs as a container's entrypoint.
+        // SAFETY: getpid is always safe.
+        let want_stop = c_int::from(unsafe { libc::getpid() } == 1);
+        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGQUIT] {
+            // SAFETY: mask is a live sigset_t.
+            assert_eq!(
+                unsafe { libc::sigismember(&mask, sig) },
+                want_stop,
+                "off pid 1, signal {sig} must keep its default disposition so a wedged boot stays killable"
+            );
+        }
+    }
 
     #[test]
     fn sigset_membership() {

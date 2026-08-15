@@ -163,6 +163,21 @@ pub struct SupervisorSettings {
     pub pidfile: Option<PathBuf>,
 }
 
+impl SupervisorSettings {
+    /// How long a worker may drain in-flight work before the master escalates.
+    /// The master sends QUIT at t=0 and SIGTERM at `process_control_timeout`, and
+    /// the fork bracket deliberately leaves SIGTERM at SIG_DFL in the child so
+    /// that escalation is a fast kill — a drain still running at the deadline is
+    /// therefore cut short, mid-response. Subtracting the margin gives the worker
+    /// room to finish, or to report what it stranded, before that happens.
+    pub fn drain_grace(&self) -> Duration {
+        /// Headroom between the end of a drain and the master's escalation.
+        const MARGIN: Duration = Duration::from_secs(5);
+        let margin = MARGIN.min(self.process_control_timeout / 2);
+        self.process_control_timeout - margin
+    }
+}
+
 /// Verbosity of a log target.
 // No deny_unknown_fields: it governs struct variants, so it is inert on a unit-only enum.
 // An unrecognised value is already an error because serde has no variant to match it.
@@ -627,11 +642,17 @@ fn resolve_supervisor(
         .map(|p| config_relative(config_dir, p))
         .transpose()?;
 
+    // Zero is rejected here rather than in capped_timeout.
+    let control_secs = section.process_control_timeout_secs.unwrap_or(30);
+    if control_secs == 0 {
+        bail!("supervisor.process_control_timeout_secs must be at least 1");
+    }
+
     Ok(SupervisorSettings {
         process_control_timeout: capped_timeout(
             "supervisor",
             "process_control_timeout_secs",
-            section.process_control_timeout_secs.unwrap_or(30),
+            control_secs,
         )?,
         pidfile,
     })
@@ -684,6 +705,29 @@ fn config_relative(config_dir: Option<&Path>, value: &str) -> std::io::Result<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_grace_leaves_room_before_the_master_escalates() {
+        let grace = |secs| {
+            SupervisorSettings {
+                process_control_timeout: Duration::from_secs(secs),
+                pidfile: None,
+            }
+            .drain_grace()
+        };
+        // The default keeps the 25s-under-30s relationship the front used to hardcode.
+        assert_eq!(grace(30), Duration::from_secs(25));
+        assert_eq!(grace(60), Duration::from_secs(55));
+        assert_eq!(grace(5), Duration::from_millis(2500));
+        assert_eq!(grace(1), Duration::from_millis(500));
+        // The invariant that matters, across every value the config accepts.
+        for secs in 1..=120 {
+            assert!(
+                grace(secs) < Duration::from_secs(secs),
+                "drain must end before the escalation at {secs}s"
+            );
+        }
+    }
 
     #[test]
     fn listen_parses_all_forms() {
@@ -873,6 +917,23 @@ mod tests {
         let file = load_str("[pool]\nentrypoint = \"a.php\"\nprocess_idle_timeout_secs = 86400\n")
             .unwrap();
         assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
+    }
+
+    /// A zero stop budget escalates the instant it starts, leaving the drain no
+    /// time, so it is rejected even though zero means "off" for its siblings.
+    #[test]
+    fn supervisor_control_timeout_zero_is_rejected() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[supervisor]\nprocess_control_timeout_secs = 0\n",
+        )
+        .unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("supervisor.process_control_timeout_secs must be at least 1"),
+            "{err}"
+        );
     }
 
     /// The floor is checked on the resolved value, after precedence, so a zero from
