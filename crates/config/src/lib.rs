@@ -173,7 +173,6 @@ impl SupervisorSettings {
     pub fn drain_grace(&self) -> Duration {
         /// Headroom between the end of a drain and the master's escalation.
         const MARGIN: Duration = Duration::from_secs(5);
-        // Only a maximum is validated, so the budget can be smaller than the margin;
         let margin = MARGIN.min(self.process_control_timeout / 2);
         self.process_control_timeout - margin
     }
@@ -643,11 +642,17 @@ fn resolve_supervisor(
         .map(|p| config_relative(config_dir, p))
         .transpose()?;
 
+    // Zero is rejected here rather than in capped_timeout.
+    let control_secs = section.process_control_timeout_secs.unwrap_or(30);
+    if control_secs == 0 {
+        bail!("supervisor.process_control_timeout_secs must be at least 1");
+    }
+
     Ok(SupervisorSettings {
         process_control_timeout: capped_timeout(
             "supervisor",
             "process_control_timeout_secs",
-            section.process_control_timeout_secs.unwrap_or(30),
+            control_secs,
         )?,
         pidfile,
     })
@@ -912,6 +917,23 @@ mod tests {
         let file = load_str("[pool]\nentrypoint = \"a.php\"\nprocess_idle_timeout_secs = 86400\n")
             .unwrap();
         assert!(merge(file, Overrides::default(), Some(Path::new("/w"))).is_ok());
+    }
+
+    /// A zero stop budget escalates the instant it starts, leaving the drain no
+    /// time, so it is rejected even though zero means "off" for its siblings.
+    #[test]
+    fn supervisor_control_timeout_zero_is_rejected() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[supervisor]\nprocess_control_timeout_secs = 0\n",
+        )
+        .unwrap();
+        let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("supervisor.process_control_timeout_secs must be at least 1"),
+            "{err}"
+        );
     }
 
     /// The floor is checked on the resolved value, after precedence, so a zero from
