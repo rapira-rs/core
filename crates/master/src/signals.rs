@@ -255,10 +255,14 @@ mod tests {
                 "signal {sig} is not blocked during boot"
             );
         }
+        // The stop trio is pid-1-only, and a test runner is pid 1 whenever the
+        // suite runs as a container's entrypoint.
+        // SAFETY: getpid is always safe.
+        let want_term = c_int::from(unsafe { libc::getpid() } == 1);
         // SAFETY: mask is a live sigset_t.
         assert_eq!(
             unsafe { libc::sigismember(&mask, libc::SIGTERM) },
-            0,
+            want_term,
             "off pid 1, SIGTERM must keep its default disposition so a wedged boot stays killable"
         );
     }

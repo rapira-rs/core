@@ -129,7 +129,7 @@ pub fn spawn_without_rust_log(fixture: &str, processes: usize, extra_toml: &str)
 }
 
 /// Working-directory php.ini setup. Only the ini tests pass one; every other
-/// spawner leaves the child with the test process's cwd and no PHPRC.
+/// spawner leaves the child with the test process's cwd.
 pub struct CwdIni<'a> {
     /// Written to `php.ini` in the directory the child runs from.
     pub contents: &'a str,
@@ -190,14 +190,11 @@ fn spawn_with_extras(
         let log = File::create(dir.join("server.log")).expect("create server.log");
         let mut cmd = Command::new(rapira_bin());
         cmd.args(["serve", "--config"]).arg(dir.join("rapira.toml"));
+        cmd.env_remove("PHPRC");
         if let Some(ini) = &cwd_ini {
             cmd.current_dir(&dir);
             if ini.via_phprc {
                 cmd.env("PHPRC", &dir);
-            } else {
-                // The developer's shell may point PHPRC somewhere, which would
-                // mask the cwd behaviour under test.
-                cmd.env_remove("PHPRC");
             }
         }
         match rust_log {

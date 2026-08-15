@@ -173,9 +173,9 @@ impl SupervisorSettings {
     pub fn drain_grace(&self) -> Duration {
         /// Headroom between the end of a drain and the master's escalation.
         const MARGIN: Duration = Duration::from_secs(5);
-        self.process_control_timeout
-            .saturating_sub(MARGIN)
-            .max(Duration::from_secs(1))
+        // Only a maximum is validated, so the budget can be smaller than the margin; 
+        let margin = MARGIN.min(self.process_control_timeout / 2);
+        self.process_control_timeout - margin
     }
 }
 
@@ -713,9 +713,15 @@ mod tests {
         // The default keeps the 25s-under-30s relationship the front used to hardcode.
         assert_eq!(grace(30), Duration::from_secs(25));
         assert_eq!(grace(60), Duration::from_secs(55));
-        // A budget at or below the margin still leaves a usable floor.
-        assert_eq!(grace(5), Duration::from_secs(1));
-        assert_eq!(grace(1), Duration::from_secs(1));
+        assert_eq!(grace(5), Duration::from_millis(2500));
+        assert_eq!(grace(1), Duration::from_millis(500));
+        // The invariant that matters, across every value the config accepts.
+        for secs in 1..=120 {
+            assert!(
+                grace(secs) < Duration::from_secs(secs),
+                "drain must end before the escalation at {secs}s"
+            );
+        }
     }
 
     #[test]

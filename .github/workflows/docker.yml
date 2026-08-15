@@ -20,6 +20,8 @@ env:
 
 jobs:
     build:
+        # Tags only. Every tag is derived from GITHUB_REF_NAME
+        if: startsWith(github.ref, 'refs/tags/')
         runs-on: ${{ matrix.runner }}
         timeout-minutes: 45
         permissions:
