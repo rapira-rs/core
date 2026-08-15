@@ -173,7 +173,7 @@ impl SupervisorSettings {
     pub fn drain_grace(&self) -> Duration {
         /// Headroom between the end of a drain and the master's escalation.
         const MARGIN: Duration = Duration::from_secs(5);
-        // Only a maximum is validated, so the budget can be smaller than the margin; 
+        // Only a maximum is validated, so the budget can be smaller than the margin;
         let margin = MARGIN.min(self.process_control_timeout / 2);
         self.process_control_timeout - margin
     }
