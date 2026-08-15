@@ -1,361 +1,352 @@
 name: Release
 on:
-  push:
-    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
-  workflow_dispatch:
-    inputs:
-      publish:
-        description: 'Create a draft GitHub release from this run'
-        type: boolean
-        default: false
-      php_84:
-        description: 'Override PHP 8.4 patch version (blank = latest)'
-        type: string
-        default: ''
-      php_85:
-        description: 'Override PHP 8.5 patch version (blank = latest)'
-        type: string
-        default: ''
+    push:
+        tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+    workflow_dispatch:
+        inputs:
+            publish:
+                description: "Create a draft GitHub release from this run"
+                type: boolean
+                default: false
+            php_84:
+                description: "Override PHP 8.4 patch version (blank = latest)"
+                type: string
+                default: ""
+            php_85:
+                description: "Override PHP 8.5 patch version (blank = latest)"
+                type: string
+                default: ""
 
 permissions:
-  contents: read
+    contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+    group: release-${{ github.ref }}
+    cancel-in-progress: false
 
 env:
-  CARGO_TERM_COLOR: always
+    CARGO_TERM_COLOR: always
 
 jobs:
-  # Fail fast (before 6 expensive builds) if the tag disagrees with Cargo.toml.
-  guard:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.v.outputs.version }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with: { persist-credentials: false }
-      - id: v
-        shell: bash
-        run: |
-          set -euo pipefail
-          CARGO_VER=$(awk -F'"' '/^\[package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
-          test -n "$CARGO_VER"
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            TAG_VER="${GITHUB_REF#refs/tags/v}"
-            [[ "$TAG_VER" == "$CARGO_VER" ]] || { echo "::error::tag v$TAG_VER != Cargo.toml version $CARGO_VER"; exit 1; }
-          fi
-          echo "version=$CARGO_VER" >> "$GITHUB_OUTPUT"
+    # Fail fast (before 6 expensive builds) if the tag disagrees with Cargo.toml.
+    guard:
+        runs-on: ubuntu-latest
+        outputs:
+            version: ${{ steps.v.outputs.version }}
+        steps:
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with: { persist-credentials: false }
+            - id: v
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  CARGO_VER=$(awk -F'"' '/^\[workspace\.package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+                  test -n "$CARGO_VER"
+                  if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+                    TAG_VER="${GITHUB_REF#refs/tags/v}"
+                    [[ "$TAG_VER" == "$CARGO_VER" ]] || { echo "::error::tag v$TAG_VER != Cargo.toml version $CARGO_VER"; exit 1; }
+                  fi
+                  echo "version=$CARGO_VER" >> "$GITHUB_OUTPUT"
 
-  build:
-    needs: guard
-    runs-on: ${{ matrix.runner }}
-    # Linux legs build inside rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the
-    # binaries and packages serve RHEL 9 as well as Ubuntu 22.04+/Debian 12.
-    # The image is pinned to its multi-arch manifest-list digest (amd64+arm64).
-    # Non-linux legs leave `container` unset (empty expression = no container).
-    container: ${{ matrix.container }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: linux-x86_64-php8.4,  runner: ubuntu-latest,    container: 'rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6', target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.4', provision: source-unix }
-          - { name: linux-x86_64-php8.5,  runner: ubuntu-latest,    container: 'rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6', target_os: linux,   arch: x86_64,  nfpm_arch: amd64, php_branch: '8.5', provision: source-unix }
-          - { name: linux-aarch64-php8.4, runner: ubuntu-24.04-arm, container: 'rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6', target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.4', provision: source-unix }
-          - { name: linux-aarch64-php8.5, runner: ubuntu-24.04-arm, container: 'rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6', target_os: linux,   arch: aarch64, nfpm_arch: arm64, php_branch: '8.5', provision: source-unix }
-          - { name: macos-aarch64-php8.4, runner: macos-14,         target_os: macos,   arch: aarch64, php_branch: '8.4', provision: source-unix }
-          - { name: macos-aarch64-php8.5, runner: macos-14,         target_os: macos,   arch: aarch64, php_branch: '8.5', provision: source-unix }
-    env:
-      PHP_PREFIX: ${{ github.workspace }}/.php-embed
-      VERSION: ${{ needs.guard.outputs.version }}
-      STEM: rapira-v${{ needs.guard.outputs.version }}-php${{ matrix.php_branch }}-${{ matrix.target_os }}-${{ matrix.arch }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with: { persist-credentials: false }
-
-      # Runs before the resolve step: the rocky container needs python3/curl.
-      # oniguruma-devel lives in the CRB repo.
-      - name: Install build deps (Linux container)
-        if: matrix.provision == 'source-unix' && runner.os == 'Linux'
-        run: |
-          dnf -y install dnf-plugins-core
-          dnf config-manager --set-enabled crb
-          dnf -y install \
-            gcc gcc-c++ make cmake git tar gzip xz findutils python3 \
-            pkgconf-pkg-config clang-devel llvm-devel \
-            openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel
-
-      - name: Resolve PHP patch version
-        id: php
-        shell: bash
+    build:
+        needs: guard
+        runs-on: ${{ matrix.runner }}
+        # Linux legs build inside rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the
+        # binaries and packages serve RHEL 9 as well as Ubuntu 22.04+/Debian 12.
+        # The image is pinned to its multi-arch manifest-list digest (amd64+arm64).
+        # Non-linux legs leave `container` unset (empty expression = no container).
+        container: ${{ matrix.container }}
+        permissions:
+            contents: read
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - {
+                          name: linux-x86_64-php8.4,
+                          runner: ubuntu-latest,
+                          container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
+                          target_os: linux,
+                          arch: x86_64,
+                          nfpm_arch: amd64,
+                          php_branch: "8.4",
+                          provision: source-unix,
+                      }
+                    - {
+                          name: linux-x86_64-php8.5,
+                          runner: ubuntu-latest,
+                          container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
+                          target_os: linux,
+                          arch: x86_64,
+                          nfpm_arch: amd64,
+                          php_branch: "8.5",
+                          provision: source-unix,
+                      }
+                    - {
+                          name: linux-aarch64-php8.4,
+                          runner: ubuntu-24.04-arm,
+                          container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
+                          target_os: linux,
+                          arch: aarch64,
+                          nfpm_arch: arm64,
+                          php_branch: "8.4",
+                          provision: source-unix,
+                      }
+                    - {
+                          name: linux-aarch64-php8.5,
+                          runner: ubuntu-24.04-arm,
+                          container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
+                          target_os: linux,
+                          arch: aarch64,
+                          nfpm_arch: arm64,
+                          php_branch: "8.5",
+                          provision: source-unix,
+                      }
+                    - {
+                          name: macos-aarch64-php8.4,
+                          runner: macos-14,
+                          target_os: macos,
+                          arch: aarch64,
+                          php_branch: "8.4",
+                          provision: source-unix,
+                      }
+                    - {
+                          name: macos-aarch64-php8.5,
+                          runner: macos-14,
+                          target_os: macos,
+                          arch: aarch64,
+                          php_branch: "8.5",
+                          provision: source-unix,
+                      }
         env:
-          PHP_84_OVERRIDE: ${{ inputs.php_84 }}
-          PHP_85_OVERRIDE: ${{ inputs.php_85 }}
-        run: |
-          set -euo pipefail
-          override=""
-          [ "${{ matrix.php_branch }}" = "8.4" ] && override="$PHP_84_OVERRIDE"
-          [ "${{ matrix.php_branch }}" = "8.5" ] && override="$PHP_85_OVERRIDE"
-          if [ -n "$override" ]; then
-            if [[ ! "$override" =~ ^8\.[45]\.[0-9]+$ ]] || [ "${override%.*}" != "${{ matrix.php_branch }}" ]; then
-              echo "::error::invalid PHP override '$override' for branch ${{ matrix.php_branch }}"; exit 1
-            fi
-            FULL="$override"
-            echo "overridden=true" >> "$GITHUB_OUTPUT"
-          else
-            FULL=$(curl -fsSL "https://www.php.net/releases/index.php?json&version=${{ matrix.php_branch }}" \
-                    | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
-            echo "overridden=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "full=$FULL" >> "$GITHUB_OUTPUT"
-          echo "PHP $FULL"
+            PHP_PREFIX: ${{ github.workspace }}/.php-embed
+            VERSION: ${{ needs.guard.outputs.version }}
+            STEM: rapira-v${{ needs.guard.outputs.version }}-php${{ matrix.php_branch }}-${{ matrix.target_os }}-${{ matrix.arch }}
+        steps:
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with: { persist-credentials: false }
 
-      - name: Install build deps (macOS)
-        if: matrix.provision == 'source-unix' && runner.os == 'macOS'
-        run: brew install pkg-config openssl@3 curl oniguruma libxml2 sqlite
+            # Runs before the resolve step: the rocky container needs python3/curl.
+            # oniguruma-devel lives in the CRB repo.
+            - name: Install build deps (Linux container)
+              if: matrix.provision == 'source-unix' && runner.os == 'Linux'
+              run: |
+                  dnf -y install dnf-plugins-core
+                  dnf config-manager --set-enabled crb
+                  dnf -y install \
+                    gcc gcc-c++ make cmake git tar gzip xz findutils python3 \
+                    pkgconf-pkg-config clang-devel llvm-devel \
+                    openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel
 
-      # Split restore/save (as master.yml): the PHP build survives later failures.
-      - name: Restore PHP embed runtime
-        id: phpcache
-        if: matrix.provision == 'source-unix'
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ env.PHP_PREFIX }}
-          key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v2
+            - name: Resolve PHP patch version
+              id: php
+              shell: bash
+              env:
+                  PHP_84_OVERRIDE: ${{ inputs.php_84 }}
+                  PHP_85_OVERRIDE: ${{ inputs.php_85 }}
+              run: |
+                  set -euo pipefail
+                  override=""
+                  [ "${{ matrix.php_branch }}" = "8.4" ] && override="$PHP_84_OVERRIDE"
+                  [ "${{ matrix.php_branch }}" = "8.5" ] && override="$PHP_85_OVERRIDE"
+                  if [ -n "$override" ]; then
+                    if [[ ! "$override" =~ ^8\.[45]\.[0-9]+$ ]] || [ "${override%.*}" != "${{ matrix.php_branch }}" ]; then
+                      echo "::error::invalid PHP override '$override' for branch ${{ matrix.php_branch }}"; exit 1
+                    fi
+                    FULL="$override"
+                    echo "overridden=true" >> "$GITHUB_OUTPUT"
+                  else
+                    FULL=$(curl -fsSL "https://www.php.net/releases/index.php?json&version=${{ matrix.php_branch }}" \
+                            | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
+                    echo "overridden=false" >> "$GITHUB_OUTPUT"
+                  fi
+                  echo "full=$FULL" >> "$GITHUB_OUTPUT"
+                  echo "PHP $FULL"
 
-      - name: Build PHP embed from release tarball (Unix)
-        if: matrix.provision == 'source-unix' && steps.phpcache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL "https://www.php.net/distributions/php-${{ steps.php.outputs.full }}.tar.gz" -o php.tar.gz
-          tar xf php.tar.gz && cd "php-${{ steps.php.outputs.full }}"
-          # PHP >=7.4 finds openssl/curl/libxml/onig/sqlite/zlib via pkg-config.
-          EXTRA=""
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-            # bare --with-iconv cannot locate libiconv on macOS; point it at the
-            # SDK like the Homebrew php formula does (--with-iconv=$SDK/usr links
-            # the ABI-stable system libiconv). Appended after the file flags, so
-            # the DIR form wins (autoconf last-wins).
-            EXTRA="--with-iconv=$(xcrun --show-sdk-path)/usr"
-          fi
-          ./configure --prefix="$PHP_PREFIX" $(tr '\n' ' ' < "$GITHUB_WORKSPACE/ci/php-configure-flags.txt") $EXTRA
-          make -j"$(getconf _NPROCESSORS_ONLN)"
-          make install
+            - name: Install build deps (macOS)
+              if: matrix.provision == 'source-unix' && runner.os == 'macOS'
+              run: brew install pkg-config openssl@3 curl oniguruma libxml2 sqlite
 
-      - name: Save PHP embed runtime
-        if: matrix.provision == 'source-unix' && steps.phpcache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ env.PHP_PREFIX }}
-          key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v2
+            # Split restore/save (as master.yml): the PHP build survives later failures.
+            - name: Restore PHP embed runtime
+              id: phpcache
+              if: matrix.provision == 'source-unix'
+              uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+              with:
+                  path: ${{ env.PHP_PREFIX }}
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v2
 
-      - name: Expose PHP + rpath (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config" >> "$GITHUB_ENV"
-          echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
-          # single quotes keep $ORIGIN literal; GitHub injects env values verbatim
-          echo 'RUSTFLAGS=-C link-arg=-Wl,-rpath,$ORIGIN/../lib/rapira -L native='"$PHP_PREFIX/lib" >> "$GITHUB_ENV"
+            - name: Build PHP embed from release tarball (Unix)
+              if: matrix.provision == 'source-unix' && steps.phpcache.outputs.cache-hit != 'true'
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  curl -fsSL "https://www.php.net/distributions/php-${{ steps.php.outputs.full }}.tar.gz" -o php.tar.gz
+                  tar xf php.tar.gz && cd "php-${{ steps.php.outputs.full }}"
+                  EXTRA=""
+                  if [ "$RUNNER_OS" = "macOS" ]; then
+                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                    EXTRA="--with-iconv=$(xcrun --show-sdk-path)/usr"
+                  fi
+                  ./configure --prefix="$PHP_PREFIX" $(tr '\n' ' ' < "$GITHUB_WORKSPACE/ci/php-configure-flags.txt") $EXTRA
+                  make -j"$(getconf _NPROCESSORS_ONLN)"
+                  make install
 
-      - name: Expose PHP + rpath (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config" >> "$GITHUB_ENV"
-          echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
-          echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,@loader_path/../lib/rapira -L native=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
+            - name: Save PHP embed runtime
+              if: matrix.provision == 'source-unix' && steps.phpcache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+              with:
+                  path: ${{ env.PHP_PREFIX }}
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v2
 
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with: { cache-on-failure: true }
+            - name: Expose PHP + rpath (Linux)
+              if: runner.os == 'Linux'
+              run: |
+                  echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config" >> "$GITHUB_ENV"
+                  echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
+                  echo 'RUSTFLAGS=-C link-arg=-Wl,-rpath,$ORIGIN/../lib/rapira -L native='"$PHP_PREFIX/lib" >> "$GITHUB_ENV"
 
-      - name: Build rapira
-        run: cargo build --release --locked --bin rapira
+            - name: Expose PHP + rpath (macOS)
+              if: runner.os == 'macOS'
+              run: |
+                  echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config" >> "$GITHUB_ENV"
+                  echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
+                  echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+                  echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,@loader_path/../lib/rapira -L native=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
 
-      - name: Assemble layout
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT="dist/$STEM"; mkdir -p "$ROOT/bin" "$ROOT/lib/rapira" "$ROOT/share/php"
-          cp target/release/rapira "$ROOT/bin/rapira"
-          cp README.md LICENSE "$ROOT/"
-          echo "${{ steps.php.outputs.full }}" > "$ROOT/share/php/PHP_VERSION.txt"
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            LP=$(find "$PHP_PREFIX" -name 'libphp*.so' | head -1)
-            cp "$LP" "$ROOT/lib/rapira/libphp.so"
-          else
-            # macOS: bundle libphp.dylib + its entire non-system dylib closure,
-            # rewrite install names to @rpath, ad-hoc re-sign (mutation kills the signature).
-            BIN="$ROOT/bin/rapira"; LIB="$ROOT/lib/rapira"
-            cp "$PHP_PREFIX/lib/libphp.dylib" "$LIB/"
-            bundle() {
-              otool -L "$1" | awk 'NR>1{print $1}' | while read -r dep; do
-                case "$dep" in /usr/lib/*|/System/*|@*) continue;; esac
-                base=$(basename "$dep")
-                if [ ! -f "$LIB/$base" ]; then
-                  cp "$dep" "$LIB/$base"; chmod u+w "$LIB/$base"
-                  install_name_tool -id "@rpath/$base" "$LIB/$base"
-                  bundle "$LIB/$base"
-                fi
-                install_name_tool -change "$dep" "@rpath/$base" "$1"
-              done
-            }
-            install_name_tool -id @rpath/libphp.dylib "$LIB/libphp.dylib"
-            bundle "$LIB/libphp.dylib"
-            bundle "$BIN"
-            for f in "$LIB"/*.dylib; do install_name_tool -add_rpath @loader_path "$f" 2>/dev/null || true; done
-            codesign --force -s - "$LIB"/*.dylib
-            codesign --force -s - "$BIN"
-            codesign -v "$BIN"
-          fi
+            - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+              with: { cache-on-failure: true }
 
-      # Hard gate: rapira hard-links libphp, so `--help` forces the loader to
-      # resolve the whole closure from the archive layout alone.
-      - name: Smoke test
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT="dist/$STEM"; BIN="$ROOT/bin/rapira"
-          unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            ldd "$BIN"
-            ldd "$BIN" | grep -qi 'not found' && { echo "::error::unresolved library"; exit 1; } || true
-          else
-            otool -L "$BIN" "$ROOT/lib/rapira/"*.dylib
-            if otool -L "$BIN" "$ROOT/lib/rapira/"*.dylib | grep -E '/opt/homebrew|/usr/local'; then
-              echo "::error::un-bundled brew path leaked into the closure"; exit 1
-            fi
-            codesign -v "$BIN"
-          fi
-          "$BIN" --help
-          # End-to-end gate: the fork master must boot, serve a request, and
-          # drain to exit 0 on SIGQUIT. Poll loops keep it portable (GNU
-          # timeout is absent on macOS).
-          # --classic: the script is re-included per request, so the gate needs no
-          # worker-loop API. It exercises the same fork master, listeners and drain.
-          cat > "$RUNNER_TEMP/smoke.php" <<'PHP'
-          <?php
-          echo 'ok:' . getmypid();
-          PHP
-          PORT=18923
-          "$BIN" serve --classic --listen "127.0.0.1:$PORT" --processes 2 "$RUNNER_TEMP/smoke.php" &
-          MASTER=$!
-          served=""
-          for _ in $(seq 1 60); do
-            if curl -fsS "http://127.0.0.1:$PORT/" 2>/dev/null | grep -q '^ok:'; then
-              served=1; break
-            fi
-            kill -0 "$MASTER" 2>/dev/null || break
-            sleep 0.5
-          done
-          if [ -z "$served" ]; then
-            echo "::error::release binary never served a request"
-            kill -9 "$MASTER" 2>/dev/null || true
-            exit 1
-          fi
-          kill -QUIT "$MASTER"
-          if wait "$MASTER"; then
-            echo "served and drained cleanly"
-          else
-            echo "::error::master exited non-zero after SIGQUIT"; exit 1
-          fi
+            - name: Build rapira
+              run: cargo build --release --locked --bin rapira
 
-      - name: Archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          tar czf "$STEM.tar.gz" "$STEM"
+            - name: Assemble layout
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  ROOT="dist/$STEM"; mkdir -p "$ROOT/bin" "$ROOT/lib/rapira" "$ROOT/share/php"
+                  cp target/release/rapira "$ROOT/bin/rapira"
+                  cp README.md LICENSE "$ROOT/"
+                  echo "${{ steps.php.outputs.full }}" > "$ROOT/share/php/PHP_VERSION.txt"
+                  if [ "$RUNNER_OS" = "Linux" ]; then
+                    LP=$(find "$PHP_PREFIX" -name 'libphp*.so' | head -1)
+                    cp "$LP" "$ROOT/lib/rapira/libphp.so"
+                  else
+                    BIN="$ROOT/bin/rapira"; LIB="$ROOT/lib/rapira"
+                    cp "$PHP_PREFIX/lib/libphp.dylib" "$LIB/"
+                    bundle() {
+                      otool -L "$1" | awk 'NR>1{print $1}' | while read -r dep; do
+                        case "$dep" in /usr/lib/*|/System/*|@*) continue;; esac
+                        base=$(basename "$dep")
+                        if [ ! -f "$LIB/$base" ]; then
+                          cp "$dep" "$LIB/$base"; chmod u+w "$LIB/$base"
+                          install_name_tool -id "@rpath/$base" "$LIB/$base"
+                          bundle "$LIB/$base"
+                        fi
+                        install_name_tool -change "$dep" "@rpath/$base" "$1"
+                      done
+                    }
+                    install_name_tool -id @rpath/libphp.dylib "$LIB/libphp.dylib"
+                    bundle "$LIB/libphp.dylib"
+                    bundle "$BIN"
+                    for f in "$LIB"/*.dylib; do install_name_tool -add_rpath @loader_path "$f" 2>/dev/null || true; done
+                    codesign --force -s - "$LIB"/*.dylib
+                    codesign --force -s - "$BIN"
+                    codesign -v "$BIN"
+                  fi
 
-      - name: Stage pkgroot for nFPM (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          PR="dist/pkgroot-${{ matrix.nfpm_arch }}-php${{ matrix.php_branch }}"
-          mkdir -p "$PR/usr/bin" "$PR/usr/lib/rapira"
-          cp "dist/$STEM/bin/rapira"           "$PR/usr/bin/rapira"
-          cp "dist/$STEM/lib/rapira/libphp.so" "$PR/usr/lib/rapira/libphp.so"
+            - name: Archive
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  cd dist
+                  tar czf "$STEM.tar.gz" "$STEM"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: art-${{ matrix.name }}
-          path: |
-            dist/*.tar.gz
-            dist/pkgroot-*
-          if-no-files-found: error
-          retention-days: 7
+            - name: Stage pkgroot for nFPM (Linux)
+              if: runner.os == 'Linux'
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  PR="dist/pkgroot-${{ matrix.nfpm_arch }}-php${{ matrix.php_branch }}"
+                  mkdir -p "$PR/usr/bin" "$PR/usr/lib/rapira"
+                  cp "dist/$STEM/bin/rapira"           "$PR/usr/bin/rapira"
+                  cp "dist/$STEM/lib/rapira/libphp.so" "$PR/usr/lib/rapira/libphp.so"
 
-  release:
-    needs: [guard, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      VERSION: ${{ needs.guard.outputs.version }}
-      NFPM_VERSION: "2.47.0"
-      NFPM_SHA256: "3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97"
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with: { persist-credentials: false }
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with: { path: incoming, merge-multiple: true }
+            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: art-${{ matrix.name }}
+                  path: |
+                      dist/*.tar.gz
+                      dist/pkgroot-*
+                  if-no-files-found: error
+                  retention-days: 7
 
-      - name: Build deb/rpm + checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          cp incoming/*.tar.gz dist/
-          cp -r incoming/pkgroot-* dist/
-          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
-          echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c -
-          sudo dpkg -i /tmp/nfpm.deb
-          for arch in amd64 arm64; do
-            for minor in 8.4 8.5; do
-              test -d "dist/pkgroot-${arch}-php${minor}" || { echo "::error::missing pkgroot ${arch}/php${minor}"; exit 1; }
-              # nfpm does not env-expand contents.src — stage each variant at the fixed path
-              rm -rf dist/pkgroot-current
-              cp -r "dist/pkgroot-${arch}-php${minor}" dist/pkgroot-current
-              NFPM_ARCH=$arch PHP_MINOR=$minor VERSION="$VERSION" nfpm pkg -p deb -f nfpm.yaml -t dist/
-              NFPM_ARCH=$arch PHP_MINOR=$minor VERSION="$VERSION" nfpm pkg -p rpm -f nfpm.yaml -t dist/
-            done
-          done
-          rm -rf dist/pkgroot-*
-          ( cd dist && sha256sum rapira-* > "rapira-v${VERSION}-SHA256SUMS.txt" )
-          ls -l dist
+    release:
+        needs: [guard, build]
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        env:
+            VERSION: ${{ needs.guard.outputs.version }}
+            NFPM_VERSION: "2.47.0"
+            NFPM_SHA256: "3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97"
+        steps:
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with: { persist-credentials: false }
+            - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with: { path: incoming, merge-multiple: true }
 
-      # Install every amd64 package in a real container: catches wrong dependency
-      # names and broken RUNPATH before anything is published. (arm64 skipped: no qemu.)
-      - name: Validate packages (amd64)
-        shell: bash
-        run: |
-          set -euo pipefail
-          for deb in dist/*_amd64.deb; do
-            docker run --rm -v "$PWD/dist:/dist:ro" debian:12 \
-              bash -ec "apt-get update -q && apt-get install -yq /dist/$(basename "$deb") && rapira --help"
-          done
-          for rpm in dist/*.x86_64.rpm; do
-            docker run --rm -v "$PWD/dist:/dist:ro" rockylinux:9 \
-              bash -ec "dnf install -yq /dist/$(basename "$rpm") && rapira --help"
-          done
+            - name: Build deb/rpm + checksums
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  mkdir -p dist
+                  cp incoming/*.tar.gz dist/
+                  cp -r incoming/pkgroot-* dist/
+                  curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
+                  echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c -
+                  sudo dpkg -i /tmp/nfpm.deb
+                  for arch in amd64 arm64; do
+                    for minor in 8.4 8.5; do
+                      test -d "dist/pkgroot-${arch}-php${minor}" || { echo "::error::missing pkgroot ${arch}/php${minor}"; exit 1; }
+                      # nfpm does not env-expand contents.src — stage each variant at the fixed path
+                      rm -rf dist/pkgroot-current
+                      cp -r "dist/pkgroot-${arch}-php${minor}" dist/pkgroot-current
+                      NFPM_ARCH=$arch PHP_MINOR=$minor VERSION="$VERSION" nfpm pkg -p deb -f nfpm.yaml -t dist/
+                      NFPM_ARCH=$arch PHP_MINOR=$minor VERSION="$VERSION" nfpm pkg -p rpm -f nfpm.yaml -t dist/
+                    done
+                  done
+                  rm -rf dist/pkgroot-*
+                  ( cd dist && sha256sum rapira-* > "rapira-v${VERSION}-SHA256SUMS.txt" )
+                  ls -l dist
 
-      - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION) }}
-          draft: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            dist/*.tar.gz
-            dist/*.deb
-            dist/*.rpm
-            dist/*SHA256SUMS.txt
+            # Install every amd64 package in a real container: catches wrong dependency
+            # names and broken RUNPATH before anything is published. (arm64 skipped: no qemu.)
+            - name: Validate packages (amd64)
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  for deb in dist/*_amd64.deb; do
+                    docker run --rm -v "$PWD/dist:/dist:ro" debian:12 \
+                      bash -ec "apt-get update -q && apt-get install -yq /dist/$(basename "$deb") && rapira --help"
+                  done
+                  for rpm in dist/*.x86_64.rpm; do
+                    docker run --rm -v "$PWD/dist:/dist:ro" rockylinux:9 \
+                      bash -ec "dnf install -yq /dist/$(basename "$rpm") && rapira --help"
+                  done
+
+            - name: Publish GitHub release
+              if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+              uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+              with:
+                  tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION) }}
+                  draft: ${{ !startsWith(github.ref, 'refs/tags/') }}
+                  prerelease: ${{ contains(github.ref_name, '-') }}
+                  generate_release_notes: true
+                  fail_on_unmatched_files: true
+                  files: |
+                      dist/*.tar.gz
+                      dist/*.deb
+                      dist/*.rpm
+                      dist/*SHA256SUMS.txt

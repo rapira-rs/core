@@ -21,20 +21,12 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ env.PHP_VERSION }}
-          # this job measures Rust coverage; a PHP coverage driver adds nothing and, left unset,
-          # overrides zend_error_cb and zend_execute_ex in the embed SAPI
           coverage: none
-          # keep in sync with ci.yml and ci/php-configure-flags.txt — an extension missing here
-          # makes its php_ext test skip rather than fail, so coverage silently stops measuring it
           extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, opcache, openssl, pdo_sqlite, phar, posix, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
           phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning
 
-      # `coverage: none` above disables it; assert, so a driver leaking back in fails here
-      # instead of surfacing as diagnostics that never went through php_error_cb. This reads the
-      # CLI SAPI: a proxy, since drivers are enabled per-SAPI and no tool reports the embed
-      # conf.d. Both are cleared by the same phpdismod, so a leak shows up here too.
       - name: Verify no coverage driver in the PHP build
         run: |
           mods=$(php -m); echo "$mods"
@@ -46,9 +38,6 @@ jobs:
       - name: Build deps for bindgen/cc
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
 
-      # setup-php's cached NTS tarball ships the embed SAPI as a versioned
-      # /usr/lib/libphpX.Y.so; `-lphp` needs the plain name, so pin the exact
-      # version and symlink it into a private dir to link against.
       - name: Expose the PHP embed lib
         run: |
           LIBPHP=/usr/lib/libphp${PHP_VERSION}.so
@@ -63,7 +52,6 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
         with:
-          # a failing test run would otherwise discard the instrumented deps
           cache-on-failure: true
 
       - name: Generate coverage (lcov)

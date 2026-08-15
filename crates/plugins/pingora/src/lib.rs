@@ -27,11 +27,6 @@ use pingora::{Error, ErrorType, Result as PingoraResult};
 use tokio::runtime::{self, Builder};
 use tokio::sync::{oneshot, watch};
 
-/// In-flight requests get this long to finish after the accept loop stops —
-/// start_service only joins the accept loops, never the per-connection tasks, and
-/// dropping the runtime aborts them mid-response. Kept under the host's 30s grace.
-const DRAIN_GRACE: Duration = Duration::from_secs(25);
-
 /// Where the HTTP front binds. Structurally mirrors rapira's config-side listen type,
 /// but owned here so this extension crate never depends on core's config crate.
 #[derive(Clone, Debug)]
@@ -61,6 +56,11 @@ pub struct Config {
     /// Per-write bound on the response path: body writes via pingora's
     /// write_timeout, head/terminator writes via explicit timeouts.
     pub write_timeout: Duration,
+    /// How long in-flight requests get to finish after the accept loop stops.
+    /// `start_service` joins the accept loops only, never the per-connection
+    /// tasks, and dropping the runtime aborts those mid-response. Must expire
+    /// before the host escalates its stop, or the drain is cut short anyway.
+    pub drain_grace: Duration,
 }
 
 /// What to do with a request field name that maps onto a CGI variable another name
@@ -89,6 +89,7 @@ impl Default for Config {
             unsafe_field_names: UnsafeFieldNames::Drop,
             superglobals: true,
             write_timeout: Duration::from_secs(30),
+            drain_grace: Duration::from_secs(25),
         }
     }
 }
@@ -283,6 +284,7 @@ async fn serve(
     let conf: Arc<ServerConf> = Arc::new(ServerConf::default());
     let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let listen = config.listen.clone();
+    let drain_grace = config.drain_grace;
 
     // ONE string feeds BOTH the endpoint and the Fds key: pingora adopts only on
     // an exact match (a mismatch silently rebinds — for unix sockets it would
@@ -336,7 +338,7 @@ async fn serve(
     service.start_service(fds, shutdown, 1).await;
     // start_service only joined the accept loops; connection tasks are detached and die
     // with the runtime. Wait for the requests still in flight so their responses go out.
-    let deadline = tokio::time::Instant::now() + DRAIN_GRACE;
+    let deadline = tokio::time::Instant::now() + drain_grace;
     while inflight.load(Ordering::Acquire) > 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -346,7 +348,7 @@ async fn serve(
     let stranded = inflight.load(Ordering::Acquire);
     if stranded > 0 {
         return Err(anyhow!(
-            "http drain timed out after {DRAIN_GRACE:?} with {stranded} request(s) in flight; \
+            "http drain timed out after {drain_grace:?} with {stranded} request(s) in flight; \
              their responses were cut short"
         ));
     }

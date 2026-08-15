@@ -163,6 +163,22 @@ pub struct SupervisorSettings {
     pub pidfile: Option<PathBuf>,
 }
 
+impl SupervisorSettings {
+    /// How long a worker may drain in-flight work before the master escalates.
+    /// The master sends QUIT at t=0 and SIGTERM at `process_control_timeout`, and
+    /// the fork bracket deliberately leaves SIGTERM at SIG_DFL in the child so
+    /// that escalation is a fast kill — a drain still running at the deadline is
+    /// therefore cut short, mid-response. Subtracting the margin gives the worker
+    /// room to finish, or to report what it stranded, before that happens.
+    pub fn drain_grace(&self) -> Duration {
+        /// Headroom between the end of a drain and the master's escalation.
+        const MARGIN: Duration = Duration::from_secs(5);
+        self.process_control_timeout
+            .saturating_sub(MARGIN)
+            .max(Duration::from_secs(1))
+    }
+}
+
 /// Verbosity of a log target.
 // No deny_unknown_fields: it governs struct variants, so it is inert on a unit-only enum.
 // An unrecognised value is already an error because serde has no variant to match it.
@@ -684,6 +700,23 @@ fn config_relative(config_dir: Option<&Path>, value: &str) -> std::io::Result<Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_grace_leaves_room_before_the_master_escalates() {
+        let grace = |secs| {
+            SupervisorSettings {
+                process_control_timeout: Duration::from_secs(secs),
+                pidfile: None,
+            }
+            .drain_grace()
+        };
+        // The default keeps the 25s-under-30s relationship the front used to hardcode.
+        assert_eq!(grace(30), Duration::from_secs(25));
+        assert_eq!(grace(60), Duration::from_secs(55));
+        // A budget at or below the margin still leaves a usable floor.
+        assert_eq!(grace(5), Duration::from_secs(1));
+        assert_eq!(grace(1), Duration::from_secs(1));
+    }
 
     #[test]
     fn listen_parses_all_forms() {

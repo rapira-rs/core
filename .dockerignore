@@ -1,0 +1,13 @@
+# Whitelist: anything not listed here stays out of the build context, so a file
+# that exists on one machine only can never change the build. .cargo/config.toml
+# is the concrete case — it pins PHP_CONFIG to a local path, and cargo applies
+# non-forced [env] entries whenever the variable is unset.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!src
+!crates
+
+# Re-excluded after the whitelist: build output lives inside the trees above.
+**/target

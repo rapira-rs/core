@@ -51,8 +51,39 @@ pub struct Rapira {
     module: Option<PhpModule>,
 }
 
+/// Split a `PHP_VERSION_ID` (major * 10000 + minor * 100 + patch) into its
+/// major and minor. Patch releases keep the ABI, so only these two matter.
+/// https://www.php.net/manual/en/function.phpversion.php
+fn php_series(id: u32) -> (u32, u32) {
+    (id / 10_000, (id / 100) % 100)
+}
+
+/// Refuse to run against a libphp from a different PHP minor. rapira binds Zend
+/// structures through bindgen at compile time and selects parts of the SAPI
+/// struct with a cfg on the PHP version, so a swapped library is not a load
+/// error — it is `sapi_startup` handed a differently shaped struct. Both sides
+/// report a compile-time constant, so this is readable before any startup: ours
+/// comes from the headers, the library's from `php_version_id`.
+fn check_linked_php() -> anyhow::Result<()> {
+    // SAFETY: both are ZEND_ATTRIBUTE_CONST accessors over a compile-time
+    // constant; neither touches engine state, so calling them pre-startup is fine.
+    let (headers, linked) = unsafe { (rapira_headers_php_version_id(), php_version_id()) };
+    let (want, got) = (php_series(headers), php_series(linked));
+    anyhow::ensure!(
+        want == got,
+        "linked libphp is PHP {}.{}, but this rapira was built against PHP {}.{}. \
+         Use a libphp from the same PHP minor as the build.",
+        got.0,
+        got.1,
+        want.0,
+        want.1
+    );
+    Ok(())
+}
+
 impl Rapira {
     pub fn boot_master() -> anyhow::Result<PhpModule> {
+        check_linked_php()?;
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
             rapira_process_init();
@@ -271,4 +302,19 @@ pub(crate) fn pending_depth() -> usize {
         slot.as_ref()
             .map_or(0, |job_r| job_r.pending.load(Ordering::Relaxed))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::php_series;
+
+    #[test]
+    fn php_series_drops_the_patch() {
+        // PHP_VERSION_ID packs major/minor/patch as M*10000 + m*100 + p.
+        assert_eq!(php_series(80_508), (8, 5));
+        assert_eq!(php_series(80_426), (8, 4));
+        // patch releases share a series, adjacent minors do not
+        assert_eq!(php_series(80_500), php_series(80_599));
+        assert_ne!(php_series(80_400), php_series(80_500));
+    }
 }

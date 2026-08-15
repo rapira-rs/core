@@ -115,6 +115,11 @@ impl ExtensionRuntime {
         );
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
+            // One thread: this runtime only drives `drive`'s shutdown timeout, and
+            // extensions bring their own (the HTTP front runs on its own thread with
+            // its own runtime). The default sizes to the CPU count, in every worker
+            // process, so the pool multiplies it.
+            .worker_threads(1)
             .enable_time() // the shutdown timeout in `drive`; extensions own their own IO
             .thread_name("rapira-ext")
             .build()

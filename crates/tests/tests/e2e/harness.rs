@@ -113,19 +113,49 @@ fn rapira_bin() -> PathBuf {
 /// that follows. A misplaced key is a boot error that surfaces here as the
 /// generic "never accepted a connection" panic.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
-    spawn_with_extras(fixture, processes, "", extra_toml, Some("info"))
+    spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), None)
 }
 
 /// [`spawn_with_config`] for keys that belong inside the `[http]` table, which the
 /// trailing `extra_toml` cannot reach without redeclaring the table.
 pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
-    spawn_with_extras(fixture, processes, http_extra, "", Some("info"))
+    spawn_with_extras(fixture, processes, http_extra, "", Some("info"), None)
 }
 
 /// [`spawn_with_config`] without the pinned `RUST_LOG`, so the `[log]` section
 /// owns the filter — for tests asserting config-driven filtering.
 pub fn spawn_without_rust_log(fixture: &str, processes: usize, extra_toml: &str) -> Server {
-    spawn_with_extras(fixture, processes, "", extra_toml, None)
+    spawn_with_extras(fixture, processes, "", extra_toml, None, None)
+}
+
+/// Working-directory php.ini setup. Only the ini tests pass one; every other
+/// spawner leaves the child with the test process's cwd and no PHPRC.
+pub struct CwdIni<'a> {
+    /// Written to `php.ini` in the directory the child runs from.
+    pub contents: &'a str,
+    /// Also point PHPRC at that directory, making the file one PHP is expected
+    /// to read — the control for the cwd case.
+    pub via_phprc: bool,
+}
+
+/// Spawn with a `php.ini` planted in the child's working directory, to pin down
+/// that the SAPI does not read ini files from the cwd.
+pub fn spawn_in_cwd(fixture: &str, processes: usize, php_ini: &str) -> Server {
+    let ini = CwdIni {
+        contents: php_ini,
+        via_phprc: false,
+    };
+    spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
+}
+
+/// [`spawn_in_cwd`] with PHPRC pointing at the same directory: the control
+/// showing the very same file does apply through a supported path.
+pub fn spawn_in_cwd_with_phprc(fixture: &str, processes: usize, php_ini: &str) -> Server {
+    let ini = CwdIni {
+        contents: php_ini,
+        via_phprc: true,
+    };
+    spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
 }
 
 fn spawn_with_extras(
@@ -134,6 +164,7 @@ fn spawn_with_extras(
     http_extra: &str,
     extra_toml: &str,
     rust_log: Option<&str>,
+    cwd_ini: Option<CwdIni<'_>>,
 ) -> Server {
     let dir = scratch_dir();
     // `fixture` is grouped by owning test module (e.g. "lifecycle/echo-worker.php"),
@@ -144,6 +175,9 @@ fn spawn_with_extras(
     std::fs::copy(fixture_path(fixture), dir.join(name))
         .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
     let entrypoint = name.to_str().expect("fixture name is utf-8");
+    if let Some(ini) = &cwd_ini {
+        std::fs::write(dir.join("php.ini"), ini.contents).expect("write php.ini");
+    }
     let mut last_log = String::new();
     for _ in 0..3 {
         let port = free_port();
@@ -156,6 +190,16 @@ fn spawn_with_extras(
         let log = File::create(dir.join("server.log")).expect("create server.log");
         let mut cmd = Command::new(rapira_bin());
         cmd.args(["serve", "--config"]).arg(dir.join("rapira.toml"));
+        if let Some(ini) = &cwd_ini {
+            cmd.current_dir(&dir);
+            if ini.via_phprc {
+                cmd.env("PHPRC", &dir);
+            } else {
+                // The developer's shell may point PHPRC somewhere, which would
+                // mask the cwd behaviour under test.
+                cmd.env_remove("PHPRC");
+            }
+        }
         match rust_log {
             // Pinned by default so worker/scaling activity lands in the failure
             // diagnostics regardless of the config under test.

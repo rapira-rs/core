@@ -24,7 +24,6 @@ jobs:
             - uses: shivammathur/setup-php@v2
               with:
                   php-version: "8.5"
-                  # left unset, the cached PHP tarball keeps its coverage driver enabled
                   coverage: none
               env:
                   phpts: nts
@@ -44,14 +43,10 @@ jobs:
               with: { components: clippy }
             - uses: Swatinem/rust-cache@v2
               with:
-                  # this job exists to fail on -D warnings; keep the deps cache when it does
                   cache-on-failure: true
             - run: cargo clippy --workspace --all-targets -- -D warnings
-            # --all-targets skips the feature-gated e2e target; lint it explicitly.
             - run: cargo clippy -p tests --features e2e --tests -- -D warnings
 
-            # The pre-fork master must never gain an async runtime: it forks, and a
-            # live tokio runtime cannot be safely carried across fork().
             - name: Master stays tokio-free
               run: |
                   deps=$(cargo tree -p rapira_master --prefix none)

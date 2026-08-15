@@ -107,6 +107,12 @@ extern zend_class_entry *rapira_ce_http_form_field;
 extern zend_class_entry *rapira_ce_http_uploaded_file;
 extern zend_class_entry *rapira_ce_http_request;
 
+// PHP_VERSION_ID as it was in the headers this binary compiled against. The
+// linked libphp reports its own through php_version_id(), so comparing the two
+// detects a swapped-out library. Both are compile-time constants, readable
+// before any startup has run.
+unsigned int rapira_headers_php_version_id(void);
+
 void rapira_receive_untimed(void);
 void rapira_receive_timed(void);
 

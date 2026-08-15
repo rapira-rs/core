@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use php_sys::{Mode, Rapira, WorkerHooks};
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
@@ -62,6 +63,7 @@ pub fn worker_body(
     script: PathBuf,
     max_requests: u64,
     mut uploads: rapira_runtime::multipart::Limits,
+    grace: Duration,
 ) -> i32 {
     // The engine heap and execution timer were set up by the master's MINIT;
     // the child must re-key/re-arm them before any PHP runs.
@@ -131,7 +133,7 @@ pub fn worker_body(
         script,
         rapira_runtime::RuntimeOptions {
             uploads: Arc::new(uploads),
-            ..rapira_runtime::RuntimeOptions::default()
+            grace,
         },
     );
     let _ = stopper.set(running.stopper());
