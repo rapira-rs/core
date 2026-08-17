@@ -91,10 +91,6 @@ impl ExtensionRuntime {
         Ok(())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.exts.is_empty()
-    }
-
     /// Spawn every extension on a shared runtime; one `Php` (the single entry script) is
     /// cloned to each. The returned guard drives them to completion / shutdown.
     pub fn run(self, rapira: RapiraHandle, script: PathBuf) -> Running {
@@ -109,10 +105,7 @@ impl ExtensionRuntime {
         opts: RuntimeOptions,
     ) -> Running {
         let grace = opts.grace;
-        let php = Php::new(
-            Arc::new(RapiraBackend::new(rapira, script.clone(), opts)),
-            script,
-        );
+        let php = Php::new(Arc::new(RapiraBackend::new(rapira, script, opts)));
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
             // One thread: this runtime only drives `drive`'s shutdown timeout, and

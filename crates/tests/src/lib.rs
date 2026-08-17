@@ -315,7 +315,7 @@ pub fn app_records(script: &str) -> Vec<AppRecord> {
     captured().clear(); // drop anything captured by earlier tests
 
     let r = Rapira::start(Mode::Classic).expect("classic boot");
-    let h = r.handle().expect("handle");
+    let h = r.handle();
     let (status, body) = drain(h.handle_blocking(req("/", script)).expect("dispatch"));
     drop(h);
     r.shutdown();

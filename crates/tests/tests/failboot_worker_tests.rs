@@ -19,7 +19,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
         let r = Rapira::start(Mode::Dispatcher(fixture(
             "failboot_worker_tests/failboot-worker.php",
         )))?;
-        let h = r.handle()?;
+        let h = r.handle();
         let rx = h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php"))?;
         drop(h); // last non-Rapira intake sender - lets the channel close on drop(r)
         let (status, body) = drain(rx);
@@ -49,7 +49,7 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
         let r = Rapira::start(Mode::Dispatcher(fixture(
             "failboot_worker_tests/failboot-worker.php",
         )))?;
-        let h = r.handle()?;
+        let h = r.handle();
         let mut statuses = Vec::new();
         for _ in 0..5 {
             let (s, _) =

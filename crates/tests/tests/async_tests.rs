@@ -5,7 +5,7 @@ use tests::{drain_async, fixture, php_lock_async, req};
 async fn hello_world_worker() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
     let r = Rapira::start(Mode::Worker(fixture("shared/worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let (_, body1) = drain_async(h.handle(req("/?x=1", "shared/worker.php")).await?).await;
     assert!(
         body1.contains("Hello from worker, anonymous!"),
@@ -21,7 +21,7 @@ async fn worker_survives_exit() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
     let r = Rapira::start(Mode::Worker(fixture("shared/bailout-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let (s1, b1) = drain_async(
         h.handle(req("/?boom=0", "shared/bailout-worker.php"))
             .await?,
@@ -70,7 +70,7 @@ async fn many_producers_test() -> anyhow::Result<()> {
 
     let producers: Vec<_> = (0..24)
         .map(|t| {
-            let h: php_sys::RapiraHandle = r.handle().unwrap();
+            let h: php_sys::RapiraHandle = r.handle();
             tokio::spawn(async move {
                 for i in 0..256 {
                     let name: String = format!("t{t}-r{i}");

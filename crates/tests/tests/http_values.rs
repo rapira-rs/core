@@ -10,7 +10,7 @@ use tests::{drain, php_lock, req};
 fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle()?;
+    let h = r.handle();
     let (status, body) = drain(h.handle_blocking(req("/", "http_values/construct.php"))?);
     drop(h);
     r.shutdown();

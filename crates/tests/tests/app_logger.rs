@@ -174,7 +174,7 @@ fn log_preserves_exit_from_a_serializer() {
 
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic).expect("classic boot");
-    let h = r.handle().expect("handle");
+    let h = r.handle();
     let (status, body) = drain(
         h.handle_blocking(req("/", "app_logger/app-logger-exit-in-serializer.php"))
             .expect("dispatch"),

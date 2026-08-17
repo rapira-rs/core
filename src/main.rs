@@ -220,14 +220,10 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         max_part_headers: uploads.max_part_headers,
     };
 
-    // Extensions are compiled in; register the HTTP front (and any others) here, each
-    // with its config. With none registered there is nothing to serve, so exit before
-    // booting PHP.
+    // Extensions are compiled in; register the HTTP front (and any others)
+    // here, each with its config.
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
     host.register::<HttpServer>(http_cfg)?;
-    if host.is_empty() {
-        return Ok(());
-    }
 
     // Master-side pre-fork binds: every worker inherits these fds; the master
     // holds them for its whole life so respawned generations re-inherit.

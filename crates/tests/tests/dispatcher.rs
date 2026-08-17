@@ -12,7 +12,7 @@ use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle()?;
+    let h = r.handle();
     let (status, body) =
         drain(h.handle_blocking(req("/", "dispatcher/not-in-dispatcher-mode.php"))?);
     drop(h);
@@ -71,7 +71,7 @@ fn worker_singleton() -> anyhow::Result<()> {
 fn host_created_only() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle()?;
+    let h = r.handle();
     let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/host-created-only.php"))?);
     drop(h);
     r.shutdown();

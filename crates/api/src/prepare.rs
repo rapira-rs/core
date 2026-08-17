@@ -98,11 +98,6 @@ impl PrepareCtx {
         }
     }
 
-    /// Every address bound so far (boot log / diagnostics).
-    pub fn bound(&self) -> &[ListenAddr] {
-        &self.bound
-    }
-
     /// Raw fds of every listener bound so far, for the master's ondemand poll
     /// set. Backed by dups owned by this context, so they stay valid for the
     /// context's lifetime even if an extension drops its `PreparedListener`.

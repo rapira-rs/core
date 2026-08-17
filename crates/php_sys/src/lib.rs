@@ -26,7 +26,7 @@ pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira};
-pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};
+pub use types::{Frame, Mode, Request, ResponseHead};
 
 // Zend SUCCESS/FAILURE differ across php-src versions, so they are hardcoded here rather
 // than bound from the headers.

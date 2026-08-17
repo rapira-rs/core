@@ -7,7 +7,7 @@
 //! [`Extension::shutdown`].
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -212,23 +212,14 @@ fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Ve
 #[derive(Clone)]
 pub struct Php {
     backend: Arc<dyn Backend>,
-    script: Arc<Path>,
 }
 
 impl Php {
     /// Host-internal: `rapira_runtime` builds one and clones it into every `run`.
     /// Not part of the extension-facing API and not semver-guarded.
     #[doc(hidden)]
-    pub fn new(backend: Arc<dyn Backend>, script: PathBuf) -> Self {
-        Self {
-            backend,
-            script: Arc::from(script),
-        }
-    }
-
-    /// The entry script every request runs (front controller / worker).
-    pub fn script(&self) -> &Path {
-        &self.script
+    pub fn new(backend: Arc<dyn Backend>) -> Self {
+        Self { backend }
     }
 
     /// Submit `req`; resolves with the response stream once the unit is

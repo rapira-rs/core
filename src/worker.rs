@@ -94,13 +94,7 @@ pub fn worker_body(
             return WORKER_EXIT_UNHEALTHY;
         }
     };
-    let handle = match rapira.handle() {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::error!(target: "rapira", "worker handle failed: {e:#}");
-            return WORKER_EXIT_UNHEALTHY;
-        }
-    };
+    let handle = rapira.handle();
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 

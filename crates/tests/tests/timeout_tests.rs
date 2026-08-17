@@ -31,7 +31,7 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     // Warm up: one served unit proves the worker reached its receive loop, so
     // the sleeps below measure parked time, not startup time.
@@ -68,7 +68,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     // Serve one unit first so the timer fatal lands as Recycle (served > 0),
     // not as a boot failure that sheds the next request.
@@ -107,7 +107,7 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
     let r = Rapira::start(Mode::Worker(fixture("timeout_tests/timeout-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     // Job 1: a fast request is untouched by the 1s cap.
     let (status, body) = drain(h.handle_blocking(req(

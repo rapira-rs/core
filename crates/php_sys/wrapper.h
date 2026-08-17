@@ -82,9 +82,6 @@ typedef struct {
 // static muts; all are assigned before any object of these classes can exist.
 // rapira.stub.php
 extern zend_class_entry *rapira_ce_log_level;
-extern zend_class_entry *rapira_ce_work;
-extern zend_class_entry *rapira_ce_dispatcher_info;
-extern zend_class_entry *rapira_ce_dispatcher;
 // exceptions
 extern zend_class_entry *rapira_ce_closed_exception;
 extern zend_class_entry *rapira_ce_timeout_exception;

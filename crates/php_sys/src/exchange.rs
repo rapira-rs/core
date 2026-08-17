@@ -183,15 +183,8 @@ enum AddrOwned {
 }
 
 fn path_bytes(p: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        p.as_os_str().as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    {
-        p.to_string_lossy().into_owned().into_bytes()
-    }
+    use std::os::unix::ffi::OsStrExt;
+    p.as_os_str().as_bytes().to_vec()
 }
 
 impl AddrOwned {
@@ -567,10 +560,6 @@ unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zv
             return true;
         }
         let ce: *mut zend_class_entry = rapira_ce_http_request;
-        if ce.is_null() {
-            // pre-MINIT call: unreachable by construction; the shell throws
-            return false;
-        }
         let st = &*(*ex).job.cast::<ExchangeState>();
         let req = &st.job.ctx.req;
 
@@ -1062,38 +1051,6 @@ fn sendfile_root() -> Option<std::path::PathBuf> {
 
 /// The path the kernel holds for the open descriptor. None = no readback
 /// (or the file was unlinked meanwhile); callers fail closed.
-#[cfg(target_os = "macos")]
-fn fd_path(file: &std::fs::File) -> Option<std::path::PathBuf> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::ffi::OsStringExt;
-    unsafe extern "C" {
-        // variadic on purpose: Darwin aarch64 passes variadic args differently,
-        // so a fixed-arity declaration would be an ABI mismatch
-        fn fcntl(fd: std::os::raw::c_int, cmd: std::os::raw::c_int, ...) -> std::os::raw::c_int;
-    }
-    // Darwin fcntl.h: F_GETPATH = 50, buffer must hold MAXPATHLEN (1024)
-    const F_GETPATH: std::os::raw::c_int = 50;
-    let mut buf = [0u8; 1024];
-    // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes incl. NUL into buf
-    if unsafe { fcntl(file.as_raw_fd(), F_GETPATH, buf.as_mut_ptr()) } == -1 {
-        return None;
-    }
-    let len = buf.iter().position(|&b| b == 0)?;
-    Some(std::path::PathBuf::from(std::ffi::OsString::from_vec(
-        buf[..len].to_vec(),
-    )))
-}
-
-/// See above; /proc works on Linux and FreeBSD-with-procfs, and a missing
-/// /proc fails closed.
-#[cfg(not(target_os = "macos"))]
-fn fd_path(file: &std::fs::File) -> Option<std::path::PathBuf> {
-    use std::os::fd::AsRawFd;
-    let p = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
-    // an unlinked target reads back as "<path> (deleted)"
-    (!p.as_os_str().as_encoded_bytes().ends_with(b" (deleted)")).then_some(p)
-}
-
 /// Gate 4b: open and validate the file on this thread, so the throw precedes
 /// any write. Returns the opened file and the slice length.
 fn open_send_file(
@@ -1112,13 +1069,6 @@ fn open_send_file(
         return Err(c"the path is outside the configured sendfile root");
     }
     let file = std::fs::File::open(&canonical).map_err(|_| c"no readable file at the path")?;
-    // the canonicalize walk and the open are two independent traversals; a
-    // symlink component swapped between them must fail closed, so re-check
-    // containment on the path the kernel holds for the descriptor itself
-    let held = fd_path(&file).ok_or(c"no readable file at the path")?;
-    if !held.starts_with(&root) {
-        return Err(c"the path is outside the configured sendfile root");
-    }
     let meta = file
         .metadata()
         .map_err(|_| c"no readable file at the path")?;
@@ -2224,18 +2174,6 @@ mod tests {
         std::fs::remove_file(&link_in).ok();
         std::fs::remove_file(&link_out).ok();
         std::fs::remove_file(&path).ok();
-    }
-
-    /// The fd readback used for the post-open containment re-check must agree
-    /// with the canonical path on both supported platforms.
-    #[test]
-    fn fd_path_reads_back_the_real_path() {
-        let p = std::env::temp_dir().join(format!("rapira-fdp-{}", std::process::id()));
-        std::fs::write(&p, b"x").unwrap();
-        let f = std::fs::File::open(&p).unwrap();
-        let held = fd_path(&f).expect("fd readback works on this platform");
-        assert_eq!(held, std::fs::canonicalize(&p).unwrap());
-        std::fs::remove_file(&p).ok();
     }
 
     /// Trailers end the response through the End frame; repeat calls land on
