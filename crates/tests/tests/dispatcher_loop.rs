@@ -390,6 +390,35 @@ fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A unit that dies with the cycle (bailout: fatal, timeout) is a worker
+/// death, not an abandonment: the channel dies unsent, no 500 is synthesized.
+#[test]
+fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
+    let h = r.handle();
+
+    let resp = drain_resp(
+        h.handle_blocking(req("/?probe=bail-with-unit", "dispatcher/verbs-worker.php"))?,
+    );
+    assert!(
+        resp.head.is_none() && !resp.ended,
+        "a cycle-death loss must stay unsent (got status {})",
+        resp.status()
+    );
+
+    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "state=false"),
+        "the recycled worker must keep serving"
+    );
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
 /// `Work::__destruct()` is part of the contract surface; an explicit call on
 /// a live unit does nothing.
 #[test]
