@@ -21,6 +21,8 @@ extern bool rapira_rs_exchange_send_file(void *job, const char *path,
 extern bool rapira_rs_exchange_write_trailers(void *job, HashTable *trailers);
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, __construct) {
+    (void)execute_data;
+    (void)return_value;
     zend_throw_error(NULL, "host-created");
 }
 
@@ -141,6 +143,13 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
         rapira_throw_or_backstop("flush");
         RETURN_THROWS();
     }
+}
+
+// __destruct is the contract's safety-net surface; the reporting runs in
+// free_obj when the last reference actually drops, so the method body is empty
+ZEND_METHOD(Rapira_Internal_Http_Exchange, __destruct) {
+    (void)return_value;
+    ZEND_PARSE_PARAMETERS_NONE();
 }
 
 // ---- getRequest: the graph builder lives in Rust (exchange.rs); this shell

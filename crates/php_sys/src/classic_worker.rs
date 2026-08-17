@@ -45,13 +45,22 @@ fn classic_executor(job: &mut Job) -> (Event, bool) {
                 true
             }
             Ok(_) => {
-                // sb_update counts an error as errored = true, but run_script returns
-                // false to signal a PHP error — reverse it to match that expectation
-                !run_script(&job.ctx.req.script_filename)
+                // run_script is also false for exit()/die(), which unwind without an
+                // error. A real failure leaves a bailout (unclean_shutdown) or a
+                // recorded fatal: the "Uncaught ..." path goes through php_error_cb
+                // with E_DONT_BAIL, so only last_error tells it apart from exit().
+                // last_error_type survives php_free_request_globals; the message
+                // pointer is the per-request freshness gate.
+                let failed = !run_script(&job.ctx.req.script_filename);
+                let pg = rapira_pg();
+                failed
+                    && ((*rapira_cg()).unclean_shutdown
+                        || (!(*pg).last_error_message.is_null()
+                            && (*pg).last_error_type & E_FATAL_ERRORS as i32 != 0))
             }
         };
         // The script has run: from here the flush is teardown, not streaming, so
-        // freeze `stream` — a buffered body flushed now stays a complete response.
+        // freeze `stream` - a buffered body flushed now stays a complete response.
         job.ctx.tearing_down = true;
         // flushes output and sends the REAL head (script status + Set-Cookie) via
         // php_output_deactivate -> sapi_send_headers

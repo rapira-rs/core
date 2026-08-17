@@ -34,7 +34,7 @@ fn ondemand_spawns_on_connect() {
         "scaling = \"ondemand\"\nprocess_idle_timeout_secs = 2\n",
     );
     // The master binds the listener pre-fork, so the harness readiness probe
-    // connects — which is itself a demand event that forks one worker. Wait for
+    // connects - which is itself a demand event that forks one worker. Wait for
     // it to appear (the fork may lag the probe), let it idle-retire, then
     // assert the pool sits at zero with no traffic.
     wait_workers(

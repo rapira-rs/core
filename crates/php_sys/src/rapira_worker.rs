@@ -90,12 +90,12 @@ fn run_cycle(script: &Path) -> Cycle {
         sb_update(scoreboard::Event::Healthy);
     }
 
-    // php_request_shutdown frees PG(last_error_message) (main.c:2024) —
+    // php_request_shutdown frees PG(last_error_message) (main.c:2024) -
     // log the bootstrap fatal before it disappears
     log_and_clear_last_error();
     if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
         // the retry reclaimed the request, but the bailed observer walk skipped
-        // end handlers — per-thread extension state is suspect, rebuild it
+        // end handlers - per-thread extension state is suspect, rebuild it
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
         sb_update(scoreboard::Event::Restart);
         return Cycle::Restart;
@@ -132,10 +132,10 @@ fn classify(end: CycleEnd) -> Cycle {
     } else if end.recycle || end.served || end.received {
         // A bailout mid-serving, or the script ended after real work. A cycle
         // that received a unit and then fataled is an app failure, not a boot
-        // failure — Failed would shed the next queued request.
+        // failure - Failed would shed the next queued request.
         Cycle::Recycle
     } else {
-        // never received a unit and never saw closure: boot failure — the shed +
+        // never received a unit and never saw closure: boot failure - the shed +
         // unhealthy-after-5 machinery applies (a script that exits without ever
         // receiving lands here by design)
         Cycle::Failed
@@ -168,7 +168,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                     sb_update(scoreboard::Event::Unhealthy);
                 }
                 // Can't run PHP. Answer one queued job with 503, then loop to
-                // retry the boot (demand-driven — no jobs means we block cheaply
+                // retry the boot (demand-driven - no jobs means we block cheaply
                 // here). None == Rapira dropped: exit instead of hanging Drop.
                 match pull_job() {
                     None => break WorkerExit::Closed,
@@ -235,11 +235,11 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 
     // The handler has returned: from here every ub_write is a teardown flush, not
     // streaming, so mark the context tearing down before flushing. This freezes
-    // `stream` — a buffered body pushed out now stays a complete response; only body
+    // `stream` - a buffered body pushed out now stays a complete response; only body
     // streamed *during* the handler counts as truncated (see `Context::is_truncated`).
     job.ctx.tearing_down = true;
     // the real head (status, cookies, php_error_cb's 500) lives in
-    // SG(sapi_headers); teardown destroys it — flush first
+    // SG(sapi_headers); teardown destroys it - flush first
     let flushed = match outcome {
         Outcome::Bailout | Outcome::Throw => Outcome::from_c(unsafe { rapira_finish_output() }),
         _ => Outcome::Ok,
@@ -279,7 +279,7 @@ fn next_job() -> Option<Job> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;
         // first iteration: clean up whatever php_request_startup()'s bootstrap
-        // left before serving real requests — there's no prior request yet
+        // left before serving real requests - there's no prior request yet
         if std::mem::take(&mut wc.first_call) {
             let outcome = Outcome::from_c(unsafe { rapira_request_teardown() });
             if outcome == Outcome::Bailout {

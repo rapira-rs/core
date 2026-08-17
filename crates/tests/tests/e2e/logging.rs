@@ -117,7 +117,7 @@ fn log_targets_php_restores_php_diagnostics() {
     }
 }
 
-/// `RUST_LOG` replaces the configured filter wholesale — the one env-beats-config
+/// `RUST_LOG` replaces the configured filter wholesale - the one env-beats-config
 /// knob. The same `level = "error"` that hides the PHP warning in
 /// [`log_targets_php_restores_php_diagnostics`] lets it through under `RUST_LOG=info`.
 #[test]

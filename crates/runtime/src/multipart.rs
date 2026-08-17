@@ -47,7 +47,7 @@ impl Default for Limits {
 
 #[derive(Debug)]
 pub enum ParseError {
-    /// 400 malformed / 413 over a limit — the extension answers it pre-dispatch.
+    /// 400 malformed / 413 over a limit - the extension answers it pre-dispatch.
     Rejected(Rejected),
     /// Spool failure (ENOSPC, EACCES…): a host fault, not the client's.
     Io(std::io::Error),
@@ -92,7 +92,7 @@ pub fn is_multipart(content_type: &[u8]) -> bool {
 
 /// The boundary parameter: matched case-insensitively, quoted form unquoted,
 /// unquoted form terminated by `,` (php-src rfc1867.c:707-751), and capped at
-/// the RFC 2046 §5.1.1 70 characters — tighter than rfc1867.c's buffer-sized
+/// the RFC 2046 §5.1.1 70 characters - tighter than rfc1867.c's buffer-sized
 /// cap, on purpose.
 pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
@@ -134,9 +134,10 @@ struct DelimHit {
 }
 
 /// The next real delimiter at or after `from`: a dash-boundary at the start of
-/// a line, followed by `--` (close) or transport padding and a line ending. A
-/// line that merely starts with the boundary bytes (`--boundaryX…`) is content,
-/// not a delimiter, and the scan continues past it.
+/// a line, followed by `--` and padding to a line ending or end of body
+/// (close), or by transport padding and a line ending (part). A line that
+/// merely starts with the boundary bytes (`--boundaryX…`, `--boundary--X…`) is
+/// content, not a delimiter, and the scan continues past it.
 fn next_delimiter(
     body: &[u8],
     mut from: usize,
@@ -147,11 +148,22 @@ fn next_delimiter(
         if i == 0 || body[i - 1] == b'\n' {
             let mut j = i + dlen;
             if body[j..].starts_with(b"--") {
-                return Some(DelimHit {
-                    line_start: i,
-                    after: j + 2,
-                    close: true,
-                });
+                // close-delimiter allows only transport padding and a line
+                // ending (or end of body) after the dashes, RFC 2046 §5.1.1;
+                // any other suffix falls through and the line is content
+                let mut k = j + 2;
+                while matches!(body.get(k), Some(b' ' | b'\t')) {
+                    k += 1;
+                }
+                if matches!(body.get(k), None | Some(b'\n'))
+                    || (body.get(k) == Some(&b'\r') && body.get(k + 1) == Some(&b'\n'))
+                {
+                    return Some(DelimHit {
+                        line_start: i,
+                        after: j + 2,
+                        close: true,
+                    });
+                }
             }
             while matches!(body.get(j), Some(b' ' | b'\t')) {
                 j += 1;
@@ -354,7 +366,7 @@ fn parse_part(
         Err(httparse::Error::TooManyHeaders) => {
             return Err(over("part headers over max_part_headers"));
         }
-        // httparse enforces RFC 9110 token field names — stricter than
+        // httparse enforces RFC 9110 token field names - stricter than
         // rfc1867.c's leniency, on purpose
         Err(_) => return Err(bad("unparseable part header section")),
     };
@@ -396,7 +408,7 @@ fn parse_part(
         .map(<[u8]>::to_vec);
 
     match filename {
-        // filename presence — even empty — makes a file part: an empty
+        // filename presence - even empty - makes a file part: an empty
         // clientFilename is a browser submitting an empty file input
         Some(client_filename) => {
             if files.len() + 1 > limits.max_files {
@@ -501,6 +513,30 @@ mod tests {
     fn zero_part_body_is_a_valid_empty_multipart() {
         let mb = ok(b"--B--");
         assert!(mb.fields.is_empty() && mb.files.is_empty());
+    }
+
+    #[test]
+    fn close_dashes_with_trailing_junk_are_content_not_close() {
+        // close-delimiter is `--boundary--` + transport padding + line ending
+        // or end of body (RFC 2046 §5.1.1); `--B--junk` is part content
+        let body = b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nbefore\r\n--B--junk\r\nafter\r\n--B--";
+        let mb = ok(body);
+        assert_eq!(mb.fields.len(), 1);
+        assert_eq!(mb.fields[0].value, b"before\r\n--B--junk\r\nafter");
+    }
+
+    #[test]
+    fn close_delimiter_padding_and_epilogue_forms_stay_accepted() {
+        let field = b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n";
+        for close in [
+            &b"--B-- \t"[..],        // padding then end of body
+            b"--B--\r\nepilogue",    // CRLF then epilogue
+            b"--B-- \t\r\nepilogue", // padding, CRLF, epilogue
+        ] {
+            let body = [field.as_slice(), close].concat();
+            let mb = ok(&body);
+            assert_eq!(mb.fields[0].value, b"v", "close form: {close:?}");
+        }
     }
 
     #[test]

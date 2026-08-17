@@ -1,6 +1,6 @@
 <?php
 // Every unit is handled inside its own Fiber with a suspend point between
-// reading the request and writing the answer — correlation must survive the
+// reading the request and writing the answer - correlation must survive the
 // suspension.
 
 use Rapira\Exception\ClosedException;

@@ -86,7 +86,7 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-// $_GET/$_POST must be rebuilt per worker request — no stale values.
+// $_GET/$_POST must be rebuilt per worker request - no stale values.
 #[test]
 fn post_superglobals_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -527,7 +527,7 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A raw status line — header('HTTP/1.1 204 No Content', true, 204) — drives the
+// A raw status line - header('HTTP/1.1 204 No Content', true, 204) - drives the
 // head status; the SAPI itself never suppresses the body for a 204.
 #[test]
 fn raw_status_line_204_classic() -> anyhow::Result<()> {
@@ -708,8 +708,130 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
+// The per-job teardown must not run destructors on bootstrap-resident objects
+// and must keep object-store handles reusable across jobs.
+#[test]
+fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture(
+        "ported_tests/preloop-destruct-worker.php",
+    )))?;
+    let h = r.handle()?;
+    let (s1, b1) = drain(h.handle_blocking(req(
+        "/preloop-destruct-worker.php",
+        "ported_tests/preloop-destruct-worker.php",
+    ))?);
+    let (s2, b2) = drain(h.handle_blocking(req(
+        "/preloop-destruct-worker.php",
+        "ported_tests/preloop-destruct-worker.php",
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!((s1, s2), (200, 200));
+    assert!(b1.contains("write=ok dtors=0"), "req1 (got {b1:?})");
+    assert!(
+        b2.contains("write=ok dtors=0"),
+        "bootstrap object was destructed between jobs (got {b2:?})"
+    );
+    let id = |b: &str| b.split("id=").nth(1).map(str::to_owned);
+    assert_eq!(
+        id(&b1),
+        id(&b2),
+        "the per-job object's handle must be reused, not grow monotonically"
+    );
+    Ok(())
+}
+
+// A destructor that throws while the job's shutdown-function table is freed
+// must not leak a pending exception into the resident loop.
+#[test]
+fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture(
+        "ported_tests/dtor-throw-shutdown-worker.php",
+    )))?;
+    let h = r.handle()?;
+    let (s1, b1) = drain(h.handle_blocking(req(
+        "/dtor-throw-shutdown-worker.php",
+        "ported_tests/dtor-throw-shutdown-worker.php",
+    ))?);
+    let (s2, b2) = drain(h.handle_blocking(req(
+        "/dtor-throw-shutdown-worker.php",
+        "ported_tests/dtor-throw-shutdown-worker.php",
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!((s1, b1.as_str()), (200, "served=1"));
+    assert_eq!(
+        (s2, b2.as_str()),
+        (200, "served=2"),
+        "the cycle must survive a throwing post-job destructor"
+    );
+    Ok(())
+}
+
+// A truncated response must not carry a synthesized Content-Length equal to
+// the retained prefix - the absent length is what lets clients detect the cut.
+#[test]
+fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
+    let h = r.handle()?;
+    let resp = tests::drain_resp(h.handle_blocking(req(
+        "/output-then-throw-worker.php?i=1",
+        "shared/output-then-throw-worker.php",
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert!(resp.truncated, "uncaught throw after output must truncate");
+    assert_eq!(resp.content_length, None, "got: {:?}", resp.content_length);
+    Ok(())
+}
+
+// exit() ends a classic script cleanly: complete response, not an error.
+#[test]
+fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic)?;
+    let h = r.handle()?;
+    let resp = tests::drain_resp(h.handle_blocking(req(
+        "/exit-after-output-classic.php",
+        "ported_tests/exit-after-output-classic.php",
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.body_string(), "complete page");
+    assert!(!resp.truncated, "exit() is a clean end, not a truncation");
+    assert_eq!(resp.content_length, Some("complete page".len() as u64));
+    Ok(())
+}
+
+// An uncaught throw mid-stream in classic mode stays truncated, with no length.
+#[test]
+fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic)?;
+    let h = r.handle()?;
+    let resp = tests::drain_resp(h.handle_blocking(req(
+        "/throw-after-output-classic.php",
+        "ported_tests/throw-after-output-classic.php",
+    ))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(resp.status(), 200, "the echo committed the head");
+    assert!(resp.truncated, "uncaught throw after output must truncate");
+    assert_eq!(resp.content_length, None, "got: {:?}", resp.content_length);
+    Ok(())
+}
+
 // Streams opened before the worker loop keep their identity and read position
-// across requests — between-request cleanup must not touch live resources.
+// across requests - between-request cleanup must not touch live resources.
 #[test]
 fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -844,7 +966,7 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
 }
 
 /// A boundary is opaque octets and obs-text is legal in a field value, so Content-Type
-/// must reach php-src byte for byte — decoding it lossily leaves rfc1867 hunting for a
+/// must reach php-src byte for byte - decoding it lossily leaves rfc1867 hunting for a
 /// boundary the body never contains, and the upload silently vanishes.
 #[test]
 fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {

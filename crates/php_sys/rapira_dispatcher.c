@@ -69,6 +69,7 @@ ZEND_FUNCTION(Rapira_handle_request) {
 }
 
 ZEND_FUNCTION(Rapira_log) {
+    (void)return_value;
     zend_string *message = NULL;
     zval *level = NULL;
     HashTable *context = NULL;
@@ -81,6 +82,16 @@ ZEND_FUNCTION(Rapira_log) {
     ZEND_PARSE_PARAMETERS_END();
 
     rapira_rs_log_call(message, level ? Z_OBJ_P(level) : NULL, context);
+
+    // log() never throws: clear an exception a context value's jsonSerialize()
+    // or __get raised during serialization. exit()/die() land here as
+    // unwind/graceful-exit "exceptions" and must keep unwinding. The release
+    // can run a userland __destruct that bails out, so the clear must sit
+    // where no Rust frames are live.
+    if (EG(exception) && !zend_is_unwind_exit(EG(exception)) &&
+        !zend_is_graceful_exit(EG(exception))) {
+        zend_clear_exception();
+    }
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
@@ -90,11 +101,15 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Dispatcher, __construct) {
+    (void)execute_data;
+    (void)return_value;
     zend_throw_error(NULL,
                      "host-created; obtain it from \\Rapira\\get_dispatcher()");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct) {
+    (void)execute_data;
+    (void)return_value;
     zend_throw_error(NULL, "host-created");
 }
 

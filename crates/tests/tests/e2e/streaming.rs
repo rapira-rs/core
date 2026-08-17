@@ -1,4 +1,4 @@
-//! Streaming over the wire: the frame protocol as an HTTP client sees it —
+//! Streaming over the wire: the frame protocol as an HTTP client sees it -
 //! flush timing, chunked framing, keepalive reuse, interim heads, the CLEE
 //! prefix, client aborts, and truncated closes.
 
@@ -126,7 +126,7 @@ fn client_abort_discards_the_unit() {
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=discard HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
-    // the flushed head proves the unit is out with PHP — leaving earlier can
+    // the flushed head proves the unit is out with PHP - leaving earlier can
     // race the pre-handout probe, which fails the unit before PHP sees it
     let (status, _) = c.read_head(T).expect("flushed head");
     assert_eq!(status, 200);
@@ -188,7 +188,7 @@ fn sendfile_streams_from_disk_with_length() {
     assert!(rest.iter().all(|&b| b == b'z'), "file bytes intact");
 }
 
-/// Trailers are dropped on h1 — the response still ends cleanly, with no
+/// Trailers are dropped on h1 - the response still ends cleanly, with no
 /// trailer bytes in the chunked epilogue, and the connection stays reusable.
 #[test]
 fn trailers_are_dropped_on_h1_and_the_response_ends_cleanly() {

@@ -39,7 +39,7 @@ use crate::{
 /// The unit machine. Both live variants carry the Box pointer: free_obj
 /// normally reclaims it, and tracking it here covers the paths where free_obj
 /// cannot run (a bailed php_request_shutdown, a bailout between Box::into_raw
-/// and the C-side store) — a leaked unfinalized unit would hang its client
+/// and the C-side store) - a leaked unfinalized unit would hang its client
 /// forever.
 #[derive(Clone, Copy)]
 enum Unit {
@@ -140,7 +140,7 @@ enum Stage {
     Finalized,
 }
 
-/// A committed final head, not yet on the wire — committing is not sending;
+/// A committed final head, not yet on the wire - committing is not sending;
 /// the bytes leave with the first body-touching verb.
 struct PendingHead {
     status: u16,
@@ -239,7 +239,7 @@ impl Grouped {
 pub struct ExchangeState {
     // body above job: fields drop in declaration order, so an abandoned unit
     // unlinks its spool files (BodyState -> SpooledFile::drop) before the
-    // frame sender closes — the file is gone before the stream ends, the same
+    // frame sender closes - the file is gone before the stream ends, the same
     // order seal() guarantees.
     body: BodyState,
     job: Box<Job>,
@@ -262,7 +262,7 @@ pub struct ExchangeState {
     pending: Option<PendingHead>,
     /// A head-declared content-length, honoured then enforced.
     declared_cl: Option<u64>,
-    /// Bytes accepted toward `declared_cl` — bodiless units count too (a HEAD
+    /// Bytes accepted toward `declared_cl` - bodiless units count too (a HEAD
     /// handler shares the GET code path, errors included).
     sent_body: u64,
     /// The host closed the exchange first; sticky, selects the exception class.
@@ -484,7 +484,7 @@ unsafe fn build_file(dst: *mut zval, p: &FilePart) {
 }
 
 /// Multipart{fields, files} into `dst`. A throw at any hand-off stops the
-/// loops — property writes with a pending exception are what the checkpoints
+/// loops - property writes with a pending exception are what the checkpoints
 /// exist to prevent; a partial graph is released and never cached.
 unsafe fn build_multipart(
     dst: *mut zval,
@@ -545,7 +545,7 @@ unsafe fn build_multipart(
 }
 
 /// Builds `Rapira\Http\Request` into `return_value`, memoizing on the
-/// exchange. Contract with the C shell: false means a throw is pending — a
+/// exchange. Contract with the C shell: false means a throw is pending - a
 /// caught panic returns false without one and the shell backstops with its
 /// own zend_throw_error.
 /// # Safety
@@ -907,7 +907,7 @@ struct Closed;
 
 /// Push a frame; on a full channel, park with the wall timer disarmed. A
 /// parked thread never reaches an opcode boundary, so a fired timeout could
-/// not longjmp anyway — and on NTS its second expiry would `_exit(124)` the
+/// not longjmp anyway - and on NTS its second expiry would `_exit(124)` the
 /// process. The re-arm grants the remaining budget (floor 1s), so
 /// max_execution_time keeps bounding compute while park time is excluded.
 /// # Safety
@@ -930,7 +930,7 @@ unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed>
                 let r = park_send(tx, frame);
                 if saved > 0 {
                     let remaining = (saved as u64).saturating_sub(consumed.as_secs()).max(1);
-                    // the park loop is pure Rust — nothing between disarm and
+                    // the park loop is pure Rust - nothing between disarm and
                     // here can bailout or panic past the guard
                     zend_set_timeout(remaining as crate::zend_long, false);
                 }
@@ -944,7 +944,7 @@ unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed>
     result
 }
 
-/// The park: spin briefly, then 100µs naps. Only `Closed` ends it — a slow
+/// The park: spin briefly, then 100µs naps. Only `Closed` ends it - a slow
 /// consumer is backpressure, not cancellation; the front's write timeout is
 /// what turns a dead-slow client into `Closed`.
 fn park_send(tx: &Sender<Frame>, mut frame: Frame) -> Result<(), Closed> {
@@ -968,7 +968,7 @@ fn park_send(tx: &Sender<Frame>, mut frame: Frame) -> Result<(), Closed> {
 
 /// Emit the committed head (implicit `200` with no fields when none), once.
 /// `finalizing_len` is the whole body length when this call also ends the
-/// response and nothing streamed before — the computed one-shot framing; a
+/// response and nothing streamed before - the computed one-shot framing; a
 /// declared content-length always wins, and a bodiless response never gets a
 /// synthesized one.
 /// # Safety
@@ -1024,7 +1024,7 @@ fn discard_unit(st: &mut ExchangeState) {
         }
     });
     sb_update(Event::Handled(true));
-    // best effort — the channel is usually already closed
+    // best effort - the channel is usually already closed
     if let Some(tx) = st.job.ctx.sender.take() {
         let _ = tx.try_send(Frame::End {
             trailers: Vec::new(),
@@ -1060,6 +1060,40 @@ fn sendfile_root() -> Option<std::path::PathBuf> {
         .clone()
 }
 
+/// The path the kernel holds for the open descriptor. None = no readback
+/// (or the file was unlinked meanwhile); callers fail closed.
+#[cfg(target_os = "macos")]
+fn fd_path(file: &std::fs::File) -> Option<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStringExt;
+    unsafe extern "C" {
+        // variadic on purpose: Darwin aarch64 passes variadic args differently,
+        // so a fixed-arity declaration would be an ABI mismatch
+        fn fcntl(fd: std::os::raw::c_int, cmd: std::os::raw::c_int, ...) -> std::os::raw::c_int;
+    }
+    // Darwin fcntl.h: F_GETPATH = 50, buffer must hold MAXPATHLEN (1024)
+    const F_GETPATH: std::os::raw::c_int = 50;
+    let mut buf = [0u8; 1024];
+    // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes incl. NUL into buf
+    if unsafe { fcntl(file.as_raw_fd(), F_GETPATH, buf.as_mut_ptr()) } == -1 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0)?;
+    Some(std::path::PathBuf::from(std::ffi::OsString::from_vec(
+        buf[..len].to_vec(),
+    )))
+}
+
+/// See above; /proc works on Linux and FreeBSD-with-procfs, and a missing
+/// /proc fails closed.
+#[cfg(not(target_os = "macos"))]
+fn fd_path(file: &std::fs::File) -> Option<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    let p = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
+    // an unlinked target reads back as "<path> (deleted)"
+    (!p.as_os_str().as_encoded_bytes().ends_with(b" (deleted)")).then_some(p)
+}
+
 /// Gate 4b: open and validate the file on this thread, so the throw precedes
 /// any write. Returns the opened file and the slice length.
 fn open_send_file(
@@ -1078,6 +1112,13 @@ fn open_send_file(
         return Err(c"the path is outside the configured sendfile root");
     }
     let file = std::fs::File::open(&canonical).map_err(|_| c"no readable file at the path")?;
+    // the canonicalize walk and the open are two independent traversals; a
+    // symlink component swapped between them must fail closed, so re-check
+    // containment on the path the kernel holds for the descriptor itself
+    let held = fd_path(&file).ok_or(c"no readable file at the path")?;
+    if !held.starts_with(&root) {
+        return Err(c"the path is outside the configured sendfile root");
+    }
     let meta = file
         .metadata()
         .map_err(|_| c"no readable file at the path")?;
@@ -1396,7 +1437,7 @@ fn wire_token(name: &[u8]) -> bool {
     !name.is_empty() && name.iter().all(|&b| is_tchar(b))
 }
 
-/// Field values per RFC 9110 §5.5 — the same byte set the classic path
+/// Field values per RFC 9110 §5.5 - the same byte set the classic path
 /// enforces, so a value the front would drop raises the ValueError here.
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.5
 fn wire_value(value: &[u8]) -> bool {
@@ -1469,7 +1510,7 @@ unsafe fn write_head_core(st: &mut ExchangeState, status: u16, headers: FieldLin
         discard_unit(st);
         return Verb::Discarded;
     }
-    // Finalized implies a committed head, so one gate covers both — writeHead's
+    // Finalized implies a committed head, so one gate covers both - writeHead's
     // documented class for any post-commit call is HeadAlreadyWrittenError.
     if st.stage != Stage::Open {
         return Verb::HeadWritten;
@@ -1553,7 +1594,7 @@ unsafe fn write_body_core(st: &mut ExchangeState, p: *const c_char, len: usize, 
     if st.stage == Stage::Finalized {
         return Verb::Finalized;
     }
-    // Contract: an empty chunk without eos does nothing — it is how a
+    // Contract: an empty chunk without eos does nothing - it is how a
     // chunked body terminates, never a head commit.
     if len == 0 && !eos {
         return Verb::Ok;
@@ -1636,7 +1677,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 }
 
 /// The worker finished: unlink spools, count once, emit `End`, close the
-/// stream. A gone client here is not an error — the worker finalized first.
+/// stream. A gone client here is not an error - the worker finalized first.
 /// # Safety
 /// As `send_frame`.
 unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: FieldLines) {
@@ -1726,9 +1767,9 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(job: *const c_void) -> 
     })
 }
 
-/// Reclaims the Box when PHP frees the Exchange object (free_obj). An
-/// unfinalized drop fails the unit: the Frame sender dies unsent and the
-/// runtime reports "worker died mid-response" upstream.
+/// Reclaims the Box when PHP frees the Exchange object (free_obj). A unit
+/// dropped unfinalized is failed by the host: a complete 500 when nothing
+/// reached the wire, a truncated end otherwise - never an implicit response.
 /// # Safety
 /// `job` is NULL or a pointer produced by `Box::into_raw` in receive.
 #[unsafe(no_mangle)]
@@ -1744,9 +1785,41 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
                 c.unit = Unit::Idle;
             }
         });
-        let st = unsafe { Box::from_raw(ptr) };
+        let mut st = unsafe { Box::from_raw(ptr) };
         if st.stage != Stage::Finalized {
             sb_update(Event::Handled(true));
+            // same order as seal(): spool files are gone before the stream ends
+            if let BodyState::Multipart { files, .. } = &mut st.body {
+                for p in files {
+                    p.upload.file.unlink();
+                }
+            }
+            // best effort like discard_unit: a full or closed channel falls
+            // back to channel-death semantics at the consumer
+            if let Some(tx) = st.job.ctx.sender.take() {
+                if st.head_sent {
+                    let _ = tx.try_send(Frame::End {
+                        trailers: Vec::new(),
+                        truncated: true,
+                    });
+                } else if tx
+                    .try_send(Frame::Head {
+                        head: ResponseHead {
+                            status: 500,
+                            headers: Vec::new(),
+                        },
+                        content_length: (!st.bodiless).then_some(0),
+                        bodiless: st.bodiless,
+                        body_coded: false,
+                    })
+                    .is_ok()
+                {
+                    let _ = tx.try_send(Frame::End {
+                        trailers: Vec::new(),
+                        truncated: false,
+                    });
+                }
+            }
         }
         drop(st);
     })
@@ -1879,7 +1952,7 @@ mod tests {
         assert!(body.is_empty(), "304 carries no body");
     }
 
-    /// Contract: an empty chunk without eos does nothing — no head commits.
+    /// Contract: an empty chunk without eos does nothing - no head commits.
     #[test]
     fn empty_non_eos_chunk_commits_nothing() {
         let (mut st, mut rx) = state();
@@ -2096,6 +2169,9 @@ mod tests {
         let path = dir.join(format!("rapira-sf-{}", std::process::id()));
         std::fs::write(&path, b"abcdefghijklmnopqrstuvwxyz").unwrap();
         let pb = path_bytes(&path);
+        let link_out = dir.join(format!("rapira-sf-out-{}", std::process::id()));
+        std::fs::remove_file(&link_out).ok();
+        std::os::unix::fs::symlink("/etc/hosts", &link_out).unwrap();
 
         let (mut st, _rx) = state();
         for (name, path, offset, length) in [
@@ -2104,6 +2180,7 @@ mod tests {
             ("offset past end", pb.clone(), 27, None),
             ("slice past end", pb.clone(), 20, Some(10)),
             ("outside the root", b"/etc/hosts".to_vec(), 0, None),
+            ("escaping symlink", path_bytes(&link_out), 0, None),
         ] {
             let v = unsafe { send_file_core(&mut st, &path, offset, length, true) };
             assert!(matches!(v, Verb::FileNotSendable(_)), "{name}");
@@ -2135,7 +2212,30 @@ mod tests {
         ));
         assert_eq!(st.stage, Stage::Finalized);
 
+        // a symlink whose target stays inside the root is allowed
+        let link_in = dir.join(format!("rapira-sf-in-{}", std::process::id()));
+        std::fs::remove_file(&link_in).ok();
+        std::os::unix::fs::symlink(&path, &link_in).unwrap();
+        let (mut st, mut rx) = state();
+        let v = unsafe { send_file_core(&mut st, &path_bytes(&link_in), 0, None, true) };
+        assert_eq!(v, Verb::Ok, "intra-root symlinks stay sendable");
+        assert!(matches!(rx.try_recv(), Ok(Frame::Head { .. })));
+
+        std::fs::remove_file(&link_in).ok();
+        std::fs::remove_file(&link_out).ok();
         std::fs::remove_file(&path).ok();
+    }
+
+    /// The fd readback used for the post-open containment re-check must agree
+    /// with the canonical path on both supported platforms.
+    #[test]
+    fn fd_path_reads_back_the_real_path() {
+        let p = std::env::temp_dir().join(format!("rapira-fdp-{}", std::process::id()));
+        std::fs::write(&p, b"x").unwrap();
+        let f = std::fs::File::open(&p).unwrap();
+        let held = fd_path(&f).expect("fd readback works on this platform");
+        assert_eq!(held, std::fs::canonicalize(&p).unwrap());
+        std::fs::remove_file(&p).ok();
     }
 
     /// Trailers end the response through the End frame; repeat calls land on

@@ -1,6 +1,6 @@
-//! Worker mode (`\Rapira\handle_request`) smoke set — per-job superglobals,
+//! Worker mode (`\Rapira\handle_request`) smoke set - per-job superglobals,
 //! the draining-false contract, the wrong-mode gates, one test per
-//! cycle-terminal state — plus the per-job hygiene pins ($_ENV survival,
+//! cycle-terminal state - plus the per-job hygiene pins ($_ENV survival,
 //! proto_num). The bulk of worker-mode coverage lives in the ported suites.
 
 use php_sys::{Mode, Rapira};
@@ -84,7 +84,7 @@ fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// dispatcher mode: the gate refuses before the shared intake is touched — an
+/// dispatcher mode: the gate refuses before the shared intake is touched - an
 /// ungated call would steal the unit and serve it with no context bound.
 #[test]
 fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
@@ -220,7 +220,7 @@ fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
     assert_eq!(resp.status(), 303);
     assert_eq!(resp.header("location").as_deref(), Some("/elsewhere"));
 
-    // GET keeps 302 — the arm is method-conditional
+    // GET keeps 302 - the arm is method-conditional
     let resp = drain_resp(h.handle_blocking(req("/", "worker/location-worker.php"))?);
     assert_eq!(resp.status(), 302);
     drop(h);

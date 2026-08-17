@@ -24,8 +24,8 @@ pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
 
 /// A master-initiated kill in progress on a worker. Drives the escalation step
 /// (first pass signals, a later pass KILLs) and the exit verdict. The two kinds
-/// target disjoint states — idle trim hits IDLE slots, the request-timeout
-/// watchdog hits ACTIVE ones — so one field holds whichever is under way.
+/// target disjoint states - idle trim hits IDLE slots, the request-timeout
+/// watchdog hits ACTIVE ones - so one field holds whichever is under way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KillIntent {
     /// Idle trim: QUIT sent.
@@ -184,7 +184,7 @@ impl ProcTable {
 /// The fork bracket. Parent blocks the master signal set around `fork`, resets
 /// it after; the child neutralizes inherited dispositions, closes the master's
 /// control fds, runs the worker closure, and `_exit`s (no Rust drops ever run in
-/// a child — no PHP shutdown, no pidfile unlink). Child signal contract:
+/// a child - no PHP shutdown, no pidfile unlink). Child signal contract:
 /// all master dispositions → SIG_DFL, USR1/USR2 → SIG_IGN, {QUIT, INT} left
 /// blocked (the worker's sigwait watcher owns them), everything else unblocked
 /// including TERM (SIG_DFL fast kill).
@@ -263,7 +263,7 @@ pub(crate) fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
 
             // Enforce "no unwinding past the fork". A panic here (e.g. a
             // thread-spawn `.expect` under EAGAIN) would unwind through the
-            // fork point and run the MASTER's Drops in this child — unlinking
+            // fork point and run the MASTER's Drops in this child - unlinking
             // the shared pidfile, shutting the shared PHP module down against
             // the shared opcache SHM. catch_unwind converts any panic into a
             // plain `_exit`, so no Drop can ever run in a child.

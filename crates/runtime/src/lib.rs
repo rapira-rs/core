@@ -26,7 +26,7 @@ type BoxFuture = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 
 /// Object-safe shim so the host can touch the SAME extension value twice:
 /// `prepare` in the master (pre-fork), `launch` in the worker (post-fork). The
-/// extension value — including any `PreparedListener` it stored — is what
+/// extension value - including any `PreparedListener` it stored - is what
 /// crosses the fork.
 trait ErasedExt: Send {
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> anyhow::Result<()>;
@@ -207,7 +207,7 @@ fn parse_err(e: multipart::ParseError) -> anyhow::Error {
     match e {
         // downcastable: the extension answers 400/413 in its own protocol
         multipart::ParseError::Rejected(r) => anyhow::Error::new(r),
-        // a host fault (ENOSPC, EACCES…), not the client's — the extension
+        // a host fault (ENOSPC, EACCES…), not the client's - the extension
         // finds the io::Error in the chain and answers 500
         multipart::ParseError::Io(io) => anyhow::Error::new(io).context("upload spool failed"),
     }
@@ -256,7 +256,7 @@ impl RapiraBackend {
         // Content-type is a singleton field (RFC 9110 §8.3,
         // https://www.rfc-editor.org/rfc/rfc9110#section-8.3): with a multipart
         // line anywhere among repeats, the host and a PHP consumer could parse
-        // the body by different boundaries — whichever line comes first.
+        // the body by different boundaries - whichever line comes first.
         if self.dispatcher && !req.body.is_empty() {
             let mut ct_lines = 0usize;
             let mut any_multipart = false;
@@ -282,7 +282,7 @@ impl RapiraBackend {
             let boundary = multipart::boundary(ct).map_err(parse_err)?;
             let bytes = std::mem::take(&mut req.body);
             let limits = Arc::clone(&self.uploads);
-            // spool writes are file IO — off the reactor
+            // spool writes are file IO - off the reactor
             let parsed =
                 tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
                     .await
@@ -328,7 +328,7 @@ impl extension_api::Backend for RapiraBackend {
     ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::Reply>> + Send + '_>>
     {
         Box::pin(async move {
-            // parse/reject happens before handle()'s pending increment — a
+            // parse/reject happens before handle()'s pending increment - a
             // rejected request never touches the counters or the queue
             let req = self.to_request(req).await?;
             // shedding is this host's answer, not a gateway fault: 503 for a
@@ -471,7 +471,7 @@ impl Running {
         self.drain_all()
     }
 
-    /// Ask every extension to stop, then drain and return their outcomes — the on-demand
+    /// Ask every extension to stop, then drain and return their outcomes - the on-demand
     /// graceful-stop path (no signal), for callers that drive shutdown themselves.
     pub fn stop(self) -> Vec<Outcome> {
         let _ = self.stop_tx.send(true);
@@ -483,7 +483,7 @@ impl Running {
         Stopper(self.stop_tx.clone())
     }
 
-    /// Forked-worker entry: run until done OR a QUIT/INT arrives — first signal
+    /// Forked-worker entry: run until done OR a QUIT/INT arrives - first signal
     /// drains, a second one force-exits 131. The master's fork bracket owns
     /// child signal hygiene: dispositions reset to SIG_DFL, USR1/USR2 ignored,
     /// mask exactly {QUIT, INT} for the watcher here, TERM left at SIG_DFL so
@@ -616,7 +616,7 @@ mod tests {
 
     /// The pingora front classifies a spool failure by finding an `io::Error`
     /// in the chain (500, host fault) and a client fault by downcasting
-    /// `Rejected` — parse_err must keep both typed, never stringified.
+    /// `Rejected` - parse_err must keep both typed, never stringified.
     #[test]
     fn parse_err_keeps_the_typed_causes() {
         let io = parse_err(multipart::ParseError::Io(std::io::Error::other(
@@ -638,7 +638,7 @@ mod tests {
     }
 
     /// The reaper dequeues a blocked, pending signal via `sigwait` instead of letting it
-    /// run the default (terminate) action — the basis of graceful shutdown.
+    /// run the default (terminate) action - the basis of graceful shutdown.
     #[test]
     fn sigwait_reaps_a_blocked_signal() {
         let set = sigset(&[libc::SIGTERM]);

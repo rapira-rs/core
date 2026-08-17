@@ -21,7 +21,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
         )))?;
         let h = r.handle()?;
         let rx = h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php"))?;
-        drop(h); // last non-Rapira intake sender — lets the channel close on drop(r)
+        drop(h); // last non-Rapira intake sender - lets the channel close on drop(r)
         let (status, body) = drain(rx);
         drop(r); // drops the last sender so the worker's boot retry exits
         let _ = done_tx.send((status, body));

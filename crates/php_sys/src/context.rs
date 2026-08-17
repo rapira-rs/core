@@ -49,7 +49,7 @@ pub(crate) fn unbind_server_context() {
 
 /// sapi_activate hard-resets proto_num to 1000 (main/SAPI.c:448), and its one
 /// consumer is sapi_header_op's Location arm (302 vs 303 for non-GET/HEAD,
-/// main/SAPI.c:836-842) — so the request protocol must be applied after
+/// main/SAPI.c:836-842) - so the request protocol must be applied after
 /// activation, not in [`populate_request_context`], which runs before it.
 pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
     if ctx.c.is_none() {

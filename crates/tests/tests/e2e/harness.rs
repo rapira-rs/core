@@ -82,7 +82,7 @@ impl Drop for Server {
 }
 
 /// Path to the built `rapira` binary. The bin is defined by the root package,
-/// so CARGO_BIN_EXE is not set here — locate it beside the test binary
+/// so CARGO_BIN_EXE is not set here - locate it beside the test binary
 /// (target/<profile>/deps/<test> -> target/<profile>/rapira). `RAPIRA_BIN`
 /// overrides. The Makefile/CI build the bin before running this suite.
 fn rapira_bin() -> PathBuf {
@@ -109,7 +109,7 @@ fn rapira_bin() -> PathBuf {
 ///
 /// `extra_toml` is appended inside the `[pool]` table, so bare keys are pool
 /// keys. Any other section (`[supervisor]`, `[log]`) needs its own header and
-/// must come after all bare pool keys — a header closes `[pool]` for everything
+/// must come after all bare pool keys - a header closes `[pool]` for everything
 /// that follows. A misplaced key is a boot error that surfaces here as the
 /// generic "never accepted a connection" panic.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
@@ -123,7 +123,7 @@ pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) 
 }
 
 /// [`spawn_with_config`] without the pinned `RUST_LOG`, so the `[log]` section
-/// owns the filter — for tests asserting config-driven filtering.
+/// owns the filter - for tests asserting config-driven filtering.
 pub fn spawn_without_rust_log(fixture: &str, processes: usize, extra_toml: &str) -> Server {
     spawn_with_extras(fixture, processes, "", extra_toml, None, None)
 }
@@ -134,7 +134,7 @@ pub struct CwdIni<'a> {
     /// Written to `php.ini` in the directory the child runs from.
     pub contents: &'a str,
     /// Also point PHPRC at that directory, making the file one PHP is expected
-    /// to read — the control for the cwd case.
+    /// to read - the control for the cwd case.
     pub via_phprc: bool,
 }
 
@@ -273,7 +273,7 @@ pub fn http_get_with_headers(
     parse_status_and_body(&http_get_raw(addr, path, fields, timeout)?)
 }
 
-/// The whole response, head included — for assertions about which fields actually
+/// The whole response, head included - for assertions about which fields actually
 /// reached the client.
 pub fn http_get_raw(
     addr: SocketAddr,
@@ -304,7 +304,7 @@ pub fn http_get_raw(
     Ok(raw)
 }
 
-/// As [`http_raw`], returning the unparsed response bytes — for asserting on
+/// As [`http_raw`], returning the unparsed response bytes - for asserting on
 /// the header block itself.
 pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
     let mut s = TcpStream::connect_timeout(&addr, timeout)?;
@@ -621,7 +621,7 @@ fn free_port() -> u16 {
     l.local_addr().expect("local_addr").port()
 }
 
-/// An open connection for incremental reads — the streaming assertions the
+/// An open connection for incremental reads - the streaming assertions the
 /// read-to-EOF helpers cannot express (they would block until the stream ends).
 pub struct Conn {
     s: TcpStream,
@@ -647,7 +647,7 @@ impl Conn {
         self.s.flush()
     }
 
-    /// Close the write side and drop the socket — the client walking away.
+    /// Close the write side and drop the socket - the client walking away.
     pub fn abandon(self) {
         let _ = self.s.shutdown(std::net::Shutdown::Both);
     }
@@ -690,7 +690,7 @@ impl Conn {
     }
 
     /// Read one head block: `(status, lower-cased field lines)`. Interim heads
-    /// are separate blocks — call again for the next one.
+    /// are separate blocks - call again for the next one.
     pub fn read_head(&mut self, deadline: Duration) -> io::Result<(u16, Vec<(String, String)>)> {
         let head_end = self.fill_until(b"\r\n\r\n", deadline)?;
         let head = &self.buf[self.consumed..head_end];
@@ -748,7 +748,7 @@ impl Conn {
 }
 
 /// Decode a chunked body: `(chunks, trailer-section bytes)`. Errors when the
-/// terminating zero chunk is missing — the truncation signal.
+/// terminating zero chunk is missing - the truncation signal.
 pub fn decode_chunked(mut raw: &[u8]) -> io::Result<(Vec<Vec<u8>>, Vec<u8>)> {
     let mut chunks = Vec::new();
     loop {

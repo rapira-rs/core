@@ -43,6 +43,7 @@ pub const HASH_KEY_IS_STRING: i64 = 1;
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;
     pub fn rapira_eg() -> *mut zend_executor_globals;
+    pub fn rapira_cg() -> *mut zend_compiler_globals;
     pub fn rapira_pg() -> *mut php_core_globals;
     pub fn rapira_finish_output() -> c_int;
     pub fn rapira_init_call_stack();

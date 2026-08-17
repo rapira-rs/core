@@ -2,13 +2,13 @@
 //! PHPRC (timeout.php.ini, max_execution_time=1), which is process-global.
 //!
 //! The per-job re-arm (`rapira_request_init` → `zend_set_timeout`) passes
-//! reset_signals=0 — the SIGRTMIN handler is installed once per cycle by
+//! reset_signals=0 - the SIGRTMIN handler is installed once per cycle by
 //! php_request_startup, not per job. These tests prove the timer armed that way
 //! still fires on jobs after the first in a cycle, and that the worker recovers
 //! afterwards.
 //!
 //! Skipped on macOS/Windows: rapira arms a per-request timeout only where Zend's per-thread timer
-//! exists (`ZEND_MAX_EXECUTION_TIMERS`, Linux/FreeBSD-only — needs POSIX timer_create, which Darwin
+//! exists (`ZEND_MAX_EXECUTION_TIMERS`, Linux/FreeBSD-only - needs POSIX timer_create, which Darwin
 //! and Windows lack), so elsewhere the busy-loop fixture would spin forever.
 //! https://github.com/php/php-src/pull/10141
 //! https://man7.org/linux/man-pages/man2/timer_create.2.html
@@ -81,7 +81,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     // the unit must die unsealed: the timer fired and the cycle recycled
     let resp = tests::drain_resp_deadline(&mut rx, deadline)
-        .expect("spinning unit was never killed — the per-unit budget did not re-arm");
+        .expect("spinning unit was never killed - the per-unit budget did not re-arm");
     assert!(
         resp.head.is_none() && !resp.ended,
         "a spinning unit must not seal a response (got status {})",
@@ -118,7 +118,7 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
 
     // Job 2, same cycle (job 1 did not recycle): the timer re-armed by
     // rapira_request_init with reset_signals=0 must still deliver SIGRTMIN and
-    // kill the spin — the regression surface of not reinstalling the handler.
+    // kill the spin - the regression surface of not reinstalling the handler.
     // Bounded wait: a silent signal-delivery regression must fail the test, not
     // hang the suite.
     let mut rx = h.handle_blocking(req(
@@ -127,7 +127,7 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     ))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let resp = tests::drain_resp_deadline(&mut rx, deadline)
-        .expect("spinning job was never killed — max_execution_time did not fire");
+        .expect("spinning job was never killed - max_execution_time did not fire");
     assert!(resp.ended, "worker died without sealing a response");
     let body = resp.body_string();
     assert!(
@@ -136,7 +136,7 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     );
     // The fatal fires mid-display: the error output itself committed the head as
     // 200 before php_error_cb could swap in a 500 (it only does so while no
-    // headers are sent) — canonical PHP behavior for a mid-output fatal with
+    // headers are sent) - canonical PHP behavior for a mid-output fatal with
     // display_errors=On.
     assert_eq!(resp.status(), 200);
 

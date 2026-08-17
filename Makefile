@@ -1,7 +1,7 @@
 # Distro-neutral PHP discovery: everything derives from php-config (override with
-# PHP_CONFIG=/path/to/php-config). Layouts differ per OS — lib vs lib64 (Fedora),
+# PHP_CONFIG=/path/to/php-config). Layouts differ per OS - lib vs lib64 (Fedora),
 # lib/phpXX (Alpine), plain libphp.so vs versioned libphpX.Y.so (Debian/Ubuntu),
-# libphp.dylib (macOS) — so the embed lib is located under the php-config prefix and
+# libphp.dylib (macOS) - so the embed lib is located under the php-config prefix and
 # normalized into target/phplib for the linker (-lphp needs the plain name).
 PHP_CONFIG ?= php-config
 LOCATE_PHP = PREFIX=$$($(PHP_CONFIG) --prefix 2>/dev/null); test -n "$$PREFIX" || { echo "$(PHP_CONFIG) not found; set PHP_CONFIG=/path/to/php-config"; exit 1; }; LIBPHP=$$(find "$$PREFIX/lib64" "$$PREFIX/lib" "$$PREFIX"/lib/php* -maxdepth 1 \( -name 'libphp*.so' -o -name 'libphp*.dylib' \) 2>/dev/null | head -1); test -n "$$LIBPHP" || { echo "no libphp*.so/.dylib under $$PREFIX; install your distro's PHP embed package or build PHP with --enable-embed=shared"; exit 1; }; LIBDIR=$$(dirname "$$LIBPHP"); mkdir -p target/phplib || exit 1; case "$$LIBPHP" in *.dylib) ln -sf "$$LIBPHP" target/phplib/libphp.dylib || exit 1;; *) ln -sf "$$LIBPHP" target/phplib/libphp.so || exit 1;; esac; PHPLIB="$$PWD/target/phplib"
@@ -63,10 +63,10 @@ test_e2e:
 	cargo test -p tests --test e2e --features e2e -- --test-threads=1
 
 # Rebuild the embed PHP rapira links against, from a php-src checkout, using the
-# same flag set CI builds from (ci/php-configure-flags.txt). distclean (not just
+# same flag set CI builds from (.github/php-configure-flags.txt). distclean (not just
 # clean) because a flag change requires wiping configure caches; it is skipped
 # silently on a fresh checkout. The brew pkg-config paths and SDK iconv override
-# mirror .github/workflows/master.yml — bare --with-iconv cannot locate libiconv
+# mirror .github/workflows/master.yml - bare --with-iconv cannot locate libiconv
 # on macOS, and the SDK variant is appended after the file flags so autoconf
 # last-wins applies.
 PHP_SRC ?= ../../third-party/php-src
@@ -75,11 +75,11 @@ PHP_PREFIX ?= $(HOME)/.local/share/php-nts
 php:
 	@test -d "$(PHP_SRC)" || { echo "php-src not found at $(PHP_SRC); set PHP_SRC=/path/to/php-src"; exit 1; }
 	-@$(MAKE) -C "$(PHP_SRC)" distclean >/dev/null 2>&1
-	@FLAGS="$$(tr '\n' ' ' < ci/php-configure-flags.txt)"; \
+	@FLAGS="$$(tr '\n' ' ' < .github/php-configure-flags.txt)"; \
 	EXTRA=""; \
 	if [ "$$(uname)" = "Darwin" ]; then \
-		export PKG_CONFIG_PATH="$$(brew --prefix openssl@3)/lib/pkgconfig:$$(brew --prefix curl)/lib/pkgconfig:$$(brew --prefix oniguruma)/lib/pkgconfig:$$(brew --prefix libxml2)/lib/pkgconfig:$$(brew --prefix sqlite)/lib/pkgconfig$${PKG_CONFIG_PATH:+:$$PKG_CONFIG_PATH}"; \
-		EXTRA="--with-iconv=$$(xcrun --show-sdk-path)/usr"; \
+		export PKG_CONFIG_PATH="$$(brew --prefix openssl@3)/lib/pkgconfig:$$(brew --prefix curl)/lib/pkgconfig:$$(brew --prefix oniguruma)/lib/pkgconfig:$$(brew --prefix libxml2)/lib/pkgconfig:$$(brew --prefix sqlite)/lib/pkgconfig:$$(brew --prefix libffi)/lib/pkgconfig$${PKG_CONFIG_PATH:+:$$PKG_CONFIG_PATH}"; \
+		EXTRA="--with-iconv=$$(xcrun --show-sdk-path)/usr --with-gettext=$$(brew --prefix gettext)"; \
 	fi; \
 	cd "$(PHP_SRC)" && \
 	./buildconf --force && \

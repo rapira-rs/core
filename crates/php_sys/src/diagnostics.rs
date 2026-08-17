@@ -118,7 +118,7 @@ mod tests {
         assert_eq!(level_of(E_CORE_WARNING, 0), (Level::WARN, "Warning"));
     }
 
-    /// A type no arm recognizes reports at `Warn`, and is still subject to the mask — the
+    /// A type no arm recognizes reports at `Warn`, and is still subject to the mask - the
     /// unknown arm is not itself an exemption.
     #[test]
     fn an_unknown_error_type_still_obeys_the_mask() {

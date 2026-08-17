@@ -2,7 +2,7 @@
 //! `$_SERVER` `HTTP_*` mapping. The boundary carries one entry per field line;
 //! only the CGI-serving modes fold, once, at request construction (ReqC).
 
-/// The separator joining repeats of `name`, or `None` for a singleton field —
+/// The separator joining repeats of `name`, or `None` for a singleton field -
 /// first line wins, the rest are dropped (joining a second `Authorization` into
 /// the first would corrupt the credential php-src decodes). Combining is legal
 /// only for comma-list fields (RFC 9110 §5.3,
@@ -31,7 +31,7 @@ pub(crate) fn field_line_separator(name: &str) -> Option<&'static [u8]> {
 
 /// Fold per-line header entries to one entry per name (case-insensitive, first-seen
 /// name spelling and order kept): list fields join on their separator, singleton
-/// fields keep the first line. The CGI mapping needs exactly one value per name —
+/// fields keep the first line. The CGI mapping needs exactly one value per name -
 /// `HTTP_*` registration is last-write-wins, so unfolded repeats would silently
 /// keep whichever line landed last.
 pub(crate) fn fold_field_lines(headers: &[(String, Vec<u8>)]) -> Vec<(String, Vec<u8>)> {

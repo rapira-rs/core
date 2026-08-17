@@ -3,13 +3,16 @@
 //! worker. Workers write their own slot; the master reads all slots for pool
 //! scaling decisions and writes only STARTING (at fork) and FREE (after reap).
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicU32, AtomicU64,
+    Ordering::{Relaxed, Release},
+};
 
 pub const SB_MAX_SLOTS: usize = 4096;
 
 pub const SLOT_FREE: u32 = 0; // no worker bound (master clears after reap)
 pub const SLOT_STARTING: u32 = 1; // master forked; worker has not reported in yet
-pub const SLOT_IDLE: u32 = 2; // parked waiting for a job — spare capacity
+pub const SLOT_IDLE: u32 = 2; // parked waiting for a job - spare capacity
 pub const SLOT_ACTIVE: u32 = 3; // executing a request
 pub const SLOT_DRAINING: u32 = 4; // self-initiated exit pending (quota / unhealthy)
 
@@ -114,8 +117,9 @@ impl Scoreboard {
     /// and spare-capacity math see the in-flight fork.
     pub fn set_starting(&self, i: usize) {
         if let Some(s) = self.slots.get(i) {
-            s.state.store(SLOT_STARTING, Relaxed);
+            // timestamp before state, matching the worker-side store order
             s.last_activity_ms.store(now_millis(), Relaxed);
+            s.state.store(SLOT_STARTING, Release);
         }
     }
 

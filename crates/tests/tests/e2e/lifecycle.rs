@@ -50,7 +50,7 @@ fn killed_worker_respawns() {
 }
 
 // After the master exits its workers reparent away, so `worker_pids` can no
-// longer see them — poll the captured pids directly until every one is gone.
+// longer see them - poll the captured pids directly until every one is gone.
 fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
     let end = Instant::now() + timeout;
     loop {
@@ -103,7 +103,7 @@ fn max_requests_recycles() {
     let pid0 = pids0[0];
     // The backlog covers the swap gap: the master never closes the listen fd, so
     // every parsed request is served across recycles. The one droppable sliver
-    // is a connection accepted but not yet read when the drain starts — the
+    // is a connection accepted but not yet read when the drain starts - the
     // front closes it before any response byte, like any graceful stop. A real
     // client retries an idempotent request whose connection died responseless,
     // and the retry lands in the shared backlog for the next worker: model
@@ -185,7 +185,7 @@ fn master_failboot_exits_70() {
 }
 
 /// A worker-mode bootstrap that never calls handle_request() is a gen-0 boot
-/// failure: strikes accumulate and the master failboots — never a hang, never
+/// failure: strikes accumulate and the master failboots - never a hang, never
 /// a healthy-looking pool shedding 503s forever.
 #[test]
 fn worker_bootstrap_that_never_serves_failboots() {
@@ -275,7 +275,7 @@ fn non_utf8_multipart_boundary_uploads() {
 }
 
 /// A field sent more than once reaches PHP as one value: a comma list, and `"; "` for
-/// Cookie. Only observable over a real socket — the in-process harness builds a request
+/// Cookie. Only observable over a real socket - the in-process harness builds a request
 /// whose fields are already combined.
 #[test]
 fn repeated_request_fields_reach_php_combined() {
@@ -308,7 +308,7 @@ fn repeated_request_fields_reach_php_combined() {
 
 /// A wire name carrying `_` or `.` maps onto the CGI variable a `-` name owns. The `.`
 /// half of that only closes end to end, because PHP is what rewrites `.` to `_` when it
-/// registers the variable — the front never produces the colliding name itself.
+/// registers the variable - the front never produces the colliding name itself.
 #[test]
 fn alias_names_never_reach_a_cgi_variable() {
     let srv = spawn_with_config(
@@ -336,7 +336,7 @@ fn alias_names_never_reach_a_cgi_variable() {
     );
 }
 
-/// `reject` turns the module's HTTPStatus(400) into a real 400 on the wire — that
+/// `reject` turns the module's HTTPStatus(400) into a real 400 on the wire - that
 /// translation happens in pingora's fail_to_proxy, so only an e2e run proves it.
 #[test]
 fn reject_policy_answers_400_for_an_alias_name() {
@@ -474,7 +474,7 @@ fn dispatcher_request_fidelity_over_the_wire() {
 /// A PHP-written head crosses the wire: the status line, one field line per
 /// list value, and the front's own framing (PHP's content-length dropped, the
 /// real one sent). HEAD on the same probe carries neither body nor a
-/// content-length — the buffered length is not what a GET would send
+/// content-length - the buffered length is not what a GET would send
 /// (RFC 9110 §8.6, https://www.rfc-editor.org/rfc/rfc9110#section-8.6).
 #[test]
 fn dispatcher_write_head_reaches_the_wire() {
@@ -532,7 +532,7 @@ fn dispatcher_write_head_reaches_the_wire() {
 
 /// Host-side multipart over the wire: a non-UTF-8 boundary round-trips, the
 /// spool file dies with finalization, malformed framing answers 400 and an
-/// over-limit file part 413 — before any of it reaches PHP.
+/// over-limit file part 413 - before any of it reaches PHP.
 #[test]
 fn dispatcher_multipart_over_the_wire() {
     let srv = spawn_with_http_extra(

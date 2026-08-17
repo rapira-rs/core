@@ -14,6 +14,10 @@ zend_executor_globals *rapira_eg(void) {
     return &executor_globals;
 }
 
+zend_compiler_globals *rapira_cg(void) {
+    return &compiler_globals;
+}
+
 php_core_globals *rapira_pg(void) {
     return &core_globals;
 }

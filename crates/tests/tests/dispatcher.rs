@@ -4,8 +4,8 @@ use php_sys::{Mode, Rapira};
 use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 
 /// Outside dispatcher mode nothing feeds this process units, so the call must
-/// throw the specific `NotInDispatcherModeError` — catchable by its own name,
-/// branded `RapiraThrowable` — and the `RuntimeException` family must be
+/// throw the specific `NotInDispatcherModeError` - catchable by its own name,
+/// branded `RapiraThrowable` - and the `RuntimeException` family must be
 /// catchable by its stock parent. Hierarchy is asserted through catch behavior:
 /// a wrong parent CE passed to a registrar compiles fine and only fails here.
 #[test]
@@ -33,7 +33,7 @@ fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Singleton identity, the interface chain, and the clone block — reported by
+/// Singleton identity, the interface chain, and the clone block - reported by
 /// the worker script through the app log, since worker output has nowhere else
 /// to go until the Exchange verbs land.
 #[test]

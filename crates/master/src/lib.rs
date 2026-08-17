@@ -35,7 +35,7 @@ pub const WORKER_EXIT_DRAINED: i32 = 0;
 /// Quota recycle (e.g. max_requests): immediate respawn, no backoff.
 pub const WORKER_EXIT_RECYCLE: i32 = 88;
 /// Self-reported unhealthy: respawn with backoff (gen-0 with zero handled
-/// requests is a boot failure — [`run`] returns an error).
+/// requests is a boot failure - [`run`] returns an error).
 pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// Master exit code the caller should use when [`run`] returns a boot-failure
 /// error (gen-0 worker died unhealthy before handling any request).

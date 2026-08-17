@@ -40,10 +40,10 @@ bind! {
     zend_throw_error, zend_value_error, zend_throw_exception,
     // the value-object constructor bodies (src/values.rs):
     // zend_update_property_str shares the ZPP-owned zend_string (addref, no
-    // byte copy); instanceof_function is inline — its slow path is exported
+    // byte copy); instanceof_function is inline - its slow path is exported
     zend_update_property_str, instanceof_function_slow, zend_zval_value_name, IS_OBJECT,
     // Rapira\log()'s throwable flattener (src/dispatcher.rs): add_assoc_str /
-    // add_index_zval are inline — add_assoc_stringl_ex and
+    // add_index_zval are inline - add_assoc_stringl_ex and
     // zend_hash_index_update are their exported carriers; smart_str_free is
     // inline -> rapira_smart_str_free shim
     zend_read_property, zend_get_exception_base, zend_ce_throwable, php_json_encode,
@@ -64,7 +64,7 @@ bind! {
     zend_call_function, zend_fcall_info_init, zval_ptr_dtor, zend_hash_str_del,  // zval_ptr_dtor_nogc is inline-only -> use zval_ptr_dtor
     // zend_string_init is inline-only; the exported interner fn-pointer covers startup-time strings
     zend_hash_str_update, zend_string_init_interned,
-    php_default_post_reader, php_default_treat_data, php_default_input_filter, zend_call_destructors,
+    php_default_post_reader, php_default_treat_data, php_default_input_filter,
     php_call_shutdown_functions, zend_observer_fcall_end_all, zend_unset_timeout, php_handle_auth_data, php_handle_aborted_connection,
     // consts
     SAPI_HEADER_SENT_SUCCESSFULLY, SAPI_HEADER_SEND_FAILED, SAPI_HEADER_DO_SEND,

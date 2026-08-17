@@ -101,7 +101,7 @@ impl RapiraHandle {
         self.dispatcher
     }
 
-    // pending is a diagnostic gauge (Dispatcher::getInfo) — Relaxed. Incremented
+    // pending is a diagnostic gauge (Dispatcher::getInfo) - Relaxed. Incremented
     // before the send, decremented on give-up: the consumer decrements as soon
     // as it wakes, so the reverse order could wrap the counter below zero.
     pub async fn handle(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {

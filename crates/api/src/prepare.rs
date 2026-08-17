@@ -1,6 +1,6 @@
 //! Master-side pre-fork resource preparation. Extensions bind their listen
-//! sockets here — synchronously, before any fork and before any runtime
-//! exists — and the bound fds are inherited by every forked worker.
+//! sockets here - synchronously, before any fork and before any runtime
+//! exists - and the bound fds are inherited by every forked worker.
 
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
@@ -17,7 +17,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 pub const LISTEN_BACKLOG: i32 = 65535;
 
 /// Bind address of a prepared listener. `addr_string()` is the canonical
-/// string for BOTH pingora's endpoint (`add_tcp`/`add_uds`) and its `Fds` key —
+/// string for BOTH pingora's endpoint (`add_tcp`/`add_uds`) and its `Fds` key -
 /// pingora adopts only on an exact match, and a mismatch silently rebinds
 /// (for unix sockets: unlinks and steals the master's socket). Derive both
 /// strings from this one method, never by hand.
@@ -44,7 +44,7 @@ impl ListenAddr {
 /// matters only for a future re-exec reload, which must clear it first).
 ///
 /// Ownership: exactly one closer per process. In the MASTER the listener stays
-/// inside its extension for the master's whole life — respawned workers must
+/// inside its extension for the master's whole life - respawned workers must
 /// inherit it again. In a WORKER, `run` transfers the child's copy to the
 /// adopter via `into_raw_fd` (pingora closes it at teardown).
 #[derive(Debug)]

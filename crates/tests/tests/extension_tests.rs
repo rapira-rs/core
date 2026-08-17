@@ -245,7 +245,7 @@ fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
 fn classic_mode_serves_exec() -> anyhow::Result<()> {
     let _guard = php_lock();
     // Classic mode runs the front controller per exec, with the URI in $_GET, so it
-    // echoes "ok:<from>" — exec works with a real front controller (why serve takes a SCRIPT).
+    // echoes "ok:<from>" - exec works with a real front controller (why serve takes a SCRIPT).
     let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionRuntime::new();
     host.register::<Driver>(())?;
@@ -266,7 +266,7 @@ fn classic_mode_serves_exec() -> anyhow::Result<()> {
 }
 
 /// Drives one request whose PHP handler sets a status + session cookie and then throws
-/// with output buffered — a COMPLETE, head-only error response. Regression guard for the
+/// with output buffered - a COMPLETE, head-only error response. Regression guard for the
 /// truncation rule (`Context::is_truncated`): `exec` maps a truncated terminal frame to
 /// an error, so a buffered/head-only error response must NOT be flagged truncated, or the
 /// extension would serve a generic 502 instead of the real 404.
@@ -320,7 +320,7 @@ fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drives one request whose handler echoes and THEN throws — body output began
+/// Drives one request whose handler echoes and THEN throws - body output began
 /// during the handler, so the sealed frame is truncated and `exec` must surface
 /// it as an error rather than deliver a possibly-incomplete body.
 struct TruncatedDriver;
@@ -394,7 +394,7 @@ fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A long-lived server extension whose `run` never returns on its own — it runs until the
+/// A long-lived server extension whose `run` never returns on its own - it runs until the
 /// host signals shutdown.
 struct Resident;
 
@@ -434,7 +434,7 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
     );
 
     // Dropping the guard fires the internal stop: `run` (which never returns) is
-    // cancelled, `shutdown` is driven, and the tasks drain — promptly, not hanging.
+    // cancelled, `shutdown` is driven, and the tasks drain - promptly, not hanging.
     let start = Instant::now();
     drop(running);
     drop(rapira);
@@ -620,7 +620,7 @@ fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
             ..rapira_runtime::RuntimeOptions::default()
         },
     );
-    // `stop` cancels the pending `run`, then drives `shutdown` — which overruns the grace.
+    // `stop` cancels the pending `run`, then drives `shutdown` - which overruns the grace.
     let start = Instant::now();
     let outcomes = running.stop();
     drop(rapira);

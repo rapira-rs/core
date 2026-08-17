@@ -11,7 +11,7 @@ use php_sys::{Frame, Mode, Rapira};
 use std::io::Cursor;
 use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
-/// Boot `verbs-worker.php`, serve one probe request, tear down — the shared
+/// Boot `verbs-worker.php`, serve one probe request, tear down - the shared
 /// shape of every single-probe test.
 fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
     let _guard = php_lock();
@@ -68,7 +68,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
 
 /// `tryReceive()`/`receive(0)`/`receive(50ms)` against an empty-but-open
 /// channel: no handle is ever created, so no job can precede the probes. The
-/// pool must stay alive until the fixture has logged — dropping it early would
+/// pool must stay alive until the fixture has logged - dropping it early would
 /// turn Empty into Closed and fail the probes.
 #[test]
 fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
@@ -184,7 +184,7 @@ fn status_range_and_header_shape_value_errors() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Contract: an empty chunk without eos does nothing — in particular it must
+/// Contract: an empty chunk without eos does nothing - in particular it must
 /// not commit the implicit 200 and lock out a later `writeHead()`.
 #[test]
 fn empty_non_eos_chunk_does_nothing() -> anyhow::Result<()> {
@@ -278,7 +278,7 @@ fn interim_head_is_emitted_before_the_final_head() -> anyhow::Result<()> {
 }
 
 /// 101 is the carve-out in the 1xx interim rule: it commits as the final head,
-/// locks out any later `writeHead()`, and — being 1xx — carries no body:
+/// locks out any later `writeHead()`, and - being 1xx - carries no body:
 /// chunks are accepted and dropped.
 #[test]
 fn writehead_101_commits_as_final() -> anyhow::Result<()> {
@@ -305,7 +305,7 @@ fn writehead_101_commits_as_final() -> anyhow::Result<()> {
 }
 
 /// Buffered chunks concatenate, the unit stays unfinalized between them, and
-/// the first chunk commits the implicit 200 — a later `writeHead()` must see
+/// the first chunk commits the implicit 200 - a later `writeHead()` must see
 /// `HeadAlreadyWrittenError` instead of restamping the status.
 #[test]
 fn chunked_body_buffers_and_locks_the_head() -> anyhow::Result<()> {
@@ -356,21 +356,26 @@ fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An Exchange dropped without finalizing fails that unit only: its Frame
-/// sender dies unsent (the client sees the upstream failure), and the worker
-/// serves the next unit normally.
+/// An Exchange dropped without finalizing fails that unit only: the host
+/// answers 500 for it (a lost unit is a failure, never an implicit response),
+/// and the worker serves the next unit normally.
 #[test]
 fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle()?;
 
-    let (status, body) =
-        drain(h.handle_blocking(req("/?probe=abandon", "dispatcher/verbs-worker.php"))?);
+    let resp =
+        drain_resp(h.handle_blocking(req("/?probe=abandon", "dispatcher/verbs-worker.php"))?);
     assert_eq!(
-        (status, body.as_str()),
-        (0, ""),
-        "an abandoned unit must die unsent, not fake a response"
+        (
+            resp.status(),
+            resp.body.as_slice(),
+            resp.truncated,
+            resp.ended
+        ),
+        (500, &b""[..], false, true),
+        "an abandoned unit is failed by the host with a complete 500"
     );
 
     let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
@@ -379,6 +384,37 @@ fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
         (200, "state=false"),
         "the worker must keep serving after an abandoned unit"
     );
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+/// `Work::__destruct()` is part of the contract surface; an explicit call on
+/// a live unit does nothing.
+#[test]
+fn explicit_destruct_call_is_a_noop() -> anyhow::Result<()> {
+    let (status, body) = verbs_probe("/?probe=destruct-explicit")?;
+    assert_eq!((status, body.as_str()), (200, "explicit-destruct-ok"));
+    Ok(())
+}
+
+/// An Exchange abandoned after the head reached the wire cannot be turned
+/// into a 500: the host ends the stream truncated so the client detects it.
+#[test]
+fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
+    let h = r.handle()?;
+
+    let resp =
+        drain_resp(h.handle_blocking(req("/?probe=abandon-mid", "dispatcher/verbs-worker.php"))?);
+    assert_eq!(resp.status(), 200, "the committed head stands");
+    assert_eq!(resp.body, b"partial");
+    assert!(resp.truncated, "the cut must be visible to the client");
+
+    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    assert_eq!((status, body.as_str()), (200, "state=false"));
 
     drop(h);
     r.shutdown();
@@ -410,7 +446,11 @@ fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
         }],
     });
     let (status, body) = drain(h.handle_blocking(rq)?);
-    assert_eq!((status, body.as_str()), (0, ""), "the unit dies unsent");
+    assert_eq!(
+        (status, body.as_str()),
+        (500, ""),
+        "the host fails the unit"
+    );
     assert!(
         !spool.exists(),
         "dropping the exchange must unlink the spooled file"
@@ -445,7 +485,7 @@ fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// No body on a HEAD response or a 204 — chunks are accepted and dropped at
+/// No body on a HEAD response or a 204 - chunks are accepted and dropped at
 /// seal, the head stands.
 /// https://www.rfc-editor.org/rfc/rfc9112#section-6.3
 #[test]
@@ -803,8 +843,8 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
 }
 
 /// `getInfo()` while handling: the outstanding unit counts as active. The
-/// counts are deterministic here — the one job was decremented from `pending`
-/// at pull, and nothing else is queued — so assert them exactly (a `>= 0`
+/// counts are deterministic here - the one job was decremented from `pending`
+/// at pull, and nothing else is queued - so assert them exactly (a `>= 0`
 /// assertion would pass for almost any broken counter).
 #[test]
 fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {
@@ -849,7 +889,7 @@ fn wait_app_record(message: &str) -> String {
     }
 }
 
-/// `flush()` puts the head on the wire while the body is still 300ms away —
+/// `flush()` puts the head on the wire while the body is still 300ms away -
 /// the bounded read is the timing proof.
 #[test]
 fn flush_puts_the_head_on_the_wire_before_eos() -> anyhow::Result<()> {
@@ -973,7 +1013,7 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     let h = r.handle()?;
 
     let rx = h.handle_blocking(req("/?probe=discard", "dispatcher/stream-worker.php"))?;
-    // wait until the unit is out with PHP, then leave — dropping earlier can
+    // wait until the unit is out with PHP, then leave - dropping earlier can
     // race the pre-handout probe, which would fail the unit before PHP sees it
     wait_app_record("discard-held");
     drop(rx);
@@ -1071,7 +1111,7 @@ fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
 }
 
 /// FileNotSendableException is raised before anything is written, so the
-/// handler can still answer 404 — the reason it is catchable.
+/// handler can still answer 404 - the reason it is catchable.
 #[test]
 fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
     let _guard = php_lock();

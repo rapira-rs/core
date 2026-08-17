@@ -1,5 +1,5 @@
 //! Pidfile guard: written with the master pid, unlinked by `Drop` on every
-//! master exit path. Only the master ever holds one — children `_exit` without
+//! master exit path. Only the master ever holds one - children `_exit` without
 //! running drops, so a worker can never unlink it.
 
 use std::io;

@@ -156,7 +156,7 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     );
 
     // the teardown bailout recycles the worker: full php_request_shutdown +
-    // re-run bootstrap — statics reset, so the counter starts over
+    // re-run bootstrap - statics reset, so the counter starts over
     assert_eq!(
         s3, 200,
         "worker must recover after a teardown bailout (got {s3})"
@@ -310,7 +310,7 @@ fn worker_finish_request() -> anyhow::Result<()> {
         b1.contains("count=0") && b1.contains("BEFORE"),
         "pre-finish output must reach the client (got: {b1:?})"
     );
-    // output AFTER it is dropped — finish() cleared the response sender (tx = None)
+    // output AFTER it is dropped - finish() cleared the response sender (tx = None)
     assert!(
         !b1.contains("AFTER"),
         "post-finish output must NOT reach the client (got: {b1:?})"

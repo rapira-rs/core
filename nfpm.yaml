@@ -15,7 +15,7 @@ vendor: "rapira"
 homepage: "https://github.com/rapira-rs/rapira"
 license: "MIT"
 description: |
-  Rapira — PHP application server.
+  Rapira - PHP application server.
   Bundles an NTS PHP ${PHP_MINOR} embed runtime (libphp.so,
   common web extension set) under /usr/lib/rapira.
 # rapira-php8.4 and rapira-php8.5 install identical paths; the
@@ -26,7 +26,7 @@ conflicts:
   - "rapira"
 replaces:
   - "rapira"
-# nfpm does not env-expand contents.src paths — the workflow stages the
+# nfpm does not env-expand contents.src paths - the workflow stages the
 # arch/php-specific pkgroot at this fixed path before each invocation.
 contents:
   - src: "./dist/pkgroot-current/usr/bin/rapira"

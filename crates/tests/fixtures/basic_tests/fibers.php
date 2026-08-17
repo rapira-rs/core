@@ -10,7 +10,7 @@ function fib(int $n): int
 $sum = 0;
 for ($i = 0; $i < 300; $i++) {
     $f = new Fiber(function (): int {
-        $a = fib(14);                 // 377 — recursion on the fiber's OWN stack
+        $a = fib(14);                 // 377 - recursion on the fiber's OWN stack
         $b = Fiber::suspend($a);      // -> worker stack; resumes with 377
         $c = Fiber::suspend($b + 1);  // -> worker stack; resumes with 378
         return $a + $c;               // 755
@@ -22,7 +22,7 @@ for ($i = 0; $i < 300; $i++) {
 }
 // sum = 300 * 755 = 226500
 
-// 25 deeply nested fibers — 25 fiber stacks stacked at once, so base/limit
+// 25 deeply nested fibers - 25 fiber stacks stacked at once, so base/limit
 //    is saved 25 times on the way in and restored 25 times on the way out.
 function nest(int $depth): int
 {

@@ -35,7 +35,7 @@ fn invalid_utf8_is_substituted_not_dropped() {
     );
 }
 
-/// Monolog testFormat: an object is wrapped in its class name —
+/// Monolog testFormat: an object is wrapped in its class name -
 /// `{"Monolog\\Formatter\\TestFooNorm":{"foo":"fooValue"}}`. We emit the bare
 /// property bag, so nothing in the record says what type it was.
 #[test]

@@ -343,8 +343,8 @@ pub fn app_record(script: &str) -> AppRecord {
     records.into_iter().next().expect("checked above")
 }
 
-/// Install the capturing subscriber once (records all `tracing` output — plus
-/// anything still on the `log` facade — into `LOG_CAPTURE`).
+/// Install the capturing subscriber once (records all `tracing` output - plus
+/// anything still on the `log` facade - into `LOG_CAPTURE`).
 pub fn init_log_capture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {

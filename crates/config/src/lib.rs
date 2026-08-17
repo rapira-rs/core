@@ -24,7 +24,7 @@ pub enum Listen {
 impl fmt::Display for Listen {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // `Tcp(0.0.0.0:8000)` prints as `0.0.0.0:8000`, not `:8000` — it binds the
+            // `Tcp(0.0.0.0:8000)` prints as `0.0.0.0:8000`, not `:8000` - it binds the
             // same interfaces and re-parses to the same value.
             Listen::Tcp(addr) => write!(f, "{addr}"),
             Listen::Unix(path) => write!(f, "unix:{}", path.display()),
@@ -78,7 +78,7 @@ impl FromStr for Listen {
     }
 }
 
-/// CLI-supplied overrides, layered on top of the config file. Plain data — clap
+/// CLI-supplied overrides, layered on top of the config file. Plain data - clap
 /// builds this in `main`; `None`/`false` means "not overridden here".
 #[derive(Debug, Default)]
 pub struct Overrides {
@@ -167,7 +167,7 @@ impl SupervisorSettings {
     /// How long a worker may drain in-flight work before the master escalates.
     /// The master sends QUIT at t=0 and SIGTERM at `process_control_timeout`, and
     /// the fork bracket deliberately leaves SIGTERM at SIG_DFL in the child so
-    /// that escalation is a fast kill — a drain still running at the deadline is
+    /// that escalation is a fast kill - a drain still running at the deadline is
     /// therefore cut short, mid-response. Subtracting the margin gives the worker
     /// room to finish, or to report what it stranded, before that happens.
     pub fn drain_grace(&self) -> Duration {
@@ -318,7 +318,7 @@ struct HttpSection {
     server_port: Option<u16>,
     max_body_size_mb: Option<usize>,
     write_timeout_secs: Option<u64>,
-    /// Unrecognised values are a boot error, not a silent fall back to the default —
+    /// Unrecognised values are a boot error, not a silent fall back to the default -
     /// a security knob that survives a typo is worse than one that refuses to start.
     unsafe_field_names: Option<UnsafeFieldNames>,
     /// Option so presence is observable: the table configures the host-side
@@ -346,8 +346,8 @@ struct UploadsSection {
     max_part_headers: Option<usize>,
 }
 
-/// One pool table as written. Embedded by name — never `#[serde(flatten)]`, which
-/// serde does not support alongside `deny_unknown_fields` — so a plugin table can
+/// One pool table as written. Embedded by name - never `#[serde(flatten)]`, which
+/// serde does not support alongside `deny_unknown_fields` - so a plugin table can
 /// carry its own pool with typo denial intact.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -385,7 +385,7 @@ struct LogSection {
     level: Option<LogLevel>,
     format: Option<LogFormat>,
     /// Open-ended table: keys are log targets, so `deny_unknown_fields` cannot
-    /// apply — key shape is validated in `resolve_log` instead.
+    /// apply - key shape is validated in `resolve_log` instead.
     #[serde(default)]
     targets: BTreeMap<String, LogLevel>,
 }
@@ -468,7 +468,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
     let pool = resolve_pool(file.pool, &cli, config_dir, "pool")?;
     // The table configures the host-side multipart parser; outside dispatcher
     // mode php-src parses the body and php.ini owns the limits, so an explicit
-    // table would sit inert — refuse it instead.
+    // table would sit inert - refuse it instead.
     if file.http.uploads.is_some() && pool.mode != RunMode::Dispatcher {
         bail!(
             "http.uploads applies to dispatcher mode only (pool.mode = \"{}\")",
@@ -547,7 +547,7 @@ fn resolve_uploads(
 
 /// Resolve one pool table. `table` is the key path used in every error message
 /// (`pool` today, `grpc.pool` when a plugin owns a pool). `cli` carries CLI
-/// overrides, which apply to the root pool only — pass `&Overrides::default()`
+/// overrides, which apply to the root pool only - pass `&Overrides::default()`
 /// for any other pool.
 fn resolve_pool(
     section: PoolSection,
@@ -659,8 +659,8 @@ fn resolve_supervisor(
 }
 
 fn resolve_log(section: LogSection) -> anyhow::Result<LogSettings> {
-    // Target names cannot be checked against a known set — they are open-ended
-    // module paths — so validation pins the shape EnvFilter parses as a plain
+    // Target names cannot be checked against a known set - they are open-ended
+    // module paths - so validation pins the shape EnvFilter parses as a plain
     // target. Anything outside it is filter grammar (`[` opens a span clause,
     // `,`/`=` split directives, a leading symbol is a parse error) and would be
     // reinterpreted or dropped instead of matched.
@@ -937,7 +937,7 @@ mod tests {
     }
 
     /// The floor is checked on the resolved value, after precedence, so a zero from
-    /// either layer must fail — including a CLI `0` shadowing a usable file value.
+    /// either layer must fail - including a CLI `0` shadowing a usable file value.
     #[test]
     fn pool_processes_zero_is_rejected_from_either_layer() {
         let file = load_str("[pool]\nprocesses = 0\nentrypoint = \"a.php\"\n").unwrap();
@@ -961,7 +961,7 @@ mod tests {
     }
 
     /// `[http.uploads]` resolves every knob (with unit conversion, dir relative
-    /// to the config) and rejects a zero max_files like its siblings — zero
+    /// to the config) and rejects a zero max_files like its siblings - zero
     /// would 413 every file part while booting clean.
     #[test]
     fn http_uploads_resolve_and_reject_zero_files() {

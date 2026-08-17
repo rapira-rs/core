@@ -26,3 +26,13 @@
 --with-pdo-sqlite
 --with-sqlite3
 --with-iconv
+--enable-calendar
+--enable-exif
+--enable-ftp
+--enable-sockets
+--enable-shmop
+--enable-sysvmsg
+--enable-sysvsem
+--enable-sysvshm
+--with-ffi
+--with-gettext

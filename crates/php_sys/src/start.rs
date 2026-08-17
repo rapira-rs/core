@@ -61,7 +61,7 @@ fn php_series(id: u32) -> (u32, u32) {
 /// Refuse to run against a libphp from a different PHP minor. rapira binds Zend
 /// structures through bindgen at compile time and selects parts of the SAPI
 /// struct with a cfg on the PHP version, so a swapped library is not a load
-/// error — it is `sapi_startup` handed a differently shaped struct. Both sides
+/// error - it is `sapi_startup` handed a differently shaped struct. Both sides
 /// report a compile-time constant, so this is readable before any startup: ours
 /// comes from the headers, the library's from `php_version_id`.
 fn check_linked_php() -> anyhow::Result<()> {
@@ -275,7 +275,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
     })
 }
 
-/// tryReceive() / receive(0): never blocks. The Idle/Active pair still runs — a
+/// tryReceive() / receive(0): never blocks. The Idle/Active pair still runs - a
 /// polling worker must refresh last_activity_ms or the master watchdog
 /// TERMs it as a stuck request (master/src/events.rs:509-517).
 pub(crate) fn pull_job_try() -> Pulled {

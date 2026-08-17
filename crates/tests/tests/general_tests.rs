@@ -19,7 +19,7 @@ fn wait_app_record(message: &str) {
     panic!("no app record {message:?} within 10s");
 }
 
-/// Body source returning at most one byte per read() call — legal `Read`
+/// Body source returning at most one byte per read() call - legal `Read`
 /// behavior that streaming bodies (pipes, chunked decoders) exhibit.
 struct Trickle(std::io::Cursor<Vec<u8>>);
 
@@ -80,7 +80,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("general_tests/abort-worker.php")))?;
     let h = r.handle()?;
 
-    // Drop the receiver only once the handler is provably executing —
+    // Drop the receiver only once the handler is provably executing -
     // dropping earlier hits the pre-handout probe and the handler never runs.
     let rx = h.handle_blocking(req("/", "general_tests/abort-worker.php"))?;
     wait_app_record("held");
@@ -360,7 +360,7 @@ fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
         "general_tests/abort-ignore-worker.php",
     )))?;
     let h = r.handle()?;
-    // Drop the receiver only once the handler is provably executing —
+    // Drop the receiver only once the handler is provably executing -
     // dropping earlier hits the pre-handout probe and the handler never runs.
     let rx = h.handle_blocking(req("/", "general_tests/abort-ignore-worker.php"))?;
     wait_app_record("held");

@@ -31,7 +31,7 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
 
     // outer() -> inner() -> trigger_error(E_USER_ERROR) bails; the closing tags
     // for both frames open at the bailout must still reach the response body,
-    // properly nested and exactly once — an out-of-order or duplicated close is
+    // properly nested and exactly once - an out-of-order or duplicated close is
     // precisely the unbalanced-observer-frames regression this test guards.
     let (_, b1) =
         drain(h.handle_blocking(req("/?mode=fatal", "observer_tests/observer-bailout.php"))?);
