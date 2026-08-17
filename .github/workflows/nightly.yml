@@ -9,8 +9,11 @@ on:
 permissions:
     contents: read
 
+# concurrency is decided before any job if, so ineligible runs (failed CI,
+# fork-PR CI runs, dispatch outside main) must not share the publishing group
+# or they cancel an in-flight publish; the predicate mirrors the guard job's if
 concurrency:
-    group: nightly
+    group: nightly-${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'publish' || github.run_id }}
     cancel-in-progress: true
 
 # One build per merge to main, gated on that commit's CI run succeeding.
