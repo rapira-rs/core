@@ -271,5 +271,7 @@ namespace Rapira\Internal\Http {
         public function writeTrailers(array $trailers): void {}
 
         public function flush(): void {}
+
+        public function __destruct() {}
     }
 }

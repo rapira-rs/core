@@ -57,18 +57,21 @@ pub fn sb_update(event: Event) {
             crate::quota::fire_unhealthy();
         }
         Event::Healthy => s.unhealthy.store(0, Relaxed),
+        // timestamp before state, Release-paired with the master's Acquire
+        // state load: a reader must never see a fresh state with the previous
+        // request's timestamp (the watchdog would TERM a fresh request)
         Event::Idle => {
             let state = if DRAINING.get() {
                 SLOT_DRAINING
             } else {
                 SLOT_IDLE
             };
-            s.state.store(state, Relaxed);
             s.last_activity_ms.store(now_millis(), Relaxed);
+            s.state.store(state, Release);
         }
         Event::Active => {
-            s.state.store(SLOT_ACTIVE, Relaxed);
             s.last_activity_ms.store(now_millis(), Relaxed);
+            s.state.store(SLOT_ACTIVE, Release);
         }
         Event::Draining => DRAINING.set(true),
     }

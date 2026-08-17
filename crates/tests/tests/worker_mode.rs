@@ -1,6 +1,6 @@
-//! Worker mode (`\Rapira\handle_request`) smoke set — per-job superglobals,
+//! Worker mode (`\Rapira\handle_request`) smoke set - per-job superglobals,
 //! the draining-false contract, the wrong-mode gates, one test per
-//! cycle-terminal state — plus the per-job hygiene pins ($_ENV survival,
+//! cycle-terminal state - plus the per-job hygiene pins ($_ENV survival,
 //! proto_num). The bulk of worker-mode coverage lives in the ported suites.
 
 use php_sys::{Mode, Rapira};
@@ -12,7 +12,7 @@ use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, re
 fn worker_serves_with_per_job_superglobals() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/hello-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let resp = drain_resp(h.handle_blocking(req("/?q=zap", "worker/hello-worker.php"))?);
     assert_eq!(resp.status(), 200);
@@ -45,7 +45,7 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(Mode::Worker(fixture("worker/drain-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     for want in ["n=1", "n=2"] {
         let resp = drain_resp(h.handle_blocking(req("/", "worker/drain-worker.php"))?);
         assert_eq!(resp.body_string(), want, "resident state must accumulate");
@@ -67,7 +67,7 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
 fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle()?;
+    let h = r.handle();
     let (status, body) = drain(h.handle_blocking(req("/", "worker/gate-classic.php"))?);
     drop(h);
     r.shutdown();
@@ -84,7 +84,7 @@ fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// dispatcher mode: the gate refuses before the shared intake is touched — an
+/// dispatcher mode: the gate refuses before the shared intake is touched - an
 /// ungated call would steal the unit and serve it with no context bound.
 #[test]
 fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
@@ -95,7 +95,7 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture(
         "worker/gate-dispatcher-worker.php",
     )))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let resp = drain_resp(h.handle_blocking(req("/", "worker/gate-dispatcher-worker.php"))?);
     assert_eq!(
         resp.body_string(),
@@ -129,7 +129,7 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
 fn exit_in_a_handler_survives_the_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/exit-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let resp = drain_resp(h.handle_blocking(req("/?die=1", "worker/exit-worker.php"))?);
     assert_eq!(resp.status(), 200);
@@ -151,7 +151,7 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(Mode::Worker(fixture("worker/one-turn-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     for _ in 0..2 {
         let resp = drain_resp(h.handle_blocking(req("/", "worker/one-turn-worker.php"))?);
         assert_eq!(resp.status(), 200);
@@ -175,7 +175,7 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
 fn never_looping_script_sheds_503() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/never-loop-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     // deadline-bounded: the no-hang claim must fail as a test, not block the suite
     let mut rx = h.handle_blocking(req("/", "worker/never-loop-worker.php"))?;
     let resp = tests::drain_resp_deadline(
@@ -196,7 +196,7 @@ fn never_looping_script_sheds_503() -> anyhow::Result<()> {
 fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/env-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     for job in 0..2 {
         let resp = drain_resp(h.handle_blocking(req("/", "worker/env-worker.php"))?);
         assert_eq!(resp.body_string(), "set-at-boot", "job {job}");
@@ -213,14 +213,14 @@ fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
 fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/location-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let mut rq = req("/", "worker/location-worker.php");
     rq.method = "POST".into();
     let resp = drain_resp(h.handle_blocking(rq)?);
     assert_eq!(resp.status(), 303);
     assert_eq!(resp.header("location").as_deref(), Some("/elsewhere"));
 
-    // GET keeps 302 — the arm is method-conditional
+    // GET keeps 302 - the arm is method-conditional
     let resp = drain_resp(h.handle_blocking(req("/", "worker/location-worker.php"))?);
     assert_eq!(resp.status(), 302);
     drop(h);
@@ -234,7 +234,7 @@ fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
 fn post_location_redirects_303_in_classic_mode() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle()?;
+    let h = r.handle();
     let mut rq = req("/", "worker/location-classic.php");
     rq.method = "POST".into();
     let resp = drain_resp(h.handle_blocking(rq)?);
@@ -253,7 +253,7 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
     let r = Rapira::start(Mode::Worker(fixture("worker/held-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     // occupy the worker, then queue a job and abandon it while it waits
     let rx_a = h.handle_blocking(req("/", "worker/held-worker.php"))?;
@@ -283,7 +283,7 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
 fn nested_handle_request_is_refused() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/nested-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     // deadline-bounded: a guard regression that deadlocks must fail, not hang
     let mut rx = h.handle_blocking(req("/", "worker/nested-worker.php"))?;
     let resp = tests::drain_resp_deadline(

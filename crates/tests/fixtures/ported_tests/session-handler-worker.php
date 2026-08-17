@@ -34,6 +34,17 @@ class ArrayHandler implements \SessionHandlerInterface
 	{
 		return 0;
 	}
+
+	// PHP 8.6 deprecates save handlers without create_sid()/validateId() (required in 9.0)
+	public function create_sid(): string
+	{
+		return bin2hex(random_bytes(8));
+	}
+
+	public function validateId(string $id): bool
+	{
+		return isset(self::$data[$id]);
+	}
 }
 
 $handler = static function (): void {

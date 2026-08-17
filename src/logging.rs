@@ -3,7 +3,7 @@
 //! pingora still logs through the `log` facade, which `init()` bridges
 //! automatically (tracing-subscriber's default `tracing-log` feature installs
 //! `LogTracer` and sets the facade's max level from the filter). `RUST_LOG`,
-//! when set, replaces the configured filter wholesale — rapira's one
+//! when set, replaces the configured filter wholesale - rapira's one
 //! env-beats-config knob; it never affects the format.
 
 use anyhow::Context;
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn plain_layer_colors_only_when_asked() {
         // with_ansi overrides the layer default unconditionally, so the ansi
-        // argument — not the environment — must decide both ways.
+        // argument - not the environment - must decide both ways.
         for (ansi, want_escape) in [(false, false), (true, true)] {
             let sink = Sink::default();
             let sub = tracing_subscriber::registry()

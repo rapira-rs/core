@@ -26,7 +26,7 @@ pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira};
-pub use types::{Context, Frame, Mode, Request, ResponseHead, StreamState};
+pub use types::{Frame, Mode, Request, ResponseHead};
 
 // Zend SUCCESS/FAILURE differ across php-src versions, so they are hardcoded here rather
 // than bound from the headers.
@@ -43,6 +43,7 @@ pub const HASH_KEY_IS_STRING: i64 = 1;
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;
     pub fn rapira_eg() -> *mut zend_executor_globals;
+    pub fn rapira_cg() -> *mut zend_compiler_globals;
     pub fn rapira_pg() -> *mut php_core_globals;
     pub fn rapira_finish_output() -> c_int;
     pub fn rapira_init_call_stack();

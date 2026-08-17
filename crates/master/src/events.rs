@@ -101,7 +101,7 @@ pub(crate) struct Master<F: FnMut(WorkerEnv) -> i32> {
     /// Latched once the pool has ever served a successful request. Guards the
     /// failboot check: only a pool that never managed to serve is an
     /// unrecoverable boot failure. Needed because scoreboard counters are
-    /// unreliable history — a replacement `bind()` zeroes a slot's served count.
+    /// unreliable history - a replacement `bind()` zeroes a slot's served count.
     ever_served: bool,
 }
 
@@ -151,7 +151,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
 
     /// Requests that completed WITHOUT error, pool-wide. A failbooting worker
     /// sheds 503s (handled++ AND errors++), so `handled` alone never reaches 0
-    /// there — the master must weigh successful service, not raw throughput.
+    /// there - the master must weigh successful service, not raw throughput.
     fn total_successful(&self) -> u64 {
         self.scoreboard
             .slots()
@@ -183,10 +183,11 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             .unwrap_or(false)
     }
 
+    // Acquire: ondemand maintenance pairs this with a later timestamp read
     fn slot_is_idle(&self, i: usize) -> bool {
         self.scoreboard
             .slot(i)
-            .map(|s| s.state.load(Relaxed) == SLOT_IDLE)
+            .map(|s| s.state.load(Acquire) == SLOT_IDLE)
             .unwrap_or(false)
     }
 
@@ -316,7 +317,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     /// Overlap reload: bump the generation and spawn one current-gen worker as
     /// headroom, then wait for it to report IDLE or ACTIVE before any old worker
     /// is drained, so serving capacity never dips below the pool. With no live
-    /// old-gen worker there is nothing to overlap — no headroom is spawned.
+    /// old-gen worker there is nothing to overlap - no headroom is spawned.
     fn begin_reload(&mut self, now: Instant) {
         self.table.generation += 1;
         let slot = if self.has_old_gen() {
@@ -330,7 +331,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     /// Enter the overlap gate: for non-ondemand spawn a current-gen replacement
     /// into `slot`, arm the short re-check plus the `process_control_timeout`
     /// safety cap, and wait for it to start serving. Ondemand (or no free slot)
-    /// spawns nothing and drains the next old worker directly — replacements
+    /// spawns nothing and drains the next old worker directly - replacements
     /// come from demand.
     fn reload_enter_await(&mut self, slot: Option<usize>, now: Instant) {
         match slot {
@@ -451,7 +452,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 // Failboot only for a generation-0 worker in a pool that NEVER
                 // served a successful request: an unrecoverable boot failure. A
                 // reload replacement (gen > 0) dying unhealthy must never take
-                // down the running pool — respawn with backoff instead.
+                // down the running pool - respawn with backoff instead.
                 if w.generation == 0 && !self.ever_served {
                     anyhow::bail!(
                         "worker {} exited unhealthy before the pool served any request",
@@ -492,7 +493,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
 
     /// Wall-clock bound on a single request, run from the Normal-state
     /// maintenance tick: an ACTIVE worker whose current request is older than
-    /// `request_terminate_timeout` gets TERM (SIG_DFL in the worker — dies
+    /// `request_terminate_timeout` gets TERM (SIG_DFL in the worker - dies
     /// fast, its queued sockets close, clients retry against healthy workers).
     /// Still ACTIVE a tick later means TERM could not land (uninterruptible
     /// sleep): escalate to KILL.
@@ -506,7 +507,9 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             let Some(s) = self.scoreboard.slot(p.slot) else {
                 continue;
             };
-            if s.state.load(Relaxed) != SLOT_ACTIVE {
+            // Acquire pairs with the worker's Release state store so the
+            // timestamp read below cannot be hoisted above it
+            if s.state.load(Acquire) != SLOT_ACTIVE {
                 continue;
             }
             let age_ms = u128::from(now_ms.saturating_sub(s.last_activity_ms.load(Relaxed)));
@@ -767,7 +770,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             }
 
             // Ondemand: a readable listener while armed forks exactly one.
-            // Arming is re-checked — a control byte above may have changed it.
+            // Arming is re-checked - a control byte above may have changed it.
             if n > 0 && fds.len() > 1 && self.compute_armed() {
                 let readable = fds[1..].iter().any(|p| (p.revents & libc::POLLIN) != 0);
                 if readable {
@@ -1159,7 +1162,7 @@ mod tests {
         let t0 = Instant::now();
         assert!(!m.ever_served);
         // A gen-0 timeout kill before any served request must respawn
-        // immediately — never bail (failboot is for Unhealthy only) and never
+        // immediately - never bail (failboot is for Unhealthy only) and never
         // back off (the master chose this kill).
         let w = dead_worker(4246, 0, 0, t0);
         let r = m.on_child_exit(w, ExitVerdict::TimeoutKill, t0);
@@ -1172,7 +1175,7 @@ mod tests {
     fn ondemand_crash_backoff_suppresses_without_respawn() {
         // A crash under ondemand keeps its backoff deadline as fork suppression:
         // the slot is not spawnable (loop stays disarmed) until the deadline,
-        // whose expiry only lifts the suppression — it never forks.
+        // whose expiry only lifts the suppression - it never forks.
         let mut m = test_master(2, Scaling::Ondemand);
         let t0 = Instant::now();
         let w = dead_worker(4245, 0, 0, t0);
@@ -1231,7 +1234,7 @@ mod tests {
             set_slot(&m, i, SLOT_ACTIVE);
         }
 
-        // Two saturated ticks: the latch must hold the second warning back —
+        // Two saturated ticks: the latch must hold the second warning back -
         // one per saturation episode, not one per second.
         let warns = WarnCounter::default();
         tracing::subscriber::with_default(warns.clone(), || {

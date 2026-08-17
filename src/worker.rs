@@ -53,7 +53,7 @@ fn effective_quota(max_requests: u64) -> u64 {
 }
 
 /// The entire post-fork worker body; returns the process exit code for the
-/// master's fork bracket to `_exit` with. Never runs PHP module teardown —
+/// master's fork bracket to `_exit` with. Never runs PHP module teardown -
 /// workers exit and leave MSHUTDOWN to the master, which owns the single
 /// engine teardown.
 pub fn worker_body(
@@ -65,8 +65,9 @@ pub fn worker_body(
     mut uploads: rapira_runtime::multipart::Limits,
     grace: Duration,
 ) -> i32 {
-    // The engine heap and execution timer were set up by the master's MINIT;
-    // the child must re-key/re-arm them before any PHP runs.
+    // Re-key the inherited Zend MM heap before any PHP runs. The execution
+    // timer is left to the PHP thread's init_executor, which binds it to the
+    // thread that actually runs PHP.
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { php_sys::rapira_child_init() };
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
@@ -93,21 +94,15 @@ pub fn worker_body(
             return WORKER_EXIT_UNHEALTHY;
         }
     };
-    let handle = match rapira.handle() {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::error!(target: "rapira", "worker handle failed: {e:#}");
-            return WORKER_EXIT_UNHEALTHY;
-        }
-    };
+    let handle = rapira.handle();
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
-    // Per-pid spool subdir (dispatcher only — the other modes never spool):
+    // Per-pid spool subdir (dispatcher only - the other modes never spool):
     // SpooledFile drops cover destructor paths; the master's boot sweep
     // reclaims dirs a SIGKILLed worker left behind. The leaf must be freshly
     // created, owner-only: a pre-planted entry at the predictable name in the
-    // shared root must fail, never be traversed (the root itself exists — the
+    // shared root must fail, never be traversed (the root itself exists - the
     // master created and probed it pre-fork).
     let spool_dir: Option<PathBuf> = if dispatcher {
         uploads.dir = uploads

@@ -153,6 +153,21 @@ try {
             unset($ex); // never finalized: the host must fail this unit and keep serving
             continue;
         }
+        if ($probe === 'abandon-mid') {
+            $ex->writeHead(200);
+            $ex->writeBody('partial', eos: false);
+            unset($ex); // head already on the wire: the host can only truncate
+            continue;
+        }
+        if ($probe === 'bail-with-unit') {
+            @trigger_error('bail with unit out', E_USER_ERROR); // bailout: the unit dies with the cycle
+            continue;
+        }
+        if ($probe === 'destruct-explicit') {
+            $ex->__destruct(); // explicit call is a no-op on a live unit
+            $ex->writeBody('explicit-destruct-ok');
+            continue;
+        }
         if ($probe === 'head204') {
             $ex->writeHead(204);
             $ex->writeBody('dropped-at-seal');

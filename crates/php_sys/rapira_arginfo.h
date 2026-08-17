@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: e87cd8d7eb5ddad345a238f44dcd4e073fbcace3 */
+ * Stub hash: 568157ea008b5dacec069af49c3838733cfca13a */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -23,6 +23,9 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_Rapira_Work_isFinalized arginfo_rapira_finish_request
 
 #define arginfo_class_Rapira_Work_isCancelled arginfo_rapira_finish_request
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Work___destruct, 0, 0, 0)
+ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_DispatcherInfo_pendingCount, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
@@ -70,6 +73,7 @@ static const zend_function_entry ext_functions[] = {
 static const zend_function_entry class_Rapira_Work_methods[] = {
 	ZEND_RAW_FENTRY("isFinalized", NULL, arginfo_class_Rapira_Work_isFinalized, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
 	ZEND_RAW_FENTRY("isCancelled", NULL, arginfo_class_Rapira_Work_isCancelled, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
+	ZEND_RAW_FENTRY("__destruct", NULL, arginfo_class_Rapira_Work___destruct, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
 	ZEND_FE_END
 };
 

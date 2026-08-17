@@ -72,7 +72,7 @@ PHP_FUNCTION(rapira_finish_request) {
                   "mode; finalize through the Exchange");
         RETURN_THROWS();
     }
-    if (rapira_finish_output()) { // non-zero == BAILOUT: re-raise so
+    if (rapira_finish_output() != OK) { // BAILOUT: re-raise so
         zend_bailout(); // rapira_run_handler classifies + 500s + recycles
     }
     rapira_rs_finish_response();
@@ -80,11 +80,15 @@ PHP_FUNCTION(rapira_finish_request) {
 }
 
 PHP_MINIT_FUNCTION(rapira) {
+    (void)type;
+    (void)module_number;
     rapira_register_classes();
     return SUCCESS;
 }
 
 PHP_RSHUTDOWN_FUNCTION(rapira) {
+    (void)type;
+    (void)module_number;
     rapira_rs_dispatcher_release();
     return SUCCESS;
 }
@@ -160,7 +164,7 @@ static zend_long rapira_job_timeout = -1;
 
 // The wall timer must not run while the worker parks in receive(): time spent
 // blocked on the job queue is not execution time. Capture the per-unit budget
-// before the first disarm — zend_unset_timeout is a no-op when
+// before the first disarm - zend_unset_timeout is a no-op when
 // EG(timeout_seconds) is 0 (Zend/zend_execute_API.c zend_unset_timeout), so
 // disarm before zeroing. Called from Rust (exchange.rs) after the single-flight
 // check, so a BUSY receive() never strips the outstanding unit's budget.
@@ -177,9 +181,7 @@ void rapira_receive_untimed(void) {
 // receive verb runs rapira_receive_untimed first, so the budget is always
 // captured before this arms. reset_signals=0 for the same reason as
 // rapira_request_init.
-void rapira_receive_timed(void) {
-    zend_set_timeout(rapira_job_timeout, 0);
-}
+void rapira_receive_timed(void) { zend_set_timeout(rapira_job_timeout, false); }
 
 // Per-request state php_request_startup() resets that the worker path skips.
 // Executor state only a contained bailout can strand (EG(error_handling),
@@ -193,13 +195,13 @@ static void rapira_request_init(void) {
     // include-wrapper's stream_open leaves in_user_include=1 (later URL opens
     // rejected as includes); a fatal inside php_log_err leaves in_error_log=1
     // (later error-log writes dropped).
-    PG(in_error_log) = 0;
-    PG(in_user_include) = 0;
+    PG(in_error_log) = false;
+    PG(in_user_include) = false;
     // php-src clears this per request via init_compiler (zend_compile.c:461); a
     // resident worker runs many jobs per cycle, and a non-recycling client
     // abort leaves it =1 (zend.c:1264), defeating rapira_run_handler's
-    // clean_at_entry detector for later jobs. Re-clear it at each job start.
-    CG(unclean_shutdown) = 0;
+    // unclean_at_entry detector for later jobs. Re-clear it at each job start.
+    CG(unclean_shutdown) = false;
 
     // The request body is read (in Rust) as the handler runs, so the handler is
     // the execution phase: bound it by max_execution_time (the per-cycle
@@ -216,7 +218,7 @@ static void rapira_request_init(void) {
     if (rapira_job_timeout < 0) {
         rapira_job_timeout = EG(timeout_seconds);
     }
-    zend_set_timeout(rapira_job_timeout, 0);
+    zend_set_timeout(rapira_job_timeout, false);
 
     if (PG(expose_php)) {
         sapi_add_header(SAPI_PHP_VERSION_HEADER,
@@ -257,10 +259,11 @@ static void rapira_activate_auto_globals(void) {
 
     // Re-arm every superglobal so a later access rebuilds it. $_ENV stays
     // untouched: its create callback dtors the array before checking
-    // variables_order (php-src main/php_variables.c php_auto_globals_create_env),
-    // so re-arming would let the first newly compiled file mentioning $_ENV
-    // wipe bootstrap-populated entries mid-cycle. The environment is constant
-    // per process; once php-src fired the callback it stays disarmed.
+    // variables_order (php-src main/php_variables.c
+    // php_auto_globals_create_env), so re-arming would let the first newly
+    // compiled file mentioning $_ENV wipe bootstrap-populated entries
+    // mid-cycle. The environment is constant per process; once php-src fired
+    // the callback it stays disarmed.
     ZEND_HASH_MAP_FOREACH_PTR(CG(auto_globals), auto_global) {
         if (auto_global->name == _env) {
             continue;
@@ -287,7 +290,7 @@ static void rapira_activate_auto_globals(void) {
 }
 #ifdef HAVE_PHP_SESSION
 // Worker mode bypasses module RSHUTDOWN, so an active session never flushes
-// between requests and PS(id)/session_status leak across them — do the work
+// between requests and PS(id)/session_status leak across them - do the work
 // session_rshutdown would have done.
 //
 // Nothing here is guarded on purpose. A bailing save handler is a fatal: it
@@ -307,11 +310,11 @@ static void rapira_reset_session(void) {
         PS(mod)->s_close(&PS(mod_data));
     }
     if (PS(id)) {
-        zend_string_release_ex(PS(id), 0);
+        zend_string_release_ex(PS(id), false);
         PS(id) = NULL;
     }
     if (PS(session_vars)) {
-        zend_string_release_ex(PS(session_vars), 0);
+        zend_string_release_ex(PS(session_vars), false);
         PS(session_vars) = NULL;
     }
     if (PS(session_started_filename)) {
@@ -324,13 +327,13 @@ static void rapira_reset_session(void) {
     // start. Worker mode skips RINIT, so a userland save handler that bails
     // mid-call (or uses partial parent:: delegation) can leave them set. Cheap
     // defensive reset:
-    PS(mod_user_is_open) = 0;
-    PS(in_save_handler) = 0;
-    PS(set_handler) = 0;
+    PS(mod_user_is_open) = false;
+    PS(in_save_handler) = false;
+    PS(set_handler) = false;
     // a cookie-sourced id clears it (session.c:1564) and only RINIT restores
     // the default (session.c:121); php_session_start re-derives it (:1692) so
     // this is parity with RINIT for readers outside that path
-    PS(define_sid) = 1;
+    PS(define_sid) = true;
 }
 #else
 static void rapira_reset_session(void) {}
@@ -367,7 +370,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     // (zend_compile.c:461) - a 0->1 flip during this run proves a bailout.
     // Read BEFORE the handler/shutdown-fn/destructor calls: a swallowed bailout
     // has already set it by the time control reaches the tail.
-    bool clean_at_entry = (!CG(unclean_shutdown)) != 0;
+    bool unclean_at_entry = CG(unclean_shutdown);
 
     zend_execute_data *observed_base = EG(current_observed_frame);
     RAPIRA_GUARD(
@@ -405,17 +408,25 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     }
     zend_end_try();
 
+    // Destructors are not swept between jobs: a sweep would run __destruct on
+    // still-live bootstrap-resident objects and latch
+    // EG_FLAGS_OBJECT_STORE_NO_REUSE, growing the object store monotonically.
+    // Job-created objects die by refcount/GC; anything still alive gets its
+    // destructor at cycle end via php_request_shutdown.
     RAPIRA_OBSERVER_CLOSE(php_call_shutdown_functions(), observed_base);
-    RAPIRA_OBSERVER_CLOSE(zend_call_destructors(), observed_base);
+    // freeing the table releases the closures' captures, which can run their
+    // __destruct (nothing marks IS_OBJ_DESTRUCTOR_CALLED on the per-job path)
+    RAPIRA_OBSERVER_CLOSE(php_free_shutdown_functions(), observed_base);
 
+    // the clear must follow every step that can run userland code: a pending
+    // throw here would rethrow at the resident loop's handle_request() call
     if (EG(exception)) {
         zend_clear_exception();
     }
 
-    php_free_shutdown_functions();
-    gc_protect(0); // reset gc_protect to 0, in case _zend_bailout left it at 1
+    gc_protect(false); // _zend_bailout can leave it engaged
 
-    if (outcome != BAILOUT && clean_at_entry && CG(unclean_shutdown)) {
+    if (outcome != BAILOUT && !unclean_at_entry && CG(unclean_shutdown)) {
         outcome = BAILOUT;
         rapira_observer_end_to(observed_base);
     }
@@ -436,7 +447,7 @@ int rapira_request_activate(void) {
     zend_end_try();
 
     if (outcome == BAILOUT) {
-        gc_protect(0);
+        gc_protect(false);
     }
 
     return outcome;
@@ -451,7 +462,8 @@ int rapira_request_activate(void) {
 static void rapira_release_header_callback(void) {
 #if PHP_VERSION_ID >= 80600
     if (ZEND_FCC_INITIALIZED(SG(send_header_fcc))) {
-        zend_fcc_dtor(&SG(send_header_fcc)); // self-resets to empty_fcall_info_cache
+        zend_fcc_dtor(
+            &SG(send_header_fcc)); // self-resets to empty_fcall_info_cache
     }
 #else
     if (!Z_ISUNDEF(SG(callback_func))) {
@@ -483,9 +495,16 @@ int rapira_request_teardown(void) {
     zend_try { zend_unset_timeout(); }
     zend_end_try();
 
-    // _zend_bailout leaves gc_protect(1); reset unconditionally or the next
-    // request runs with cycle GC disabled
-    gc_protect(0);
+    // _zend_bailout leaves gc_protect engaged; reset unconditionally or the
+    // next request runs with cycle GC disabled
+    gc_protect(false);
+
+    // teardown steps can run __destruct (output handlers, the header callback,
+    // session vars); a pending throw would rethrow at the next job's
+    // handle_request() return, attributed to the wrong request
+    if (EG(exception)) {
+        zend_clear_exception();
+    }
 
     SG(request_info).request_method = NULL;
     SG(request_info).query_string = NULL;
@@ -547,13 +566,15 @@ void rapira_process_init(void) {
     zend_signal_startup();
 }
 
-// Once per forked worker, before any PHP runs in the child. The Zend MM heap
-// was created by the master's MINIT; 8.5+ requires the child to re-key it
-// (debug builds assert getpid() == heap->pid in zend_mm_shutdown) and re-arm
-// the per-process execution timer, which fork does not inherit.
+// Once per forked worker, before any PHP runs in the child: re-key the Zend MM
+// heap the master's MINIT created (8.5 debug asserts getpid() == heap->pid in
+// zend_mm_shutdown). Only the heap - the execution timer binds to the calling
+// thread's tid and EG(pid) gates its re-creation, so EG(pid) must stay 0 here
+// for the PHP thread's init_executor() to create the timer on the thread that
+// runs PHP.
 void rapira_child_init(void) {
 #if PHP_VERSION_ID >= 80500
-    php_child_init();
+    refresh_memory_manager();
 #endif
 }
 
@@ -582,8 +603,8 @@ void rapira_release_temporary_streams(void) {
 int rapira_request_shutdown(void) {
     volatile int bailed = OK;
     // A cycle can end parked/untimed with EG(timeout_seconds) zeroed by
-    // rapira_receive_untimed. Nothing else restores the field — the INI layer
-    // only rewrites it through OnUpdateTimeout — and the next cycle's
+    // rapira_receive_untimed. Nothing else restores the field - the INI layer
+    // only rewrites it through OnUpdateTimeout - and the next cycle's
     // php_request_startup arms zend_set_timeout(EG(timeout_seconds), 1)
     // (main/main.c:1912), so a stale 0 would disable max_execution_time for
     // every later cycle. Put the captured budget back before resetting it.
@@ -595,7 +616,7 @@ int rapira_request_shutdown(void) {
     // a bailout inside a user save handler skips the cleanup that clears
     // PS(in_save_handler); the module RSHUTDOWN's recursion guard then refuses
     // to run the handler's close() and whatever it holds leaks (mod_user.c:29)
-    PS(in_save_handler) = 0;
+    PS(in_save_handler) = false;
 #endif
     zend_try { php_request_shutdown(NULL); }
     zend_catch {

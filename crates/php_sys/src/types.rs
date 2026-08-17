@@ -81,12 +81,12 @@ pub struct Job {
 }
 
 /// One endpoint of an accepted connection, as the socket reports it. Mirror of
-/// `extension_api::Addr` — php_sys does not depend on extension_api, the runtime
+/// `extension_api::Addr` - php_sys does not depend on extension_api, the runtime
 /// mapping is the one bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Addr {
     Inet(std::net::SocketAddr),
-    /// None is an unnamed endpoint — the usual case for a peer connecting to a
+    /// None is an unnamed endpoint - the usual case for a peer connecting to a
     /// unix listener.
     Unix(Option<PathBuf>),
 }
@@ -105,7 +105,7 @@ pub struct TlsView {
     pub cert: Option<ClientCertView>,
 }
 
-/// A file part spooled by the host. `unlink` is the one remover — seal calls
+/// A file part spooled by the host. `unlink` is the one remover - seal calls
 /// it at finalize, Drop is the abnormal-path net.
 pub struct SpooledFile {
     pub path: PathBuf,
@@ -216,7 +216,7 @@ fn status_field_code(value: &[u8]) -> Option<u16> {
 
 /// The $_SERVER-facing materialization of a Request: SAPI CStrings, the folded
 /// header table, the rendered address strings. Built once, superglobals modes
-/// only. `register_server_variables` registers from borrows into this storage —
+/// only. `register_server_variables` registers from borrows into this storage -
 /// that frame may not hold owned Rust values (a bailout longjmp over pending
 /// drops is UB).
 pub struct ReqC {
@@ -387,7 +387,9 @@ impl Context {
                 .headers
                 .iter()
                 .any(|(n, _)| n.eq_ignore_ascii_case("content-encoding"));
-            let content_length = (!bodiless).then_some(body.len() as u64);
+            // no length for a truncated body: the absent Content-Length (chunked
+            // on the wire) is what lets the client detect the cut
+            let content_length = (!bodiless && !truncated).then_some(body.len() as u64);
             let _ = tx.blocking_send(Frame::Head {
                 head,
                 content_length,
@@ -479,8 +481,8 @@ mod tests {
         assert_eq!(head.headers[0].0, "X-Keep");
     }
 
-    /// A `Status:` the SAPI cannot parse must still be consumed — forwarding it would put a
-    /// literal `Status:` field on the wire — but it must not invent a code.
+    /// A `Status:` the SAPI cannot parse must still be consumed - forwarding it would put a
+    /// literal `Status:` field on the wire - but it must not invent a code.
     #[test]
     fn commit_head_drops_an_unparseable_status_without_changing_the_code() {
         let head = head_of(201, &[("Status", "NotFound")]);
@@ -489,7 +491,7 @@ mod tests {
     }
 
     /// RFC 3875 §6.3.3 makes `Status` the script's own result code, and §6.2.1 puts the
-    /// conversion on the server — so it is authoritative over whatever code php-src had
+    /// conversion on the server - so it is authoritative over whatever code php-src had
     /// already recorded from `http_response_code()`.
     #[test]
     fn commit_head_lets_the_status_field_override_the_recorded_code() {

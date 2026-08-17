@@ -1,6 +1,6 @@
 //! Worker request quota (max_requests recycle) and unhealthy-exit hooks.
 //! Counting happens on the PHP worker thread at the sites that already report
-//! `Event::Handled`; the hooks only announce — draining is the host's job.
+//! `Event::Handled`; the hooks only announce - draining is the host's job.
 
 use std::cell::RefCell;
 

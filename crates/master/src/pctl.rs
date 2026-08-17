@@ -1,5 +1,5 @@
 //! Process-control state machine: stop escalation and rolling reload. Pure
-//! decision logic — no syscalls. The executor (`events.rs`) turns the returned
+//! decision logic - no syscalls. The executor (`events.rs`) turns the returned
 //! actions into kills and deadlines. Implements state override precedence and
 //! QUIT→TERM→KILL escalation; the first stop is graceful (QUIT), not TERM.
 
@@ -38,7 +38,7 @@ pub(crate) enum ReloadPhase {
     /// Overlap gate: a current-gen replacement was spawned into `slot` and must
     /// report `SLOT_IDLE` or `SLOT_ACTIVE` before the next old worker is
     /// drained. `None` only as the `on_signal` placeholder until the executor
-    /// picks the real sub-state. No escalation runs here — the executor treats
+    /// picks the real sub-state. No escalation runs here - the executor treats
     /// the pctl deadline as a re-check, capped by `process_control_timeout`.
     Await { slot: Option<usize> },
     /// A QUIT was sent to `draining`; escalate QUIT→TERM→KILL on each deadline.

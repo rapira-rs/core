@@ -49,7 +49,7 @@ pub struct Config {
     pub max_body_size: usize,
     /// What to do with a request field whose name is not [`is_safe_field_name`].
     pub unsafe_field_names: UnsafeFieldNames,
-    /// The pool serves superglobals ($_SERVER) — classic/worker mode. The Drop
+    /// The pool serves superglobals ($_SERVER) - classic/worker mode. The Drop
     /// policy protects that mapping only, so it is inert without it; Reject is
     /// an explicit opt-in and applies regardless.
     pub superglobals: bool,
@@ -81,7 +81,7 @@ pub enum UnsafeFieldNames {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            // Standalone fallback only — rapira always passes a fully populated Config.
+            // Standalone fallback only - rapira always passes a fully populated Config.
             listen: Listen::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], 8000))),
             server_name: "localhost".to_owned(),
             server_port: 8000,
@@ -99,7 +99,7 @@ impl Default for Config {
 /// The CGI name is the field name uppercased with `-` rewritten to `_`, and PHP rewrites
 /// `.` and space to `_` again when it registers the variable. A name carrying `_` or `.`
 /// therefore lands on the variable a `-` name owns, letting a client fold a value into a
-/// field the front set. (Space cannot reach here — it is not a tchar, so the parser rejects
+/// field the front set. (Space cannot reach here - it is not a tchar, so the parser rejects
 /// it first.) This is an allowlist rather than a denylist of those two bytes, so it stays
 /// correct if either mapper widens.
 fn is_safe_field_name(name: &str) -> bool {
@@ -287,7 +287,7 @@ async fn serve(
     let drain_grace = config.drain_grace;
 
     // ONE string feeds BOTH the endpoint and the Fds key: pingora adopts only on
-    // an exact match (a mismatch silently rebinds — for unix sockets it would
+    // an exact match (a mismatch silently rebinds - for unix sockets it would
     // unlink and steal the master's socket). The listener carries the resolved
     // address, so port 0 configs adopt correctly too.
     let (addr, fds): (ListenAddr, Option<ListenFds>) = match prepared {
@@ -363,7 +363,7 @@ struct PhpProxy {
     /// The resolved bind address (port-0 resolved): the `$server` fallback and
     /// the kind key for a peerless connection.
     listen: ListenAddr,
-    /// Requests between `new_ctx` and `logging` — `serve` drains this on shutdown.
+    /// Requests between `new_ctx` and `logging` - `serve` drains this on shutdown.
     inflight: Arc<AtomicUsize>,
 }
 
@@ -517,7 +517,7 @@ impl ProxyHttp for PhpProxy {
                     let status = if status < 200 {
                         tracing::error!(
                             target: "http",
-                            "php committed status {status} as final; this front cannot forward it — serving 502"
+                            "php committed status {status} as final; this front cannot forward it - serving 502"
                         );
                         502
                     } else {
@@ -607,7 +607,7 @@ impl ProxyHttp for PhpProxy {
 
 /// Assemble the response head: PHP's fields minus the ones this front owns, then our
 /// own framing. A field no front can represent is dropped with a log rather than
-/// failing the call — the head carries the whole response, so one bad field must not
+/// failing the call - the head carries the whole response, so one bad field must not
 /// cost the body.
 fn build_response_header(
     status: u16,
@@ -634,7 +634,7 @@ fn build_response_header(
         // append: PHP may legally repeat headers (Set-Cookie, Vary, Link). value is
         // Vec<u8>, so it stays binary-safe.
         // Cloned for the log because append_header takes the name by value and pingora has
-        // no IntoCaseHeaderName impl for a non-'static &str — it cannot be borrowed.
+        // no IntoCaseHeaderName impl for a non-'static &str - it cannot be borrowed.
         let logged = name.clone();
         if let Err(e) = header.append_header(name, value) {
             tracing::debug!(target: "http", "dropped response header {logged}: {e}");
@@ -760,7 +760,7 @@ pub fn skip_response_header(name: &str) -> bool {
 
 /// One entry per field line, wire order per name. `case_header_iter` yields
 /// nothing without a case map (h2's `From<ReqParts>` sets none), so fall back
-/// to the lowercase map — which is what h2/h3 put on the wire anyway.
+/// to the lowercase map - which is what h2/h3 put on the wire anyway.
 fn collect_headers(header: &RequestHeader) -> Vec<(String, Vec<u8>)> {
     if header.has_case() {
         header
@@ -784,7 +784,7 @@ fn collect_headers(header: &RequestHeader) -> Vec<(String, Vec<u8>)> {
 /// `$authority` from the Host field lines. RFC 9112 §3.2 makes a repeated,
 /// missing or empty Host on HTTP/1.1 a 400; without a usable Host the target
 /// URI reconstructs with an empty authority (RFC 9112 §3.3), named None here.
-/// h2/h3 carry the authority as `:authority` in the URI, not a Host line —
+/// h2/h3 carry the authority as `:authority` in the URI, not a Host line -
 /// unreachable on today's plaintext-h1 listeners, to be read from
 /// `header.uri.authority()` when a TLS/h2 front lands.
 /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2
@@ -878,7 +878,7 @@ async fn build_request(
     let remote = match session.client_addr() {
         Some(a) => peer_addr(a),
         // None: an unnamed UDS peer (the normal case there), or a TCP session
-        // whose digest is gone — the contract union has no unknown arm, so the
+        // whose digest is gone - the contract union has no unknown arm, so the
         // latter is answered, not fabricated
         None => match listen {
             ListenAddr::Unix(_) => extension_api::Addr::Unix(None),

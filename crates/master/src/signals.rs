@@ -148,14 +148,14 @@ fn sigprocmask(how: c_int, set: &libc::sigset_t) {
     unsafe { libc::sigprocmask(how, set, std::ptr::null_mut()) };
 }
 
-/// Block {USR1, USR2, CHLD, HUP} very early — before any handlers exist — so a
+/// Block {USR1, USR2, CHLD, HUP} very early - before any handlers exist - so a
 /// stray USR1/USR2/HUP (default disposition: terminate) cannot kill the process
 /// during boot.
 ///
 /// As pid 1 the stop signals join them. A pid-namespace init is
 /// SIGNAL_UNKILLABLE: the kernel drops a signal whose disposition is still
 /// SIG_DFL rather than applying the default action, so a stop arriving before
-/// [`install_master_signals`] would be lost outright — `docker stop` during
+/// [`install_master_signals`] would be lost outright - `docker stop` during
 /// boot would do nothing until the kill timer fired. Blocked, it stays pending
 /// and the master acts on it the moment it unblocks. Everywhere else SIG_DFL
 /// still terminates, which is what keeps a slow or wedged boot interruptible

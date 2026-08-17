@@ -30,7 +30,7 @@ final class Account
     'nothing' => null,
     'list' => [1, 2, 3],
     'deep' => ['a' => ['b' => ['c' => 'bottom']]],
-    'unicode' => 'héllo — ok',
+    'unicode' => 'héllo - ok',
     'zero' => 0,
 ]);
 

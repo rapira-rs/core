@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
 
 /// A `rapira-spool-<pid>` entry is reclaimable only when its owner is gone:
 /// kill(pid, 0) probes existence without signaling, and ESRCH means no such
-/// process. EPERM means it exists under another uid — not ours to sweep.
+/// process. EPERM means it exists under another uid - not ours to sweep.
 /// https://man7.org/linux/man-pages/man2/kill.2.html
 fn spool_dir_reclaimable(name: &str) -> bool {
     let Some(pid) = name
@@ -116,7 +116,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // The logger goes up the moment the config exists, and not before: the
     // config owns both the filter and the format, and the global logger installs
-    // only once. Nothing earlier logs — signal blocking is syscalls, clap writes
+    // only once. Nothing earlier logs - signal blocking is syscalls, clap writes
     // its own usage/errors to stderr, and `resolve` reports failure by returning
     // it (a config error cannot be rendered in the format that failed to parse).
     // Non-serve paths never install a logger; stray `log::` calls are dropped.
@@ -168,7 +168,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // Spool boot: the root must take a file now, not fail per-request; sweep
     // spool dirs whose owning process is gone. The dir may be shared (the
-    // default is the system temp dir), so liveness gates the sweep — another
+    // default is the system temp dir), so liveness gates the sweep - another
     // running instance's dirs stay. Dispatcher-only: the other modes never
     // spool (php-src parses their bodies), so they touch no shared temp state.
     let uploads = &settings.http.uploads;
@@ -220,14 +220,10 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         max_part_headers: uploads.max_part_headers,
     };
 
-    // Extensions are compiled in; register the HTTP front (and any others) here, each
-    // with its config. With none registered there is nothing to serve, so exit before
-    // booting PHP.
+    // Extensions are compiled in; register the HTTP front (and any others)
+    // here, each with its config.
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
     host.register::<HttpServer>(http_cfg)?;
-    if host.is_empty() {
-        return Ok(());
-    }
 
     // Master-side pre-fork binds: every worker inherits these fds; the master
     // holds them for its whole life so respawned generations re-inherit.

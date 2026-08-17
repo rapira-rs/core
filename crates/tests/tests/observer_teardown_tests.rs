@@ -10,7 +10,7 @@ use tests::{drain, fixture, php_lock_with_ini, req};
 // end.
 //
 // Own binary, own ini: PHPRC is process-global and zend_test's markers must
-// stay off — printing them hides the fault. Needs --enable-zend-test.
+// stay off - printing them hides the fault. Needs --enable-zend-test.
 // https://github.com/php/php-src/pull/5857
 #[test]
 fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()> {
@@ -19,7 +19,7 @@ fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()
         "/fixtures/ini/observer_teardown_tests/observer-quiet.ini"
     )));
     let r = Rapira::start(Mode::Worker(fixture("shared/session-bailout-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     // each job bails in teardown and recycles; the cycle end walks the observer chain
     for _ in 0..3 {

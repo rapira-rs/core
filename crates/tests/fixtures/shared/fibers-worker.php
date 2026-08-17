@@ -22,7 +22,7 @@ $handler = static function (): void {
 	//    Every start/resume crosses the fiber<->worker stack boundary.
 	for ($i = 0; $i < 300; $i++) {
 		$f = new Fiber(function (): int {
-			$a = fib(14);                 // 377 — recursion on the fiber's OWN stack
+			$a = fib(14);                 // 377 - recursion on the fiber's OWN stack
 			$b = Fiber::suspend($a);      // -> worker stack; resumes with 377
 			$c = Fiber::suspend($b + 1);  // -> worker stack; resumes with 378
 			return $a + $c;               // 755
@@ -34,7 +34,7 @@ $handler = static function (): void {
 	}
 	// sum = 300 * 755 = 226500
 
-	// 25 deeply nested fibers — 25 fiber stacks stacked at once.
+	// 25 deeply nested fibers - 25 fiber stacks stacked at once.
 	$sum += nest(25);                     // +144
 
 	header('Content-Type: text/plain');

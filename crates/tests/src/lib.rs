@@ -315,7 +315,7 @@ pub fn app_records(script: &str) -> Vec<AppRecord> {
     captured().clear(); // drop anything captured by earlier tests
 
     let r = Rapira::start(Mode::Classic).expect("classic boot");
-    let h = r.handle().expect("handle");
+    let h = r.handle();
     let (status, body) = drain(h.handle_blocking(req("/", script)).expect("dispatch"));
     drop(h);
     r.shutdown();
@@ -343,8 +343,8 @@ pub fn app_record(script: &str) -> AppRecord {
     records.into_iter().next().expect("checked above")
 }
 
-/// Install the capturing subscriber once (records all `tracing` output — plus
-/// anything still on the `log` facade — into `LOG_CAPTURE`).
+/// Install the capturing subscriber once (records all `tracing` output - plus
+/// anything still on the `log` facade - into `LOG_CAPTURE`).
 pub fn init_log_capture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {

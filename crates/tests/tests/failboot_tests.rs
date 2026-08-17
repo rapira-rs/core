@@ -28,7 +28,7 @@ fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
         )),
     );
     let r = Rapira::start(Mode::Classic)?; // must run a full module startup, not the early-return
-    let h = r.handle()?;
+    let h = r.handle();
     assert_eq!(
         drain(h.handle_blocking(req("/", "shared/hello.php"))?).0,
         200

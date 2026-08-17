@@ -11,12 +11,12 @@ use php_sys::{Frame, Mode, Rapira};
 use std::io::Cursor;
 use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
-/// Boot `verbs-worker.php`, serve one probe request, tear down — the shared
+/// Boot `verbs-worker.php`, serve one probe request, tear down - the shared
 /// shape of every single-probe test.
 fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let out = drain(h.handle_blocking(req(query, "dispatcher/verbs-worker.php"))?);
     drop(h);
     r.shutdown();
@@ -34,7 +34,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let resp = drain_resp(h.handle_blocking(req("/first", "dispatcher/echo-loop-worker.php"))?);
     assert_eq!(resp.status(), 200);
@@ -68,7 +68,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
 
 /// `tryReceive()`/`receive(0)`/`receive(50ms)` against an empty-but-open
 /// channel: no handle is ever created, so no job can precede the probes. The
-/// pool must stay alive until the fixture has logged — dropping it early would
+/// pool must stay alive until the fixture has logged - dropping it early would
 /// turn Empty into Closed and fail the probes.
 #[test]
 fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
@@ -133,7 +133,7 @@ fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let (status, body) = drain(h.handle_blocking(req(
         "/?probe=double-finalize",
@@ -184,7 +184,7 @@ fn status_range_and_header_shape_value_errors() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Contract: an empty chunk without eos does nothing — in particular it must
+/// Contract: an empty chunk without eos does nothing - in particular it must
 /// not commit the implicit 200 and lock out a later `writeHead()`.
 #[test]
 fn empty_non_eos_chunk_does_nothing() -> anyhow::Result<()> {
@@ -204,7 +204,7 @@ fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let (status, body) =
         drain(h.handle_blocking(req("/?probe=verb-edges", "dispatcher/verbs-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "try-busy;neg-timeout"));
@@ -231,7 +231,7 @@ fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
 fn try_and_timed_receive_serve_units() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/poll-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let (status, body) = drain(h.handle_blocking(req("/one", "dispatcher/poll-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "served-by=try target=/one"));
@@ -260,7 +260,7 @@ fn try_and_timed_receive_serve_units() -> anyhow::Result<()> {
 fn interim_head_is_emitted_before_the_final_head() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let resp =
         drain_resp(h.handle_blocking(req("/?probe=interim", "dispatcher/verbs-worker.php"))?);
     drop(h);
@@ -278,7 +278,7 @@ fn interim_head_is_emitted_before_the_final_head() -> anyhow::Result<()> {
 }
 
 /// 101 is the carve-out in the 1xx interim rule: it commits as the final head,
-/// locks out any later `writeHead()`, and — being 1xx — carries no body:
+/// locks out any later `writeHead()`, and - being 1xx - carries no body:
 /// chunks are accepted and dropped.
 #[test]
 fn writehead_101_commits_as_final() -> anyhow::Result<()> {
@@ -286,7 +286,7 @@ fn writehead_101_commits_as_final() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let resp =
         drain_resp(h.handle_blocking(req("/?probe=upgrade", "dispatcher/verbs-worker.php"))?);
     drop(h);
@@ -305,7 +305,7 @@ fn writehead_101_commits_as_final() -> anyhow::Result<()> {
 }
 
 /// Buffered chunks concatenate, the unit stays unfinalized between them, and
-/// the first chunk commits the implicit 200 — a later `writeHead()` must see
+/// the first chunk commits the implicit 200 - a later `writeHead()` must see
 /// `HeadAlreadyWrittenError` instead of restamping the status.
 #[test]
 fn chunked_body_buffers_and_locks_the_head() -> anyhow::Result<()> {
@@ -323,7 +323,7 @@ fn chunked_body_buffers_and_locks_the_head() -> anyhow::Result<()> {
 fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let resp = drain_resp(h.handle_blocking(req("/?probe=multi", "dispatcher/verbs-worker.php"))?);
     let head = resp.head.as_ref().expect("head committed");
@@ -356,21 +356,26 @@ fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An Exchange dropped without finalizing fails that unit only: its Frame
-/// sender dies unsent (the client sees the upstream failure), and the worker
-/// serves the next unit normally.
+/// An Exchange dropped without finalizing fails that unit only: the host
+/// answers 500 for it (a lost unit is a failure, never an implicit response),
+/// and the worker serves the next unit normally.
 #[test]
 fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
-    let (status, body) =
-        drain(h.handle_blocking(req("/?probe=abandon", "dispatcher/verbs-worker.php"))?);
+    let resp =
+        drain_resp(h.handle_blocking(req("/?probe=abandon", "dispatcher/verbs-worker.php"))?);
     assert_eq!(
-        (status, body.as_str()),
-        (0, ""),
-        "an abandoned unit must die unsent, not fake a response"
+        (
+            resp.status(),
+            resp.body.as_slice(),
+            resp.truncated,
+            resp.ended
+        ),
+        (500, &b""[..], false, true),
+        "an abandoned unit is failed by the host with a complete 500"
     );
 
     let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
@@ -385,13 +390,73 @@ fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A unit that dies with the cycle (bailout: fatal, timeout) is a worker
+/// death, not an abandonment: the channel dies unsent, no 500 is synthesized.
+#[test]
+fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
+    let h = r.handle();
+
+    let resp = drain_resp(
+        h.handle_blocking(req("/?probe=bail-with-unit", "dispatcher/verbs-worker.php"))?,
+    );
+    assert!(
+        resp.head.is_none() && !resp.ended,
+        "a cycle-death loss must stay unsent (got status {})",
+        resp.status()
+    );
+
+    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "state=false"),
+        "the recycled worker must keep serving"
+    );
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
+/// `Work::__destruct()` is part of the contract surface; an explicit call on
+/// a live unit does nothing.
+#[test]
+fn explicit_destruct_call_is_a_noop() -> anyhow::Result<()> {
+    let (status, body) = verbs_probe("/?probe=destruct-explicit")?;
+    assert_eq!((status, body.as_str()), (200, "explicit-destruct-ok"));
+    Ok(())
+}
+
+/// An Exchange abandoned after the head reached the wire cannot be turned
+/// into a 500: the host ends the stream truncated so the client detects it.
+#[test]
+fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
+    let h = r.handle();
+
+    let resp =
+        drain_resp(h.handle_blocking(req("/?probe=abandon-mid", "dispatcher/verbs-worker.php"))?);
+    assert_eq!(resp.status(), 200, "the committed head stands");
+    assert_eq!(resp.body, b"partial");
+    assert!(resp.truncated, "the cut must be visible to the client");
+
+    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    assert_eq!((status, body.as_str()), (200, "state=false"));
+
+    drop(h);
+    r.shutdown();
+    Ok(())
+}
+
 /// An abandoned unit holding a host-parsed multipart body: the SpooledFile
 /// drop net must unlink the spool the moment the exchange dies.
 #[test]
 fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let spool = std::env::temp_dir().join(format!("rapira-test-abandon-{}", std::process::id()));
     std::fs::write(&spool, b"PAYLOAD")?;
@@ -410,7 +475,11 @@ fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
         }],
     });
     let (status, body) = drain(h.handle_blocking(rq)?);
-    assert_eq!((status, body.as_str()), (0, ""), "the unit dies unsent");
+    assert_eq!(
+        (status, body.as_str()),
+        (500, ""),
+        "the host fails the unit"
+    );
     assert!(
         !spool.exists(),
         "dropping the exchange must unlink the spooled file"
@@ -427,7 +496,7 @@ fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
 fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let (status, body) =
         drain(h.handle_blocking(req("/?probe=exit", "dispatcher/verbs-worker.php"))?);
@@ -445,14 +514,14 @@ fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// No body on a HEAD response or a 204 — chunks are accepted and dropped at
+/// No body on a HEAD response or a 204 - chunks are accepted and dropped at
 /// seal, the head stands.
 /// https://www.rfc-editor.org/rfc/rfc9112#section-6.3
 #[test]
 fn head_and_204_drop_the_body() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     // The harness builder hardcodes GET; this test is about the method.
     let mut head_rq = req("/", "dispatcher/verbs-worker.php");
@@ -482,7 +551,7 @@ fn head_and_204_drop_the_body() -> anyhow::Result<()> {
 fn request_fields_reach_php() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/request-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let mut rq = req("/path?x=1", "dispatcher/request-worker.php");
     rq.headers = vec![
@@ -556,7 +625,7 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
 fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/request-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let mut rq = req("/p", "dispatcher/request-worker.php");
     rq.protocol = "HTTP/2.0".into();
@@ -582,7 +651,7 @@ fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
 fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/request-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let mut rq = req("/", "dispatcher/request-worker.php");
     rq.remote = php_sys::types::Addr::Unix(None);
@@ -613,7 +682,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
 fn uri_synthesis_covers_https_and_asterisk_form() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/request-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let mut rq = req("/secure", "dispatcher/request-worker.php");
     rq.https = true;
@@ -646,7 +715,7 @@ fn uri_synthesis_covers_https_and_asterisk_form() -> anyhow::Result<()> {
 fn tls_view_reaches_php() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/request-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let mut rq = req("/", "dispatcher/request-worker.php");
     rq.tls = Some(php_sys::types::TlsView {
@@ -694,7 +763,7 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
 fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/multipart-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let spool = std::env::temp_dir().join(format!("rapira-test-mp-{}", std::process::id()));
     std::fs::write(&spool, b"PAYLOAD")?;
@@ -751,7 +820,7 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
 fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/multipart-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let pid = std::process::id();
     let spool_a = std::env::temp_dir().join(format!("rapira-test-mpa-{pid}"));
@@ -803,8 +872,8 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
 }
 
 /// `getInfo()` while handling: the outstanding unit counts as active. The
-/// counts are deterministic here — the one job was decremented from `pending`
-/// at pull, and nothing else is queued — so assert them exactly (a `>= 0`
+/// counts are deterministic here - the one job was decremented from `pending`
+/// at pull, and nothing else is queued - so assert them exactly (a `>= 0`
 /// assertion would pass for almost any broken counter).
 #[test]
 fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {
@@ -825,7 +894,7 @@ fn stream_probe(
     tokio::sync::mpsc::Receiver<Frame>,
 )> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let rx = h.handle_blocking(req(query, "dispatcher/stream-worker.php"))?;
     Ok((r, h, rx))
 }
@@ -849,7 +918,7 @@ fn wait_app_record(message: &str) -> String {
     }
 }
 
-/// `flush()` puts the head on the wire while the body is still 300ms away —
+/// `flush()` puts the head on the wire while the body is still 300ms away -
 /// the bounded read is the timing proof.
 #[test]
 fn flush_puts_the_head_on_the_wire_before_eos() -> anyhow::Result<()> {
@@ -970,10 +1039,10 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
 
     let rx = h.handle_blocking(req("/?probe=discard", "dispatcher/stream-worker.php"))?;
-    // wait until the unit is out with PHP, then leave — dropping earlier can
+    // wait until the unit is out with PHP, then leave - dropping earlier can
     // race the pre-handout probe, which would fail the unit before PHP sees it
     wait_app_record("discard-held");
     drop(rx);
@@ -1038,7 +1107,7 @@ fn sendfile_one_shot_carries_the_file_length() -> anyhow::Result<()> {
     let _guard = php_lock();
     let path = sendfile_setup("sendfile");
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let resp = drain_resp(h.handle_blocking(with_path_header("/?probe=sendfile", &path))?);
     drop(h);
     r.shutdown();
@@ -1058,7 +1127,7 @@ fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
     let _guard = php_lock();
     let path = sendfile_setup("slice");
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let resp = drain_resp(h.handle_blocking(with_path_header("/?probe=sendfile-slice", &path))?);
     drop(h);
     r.shutdown();
@@ -1071,13 +1140,13 @@ fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
 }
 
 /// FileNotSendableException is raised before anything is written, so the
-/// handler can still answer 404 — the reason it is catchable.
+/// handler can still answer 404 - the reason it is catchable.
 #[test]
 fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
     let _guard = php_lock();
     php_sys::set_sendfile_root(std::env::temp_dir());
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let resp = drain_resp(h.handle_blocking(req(
         "/?probe=sendfile-missing",
         "dispatcher/stream-worker.php",
@@ -1096,7 +1165,7 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
     let _guard = php_lock();
     php_sys::set_sendfile_root(std::env::temp_dir());
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let resp = drain_resp(h.handle_blocking(with_path_header(
         "/?probe=sendfile-escape",
         std::path::Path::new("/etc/hosts"),

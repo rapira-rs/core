@@ -7,7 +7,7 @@ use tests::{drain, fixture, php_lock, req};
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture(name)))?;
-    let h = r.handle()?;
+    let h = r.handle();
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
         out.push(drain(h.handle_blocking(req(uri, name))?));

@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
-use anyhow::anyhow;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -51,17 +50,15 @@ pub struct RapiraHandle {
 }
 
 impl Rapira {
-    pub fn handle(&self) -> anyhow::Result<RapiraHandle> {
-        let intake = self
-            .intake
-            .as_ref()
-            .ok_or_else(|| anyhow!("Rapira intake is None"))?;
-        Ok(RapiraHandle {
+    pub fn handle(&self) -> RapiraHandle {
+        // Some from the sole constructor until Drop; &self excludes Drop
+        let intake = self.intake.as_ref().expect("intake lives until Drop");
+        RapiraHandle {
             intake: intake.tx.clone(),
             pending: intake.pending.clone(),
             superglobals: self.superglobals,
             dispatcher: self.dispatcher,
-        })
+        }
     }
 }
 
@@ -101,7 +98,7 @@ impl RapiraHandle {
         self.dispatcher
     }
 
-    // pending is a diagnostic gauge (Dispatcher::getInfo) — Relaxed. Incremented
+    // pending is a diagnostic gauge (Dispatcher::getInfo) - Relaxed. Incremented
     // before the send, decremented on give-up: the consumer decrements as soon
     // as it wakes, so the reverse order could wrap the counter below zero.
     pub async fn handle(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {

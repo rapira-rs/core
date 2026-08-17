@@ -1,6 +1,6 @@
 # rapira_pingora
 
-Rapira HTTP front — a [Pingora](https://github.com/cloudflare/pingora) server that
+Rapira HTTP front - a [Pingora](https://github.com/cloudflare/pingora) server that
 terminates HTTP and answers every request from PHP through the `extension_api` `Php`
 bridge. It never proxies upstream.
 
@@ -48,4 +48,4 @@ cargo clippy -p rapira_pingora --all-targets
 
 ## License
 
-MIT — see the repository root [LICENSE](../../../LICENSE).
+MIT - see the repository root [LICENSE](../../../LICENSE).

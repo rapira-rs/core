@@ -1,0 +1,484 @@
+use super::headers::*;
+use super::respond::*;
+use super::sendfile::*;
+use super::*;
+use crate::types::{Context, Request};
+use std::path::PathBuf;
+
+fn base_req() -> Request {
+    Request {
+        method: String::new(),
+        uri: "/".into(),
+        target: None,
+        authority: None,
+        https: false,
+        query: String::new(),
+        protocol: String::new(),
+        remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+        server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+        server_name: String::new(),
+        server_port: 8080,
+        script_name: String::new(),
+        document_root: String::new(),
+        script_filename: PathBuf::new(),
+        headers: Vec::new(),
+        server_vars: Vec::new(),
+        content_type: None,
+        content_length: 0,
+        body: Body::Raw(Box::new(std::io::empty())),
+        received_at: None,
+        tls: None,
+    }
+}
+
+/// A sealed response stream, collected.
+enum Sealed {
+    Complete { status: u16, body: Vec<u8> },
+    Truncated { status: Option<u16>, body: Vec<u8> },
+    Nothing,
+}
+
+fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<crate::types::Frame>) -> Sealed {
+    let (mut status, mut body, mut saw_frames) = (None, Vec::new(), false);
+    while let Ok(frame) = rx.try_recv() {
+        saw_frames = true;
+        match frame {
+            crate::types::Frame::Interim(_) | crate::types::Frame::File { .. } => {}
+            crate::types::Frame::Head { head, .. } => status = Some(head.status),
+            crate::types::Frame::Chunk(b) => body.extend_from_slice(&b),
+            crate::types::Frame::End { truncated, .. } => {
+                return match (truncated, status) {
+                    (true, status) => Sealed::Truncated { status, body },
+                    (false, Some(status)) => Sealed::Complete { status, body },
+                    (false, None) => Sealed::Nothing,
+                };
+            }
+        }
+    }
+    if saw_frames {
+        panic!("stream carried frames but no End");
+    }
+    Sealed::Nothing
+}
+
+fn state_of(
+    req: Request,
+) -> (
+    ExchangeState,
+    tokio::sync::mpsc::Receiver<crate::types::Frame>,
+) {
+    // room for a full event trio with no reader (seal must not park)
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let job = Box::new(Job {
+        ctx: Context::new(req, tx, /*superglobals=*/ false),
+    });
+    let Ok(st) = ExchangeState::new(job) else {
+        unreachable!("empty cursor body always reads")
+    };
+    (st, rx)
+}
+
+fn state() -> (
+    ExchangeState,
+    tokio::sync::mpsc::Receiver<crate::types::Frame>,
+) {
+    state_of(base_req())
+}
+
+/// The buffer cap must seal (truncated) rather than merely error: an
+/// unsealed overflow leaves the unit in Handling and wedges every later
+/// receive() on the single-flight check for the life of the worker. The
+/// oversized `len` is checked before the byte slice is formed, so no giant
+/// buffer is needed.
+#[test]
+fn overflow_seals_the_unit_truncated() {
+    let (mut st, mut rx) = state();
+    let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), MAX_BUFFERED_BODY + 1, false) };
+    assert_eq!(v, Verb::Overflow);
+
+    let Sealed::Truncated { status, body } = recv_sealed(&mut rx) else {
+        panic!("overflow must seal a truncated stream");
+    };
+    assert_eq!(status, Some(200));
+    assert!(body.is_empty(), "the overflowing chunk is never sent");
+
+    // The unit is concluded: later verbs see Finalized, not a wedge.
+    let v = unsafe { write_body_core(&mut st, c"y".as_ptr(), 1, true) };
+    assert_eq!(v, Verb::Finalized);
+    let job: *const c_void = (&raw const st).cast();
+    assert!(unsafe { rapira_rs_exchange_is_finalized(job) });
+}
+
+/// A 304 head drops accepted body chunks at seal, like 204 and HEAD.
+#[test]
+fn seal_drops_the_body_for_304() {
+    let (mut st, mut rx) = state();
+    assert_eq!(
+        unsafe { write_head_core(&mut st, 304, Vec::new()) },
+        Verb::Ok
+    );
+    let v = unsafe { write_body_core(&mut st, c"gone".as_ptr(), 4, true) };
+    assert_eq!(v, Verb::Ok);
+    let Sealed::Complete { status, body } = recv_sealed(&mut rx) else {
+        panic!("must seal cleanly");
+    };
+    assert_eq!(status, 304);
+    assert!(body.is_empty(), "304 carries no body");
+}
+
+/// Contract: an empty chunk without eos does nothing - no head commits.
+#[test]
+fn empty_non_eos_chunk_commits_nothing() {
+    let (mut st, mut rx) = state();
+    let v = unsafe { write_body_core(&mut st, c"".as_ptr(), 0, false) };
+    assert_eq!(v, Verb::Ok);
+    assert_eq!(
+        unsafe { write_head_core(&mut st, 404, Vec::new()) },
+        Verb::Ok,
+        "the head slot must still be open"
+    );
+    let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), 1, true) };
+    assert_eq!(v, Verb::Ok);
+    let Sealed::Complete { status, .. } = recv_sealed(&mut rx) else {
+        panic!("must seal cleanly");
+    };
+    assert_eq!(status, 404);
+}
+
+/// The wire validators mirror the classic path's byte sets exactly.
+#[test]
+fn wire_validators_match_the_classic_byte_sets() {
+    assert!(wire_token(b"x-trace"));
+    assert!(!wire_token(b""));
+    assert!(!wire_token(b"bad name"));
+    assert!(!wire_token(b"x:y"));
+    assert!(wire_value(b"a\tb \xff"));
+    assert!(!wire_value(b"a\x01b"));
+    assert!(!wire_value(b"a\x7fb"));
+    assert!(!wire_value(b"split\r\nx: y"));
+    assert!(!wire_value(b"nul\0"));
+}
+
+/// Construction normalizes the contract protocol spelling and treats an
+/// empty unix path as the unnamed endpoint.
+#[test]
+fn construction_normalizes_protocol_and_empty_unix_path() {
+    let mut req = base_req();
+    req.protocol = "HTTP/3.0".into();
+    req.remote = Addr::Unix(Some(PathBuf::new()));
+    let (st, _rx) = state_of(req);
+    assert_eq!(st.protocol_php, "HTTP/3");
+    assert!(matches!(st.remote, AddrOwned::Unix(None)));
+}
+
+/// A one-shot body write carries its computed length on the Head frame; a
+/// streamed first write leaves the framing to the front.
+#[test]
+fn head_frame_length_follows_the_write_shape() {
+    use crate::types::Frame;
+    let (mut st, mut rx) = state();
+    let v = unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, true) };
+    assert_eq!(v, Verb::Ok);
+    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
+        panic!("head first");
+    };
+    assert_eq!(content_length, Some(3));
+
+    let (mut st, mut rx) = state();
+    let v = unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, false) };
+    assert_eq!(v, Verb::Ok);
+    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
+        panic!("head first");
+    };
+    assert_eq!(content_length, None, "streaming: the front frames");
+}
+
+/// The CLEE prefix rule: the fitting bytes go out, the response completes
+/// per its declaration (not truncated), and later writes see Finalized.
+#[test]
+fn content_length_exceeded_sends_the_prefix_and_seals() {
+    use crate::types::Frame;
+    let (mut st, mut rx) = state();
+    let v =
+        unsafe { write_head_core(&mut st, 200, vec![("content-length".into(), b"5".to_vec())]) };
+    assert_eq!(v, Verb::Ok);
+    let v = unsafe { write_body_core(&mut st, c"0123456789".as_ptr(), 10, true) };
+    assert_eq!(v, Verb::ContentLengthExceeded);
+
+    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
+        panic!("head first");
+    };
+    assert_eq!(content_length, Some(5), "the declared length is honoured");
+    let Ok(Frame::Chunk(b)) = rx.try_recv() else {
+        panic!("the fitting prefix must be sent");
+    };
+    assert_eq!(&b[..], b"01234");
+    let Ok(Frame::End { truncated, .. }) = rx.try_recv() else {
+        panic!("sealed");
+    };
+    assert!(!truncated, "complete per its declaration");
+
+    let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), 1, true) };
+    assert_eq!(v, Verb::Finalized, "nothing written after it");
+}
+
+/// A repeated content-length in the head table is a `\ValueError`.
+#[test]
+fn repeated_content_length_is_a_bad_field() {
+    let (mut st, _rx) = state();
+    let v = unsafe {
+        write_head_core(
+            &mut st,
+            200,
+            vec![
+                ("content-length".into(), b"5".to_vec()),
+                ("Content-Length".into(), b"7".to_vec()),
+            ],
+        )
+    };
+    assert!(matches!(v, Verb::BadField(_)));
+    assert_eq!(st.stage, Stage::Open, "a rejected head commits nothing");
+}
+
+/// An interim head emits at once, minus framing fields, and leaves the
+/// final-head slot open.
+#[test]
+fn interim_head_emits_without_framing_fields() {
+    use crate::types::Frame;
+    let (mut st, mut rx) = state();
+    let v = unsafe {
+        write_head_core(
+            &mut st,
+            103,
+            vec![
+                ("link".into(), b"</a.css>; rel=preload".to_vec()),
+                ("content-length".into(), b"5".to_vec()),
+                ("connection".into(), b"close".to_vec()),
+            ],
+        )
+    };
+    assert_eq!(v, Verb::Interim);
+    let Ok(Frame::Interim(head)) = rx.try_recv() else {
+        panic!("interim head must be on the stream");
+    };
+    assert_eq!(head.status, 103);
+    assert_eq!(
+        head.headers.len(),
+        1,
+        "framing fields stripped: {:?}",
+        head.headers
+    );
+    assert_eq!(head.headers[0].0, "link");
+    let v = unsafe { write_head_core(&mut st, 200, Vec::new()) };
+    assert_eq!(v, Verb::Ok, "the final-head slot stays open");
+}
+
+/// A gone client discards the unit exactly once; the latch is sticky and
+/// the unit reports finalized + cancelled.
+#[test]
+fn gone_client_discards_once_and_stays_discarded() {
+    let (mut st, rx) = state();
+    drop(rx);
+    let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), 1, false) };
+    assert_eq!(v, Verb::Discarded);
+    let v = unsafe { write_body_core(&mut st, c"y".as_ptr(), 1, true) };
+    assert_eq!(v, Verb::Discarded, "sticky across repeat writes");
+
+    let job: *const c_void = (&raw const st).cast();
+    assert!(unsafe { rapira_rs_exchange_is_finalized(job) });
+    assert!(unsafe { rapira_rs_exchange_is_cancelled(job) });
+}
+
+/// `flush()` commits and emits the implicit 200 once; a repeat flush puts
+/// nothing new on the stream.
+#[test]
+fn flush_emits_the_implicit_head_once() {
+    use crate::types::Frame;
+    let (mut st, mut rx) = state();
+    let job: *mut c_void = (&raw mut st).cast();
+    assert!(unsafe { rapira_rs_exchange_flush(job) });
+    let Ok(Frame::Head {
+        head,
+        content_length,
+        ..
+    }) = rx.try_recv()
+    else {
+        panic!("flush must emit the head");
+    };
+    assert_eq!(head.status, 200);
+    assert!(head.headers.is_empty(), "implicit 200 has no fields");
+    assert_eq!(content_length, None, "flush costs the computed length");
+    assert!(unsafe { rapira_rs_exchange_flush(job) });
+    assert!(rx.try_recv().is_err(), "a repeat flush is a no-op");
+}
+
+/// A committed 101 is bodiless: chunks are accepted and dropped.
+#[test]
+fn a_101_head_drops_body_chunks() {
+    use crate::types::Frame;
+    let (mut st, mut rx) = state();
+    assert_eq!(
+        unsafe { write_head_core(&mut st, 101, Vec::new()) },
+        Verb::Ok
+    );
+    let v = unsafe { write_body_core(&mut st, c"upgrade".as_ptr(), 7, true) };
+    assert_eq!(v, Verb::Ok);
+    let Ok(Frame::Head { bodiless, .. }) = rx.try_recv() else {
+        panic!("head first");
+    };
+    assert!(bodiless);
+    assert!(
+        matches!(rx.try_recv(), Ok(Frame::End { .. })),
+        "no chunk frames for a 1xx response"
+    );
+}
+
+/// sendFile validation, one test fn: the root is process-global state.
+#[test]
+fn send_file_validation_table() {
+    use crate::types::Frame;
+    let dir = std::env::temp_dir();
+    set_sendfile_root(dir.clone());
+    let path = dir.join(format!("rapira-sf-{}", std::process::id()));
+    std::fs::write(&path, b"abcdefghijklmnopqrstuvwxyz").unwrap();
+    let pb = path_bytes(&path);
+    let link_out = dir.join(format!("rapira-sf-out-{}", std::process::id()));
+    std::fs::remove_file(&link_out).ok();
+    std::os::unix::fs::symlink("/etc/hosts", &link_out).unwrap();
+
+    let (mut st, _rx) = state();
+    for (name, path, offset, length) in [
+        ("missing", b"/definitely/not/here".to_vec(), 0, None),
+        ("directory", path_bytes(&dir), 0, None),
+        ("offset past end", pb.clone(), 27, None),
+        ("slice past end", pb.clone(), 20, Some(10)),
+        ("outside the root", b"/etc/hosts".to_vec(), 0, None),
+        ("escaping symlink", path_bytes(&link_out), 0, None),
+    ] {
+        let v = unsafe { send_file_core(&mut st, &path, offset, length, true) };
+        assert!(matches!(v, Verb::FileNotSendable(_)), "{name}");
+    }
+    // raised before anything is written: the unit stays open
+    assert_eq!(st.stage, Stage::Open);
+
+    let (mut st, mut rx) = state();
+    let v = unsafe { send_file_core(&mut st, &pb, 2, Some(3), true) };
+    assert_eq!(v, Verb::Ok);
+    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
+        panic!("head first");
+    };
+    assert_eq!(
+        content_length,
+        Some(3),
+        "the slice length is known up front"
+    );
+    let Ok(Frame::File { offset, len, .. }) = rx.try_recv() else {
+        panic!("the file rides its own frame");
+    };
+    assert_eq!((offset, len), (2, 3));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Frame::End {
+            truncated: false,
+            ..
+        })
+    ));
+    assert_eq!(st.stage, Stage::Finalized);
+
+    // a symlink whose target stays inside the root is allowed
+    let link_in = dir.join(format!("rapira-sf-in-{}", std::process::id()));
+    std::fs::remove_file(&link_in).ok();
+    std::os::unix::fs::symlink(&path, &link_in).unwrap();
+    let (mut st, mut rx) = state();
+    let v = unsafe { send_file_core(&mut st, &path_bytes(&link_in), 0, None, true) };
+    assert_eq!(v, Verb::Ok, "intra-root symlinks stay sendable");
+    assert!(matches!(rx.try_recv(), Ok(Frame::Head { .. })));
+
+    std::fs::remove_file(&link_in).ok();
+    std::fs::remove_file(&link_out).ok();
+    std::fs::remove_file(&path).ok();
+}
+
+/// Trailers end the response through the End frame; repeat calls land on
+/// Finalized, and a headless call is HeadNotWritten.
+#[test]
+fn trailers_finalize_with_a_committed_head() {
+    use crate::types::Frame;
+    let (mut st, mut rx) = state();
+    let v = unsafe { write_trailers_core(&mut st, vec![("x".into(), b"y".to_vec())]) };
+    assert_eq!(v, Verb::HeadNotWritten, "nothing here commits a head");
+
+    assert_eq!(
+        unsafe { write_head_core(&mut st, 200, Vec::new()) },
+        Verb::Ok
+    );
+    let v = unsafe { write_trailers_core(&mut st, vec![("x".into(), b"y".to_vec())]) };
+    assert_eq!(v, Verb::Ok);
+    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
+        panic!("head first");
+    };
+    assert_eq!(
+        content_length,
+        Some(0),
+        "trailers-only keeps length framing"
+    );
+    let Ok(Frame::End {
+        trailers,
+        truncated,
+    }) = rx.try_recv()
+    else {
+        panic!("the trailers ride the End frame");
+    };
+    assert!(!truncated);
+    assert_eq!(trailers, vec![("x".to_string(), b"y".to_vec())]);
+
+    let v = unsafe { write_trailers_core(&mut st, Vec::new()) };
+    assert_eq!(v, Verb::Finalized);
+}
+
+/// The forbidden set covers every RFC 9110 §6.5.1 category; unknown
+/// extension fields pass.
+#[test]
+fn trailer_denylist_matches_the_categories() {
+    for name in [
+        "Content-Length",
+        "connection",
+        "host",
+        "authorization",
+        "cache-control",
+        "date",
+        "content-type",
+    ] {
+        assert!(forbidden_trailer(name), "{name}");
+    }
+    assert!(!forbidden_trailer("x-checksum"));
+    assert!(!forbidden_trailer("server-timing"));
+}
+
+/// Sealing unlinks the spool files (the contract's "gone when the exchange
+/// finalizes"); the Drop net stays idempotent afterwards.
+#[test]
+fn seal_unlinks_the_spool_files() {
+    let (mut st, mut _rx) = state();
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("rapira-test-spool-{}", std::process::id()));
+    std::fs::write(&path, b"payload").unwrap();
+    st.body = BodyState::Multipart {
+        fields: Vec::new(),
+        files: vec![FilePart {
+            upload: crate::types::UploadedFile {
+                name: b"f".to_vec(),
+                client_filename: b"a.bin".to_vec(),
+                client_media_type: None,
+                headers: Vec::new(),
+                file: crate::types::SpooledFile { path: path.clone() },
+                size: 7,
+            },
+            path: path_bytes(&path),
+            headers: Grouped::new(&[]),
+        }],
+    };
+    assert!(path.exists());
+    unsafe { seal(&mut st, false, Vec::new()) };
+    assert!(!path.exists(), "seal must unlink the spooled file");
+}

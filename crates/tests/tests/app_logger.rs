@@ -152,3 +152,40 @@ fn app_logger_dateinterval_easy() {
         )
     );
 }
+
+/// A throwing jsonSerialize() must not escape log() as a userland exception;
+/// the record still reaches the host.
+#[test]
+fn log_survives_a_throwing_json_serializer() {
+    let (level, msg, ctx) = app_record("app_logger/app-logger-throwing-serializer.php");
+    assert_eq!(level, Level::ERROR);
+    assert_eq!(msg, "bombed");
+    // partial output on error: the thrower becomes null, siblings survive
+    assert!(ctx.contains(r#""keep":"visible""#), "got: {ctx:?}");
+    assert!(ctx.contains(r#""bomb":null"#), "got: {ctx:?}");
+}
+
+/// exit() inside a serializer is an unwind-exit, not a serialization failure:
+/// log() must not swallow it.
+#[test]
+fn log_preserves_exit_from_a_serializer() {
+    use php_sys::{Mode, Rapira};
+    use tests::{drain, php_lock, req};
+
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Classic).expect("classic boot");
+    let h = r.handle();
+    let (status, body) = drain(
+        h.handle_blocking(req("/", "app_logger/app-logger-exit-in-serializer.php"))
+            .expect("dispatch"),
+    );
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200);
+    assert!(body.contains("quitting"), "got: {body:?}");
+    assert!(
+        !body.contains("after-log"),
+        "exit() must terminate the script, not be cleared (got: {body:?})"
+    );
+}

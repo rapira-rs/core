@@ -1,7 +1,7 @@
 <?php
 
 // Serves through the polling verbs: tryReceive() first, receive(1s) once a
-// request flips the mode — the happy path of both non-blocking receives.
+// request flips the mode - the happy path of both non-blocking receives.
 
 $d = \Rapira\get_dispatcher();
 $mode = 'try';

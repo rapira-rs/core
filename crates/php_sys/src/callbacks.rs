@@ -21,7 +21,7 @@ pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
 
 /// Hard cap on response bytes buffered in Rust (outside PHP's memory_limit).
 /// Classic `ub_write` applies it to the whole body (aborts + recycles);
-/// Exchange `writeBody` per chunk (seals the unit truncated) — streamed
+/// Exchange `writeBody` per chunk (seals the unit truncated) - streamed
 /// responses are otherwise bounded by the frame channel.
 pub(crate) const MAX_BUFFERED_BODY: usize = 1 << 30; // 1 GiB
 
@@ -283,7 +283,7 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
     with_ctx(0, |ctx| {
         let crate::types::Body::Raw(reader) = &mut ctx.req.body else {
             // the host parses multipart only for Exchange-style delivery, which
-            // never binds a server context — reaching this arm is a host bug
+            // never binds a server context - reaching this arm is a host bug
             tracing::debug!(target: "rapira", "read_post on a host-parsed multipart body");
             return 0;
         };
@@ -317,7 +317,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         // php_register_variable_safe emallocs; under OOM it zend_bailout()s, and
         // a longjmp over a Rust frame with pending drops is UB. This frame holds
         // no owned Rust values: fixed vars register from borrows into ReqC,
-        // owned batches go through a ManuallyDrop — a bail leaks one batch
+        // owned batches go through a ManuallyDrop - a bail leaks one batch
         // instead of corrupting the unwind.
         let put_bytes = |name: &CStr, val: &[u8]| unsafe {
             php_register_variable_safe(

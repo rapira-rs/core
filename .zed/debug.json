@@ -1,0 +1,52 @@
+[
+  {
+    "label": "rapira: worker - examples/worker.php",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "build": {
+      "command": "cargo",
+      "args": ["build", "--bin=rapira", "--package=rapira_core"]
+    },
+    "args": ["serve", "--mode", "worker", "examples/worker.php"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "env": {
+      "DYLD_LIBRARY_PATH": "target/phplib",
+      "LD_LIBRARY_PATH": "target/phplib"
+    },
+    "sourceLanguages": ["rust"]
+  },
+  {
+    "label": "rapira: classic - examples/classic.php",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "build": {
+      "command": "cargo",
+      "args": ["build", "--bin=rapira", "--package=rapira_core"]
+    },
+    "args": ["serve", "--mode", "classic", "examples/classic.php"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "env": {
+      "DYLD_LIBRARY_PATH": "target/phplib",
+      "LD_LIBRARY_PATH": "target/phplib"
+    },
+    "sourceLanguages": ["rust"]
+  },
+  {
+    "label": "Debug tests",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "build": {
+      "command": "cargo",
+      "args": ["test", "--no-run", "-p", "tests"],
+      "env": {
+        "CARGO_TARGET_DIR": "target/nts"
+      }
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "env": {
+      "DYLD_LIBRARY_PATH": "target/phplib",
+      "LD_LIBRARY_PATH": "target/phplib"
+    },
+    "sourceLanguages": ["rust"]
+  }
+]

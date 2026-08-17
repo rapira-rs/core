@@ -38,7 +38,7 @@ fn cycles_are_broken_without_a_diagnostic() {
 }
 
 /// Monolog: testNormalizeHandleLargeArraysWithExactly1000Items. The boundary is
-/// the point — this must keep passing once a cap exists, so it guards the
+/// the point - this must keep passing once a cap exists, so it guards the
 /// off-by-one rather than the cap itself.
 #[test]
 fn a_thousand_items_are_not_truncated() {
@@ -58,7 +58,7 @@ fn a_thousand_items_are_not_truncated() {
     );
 }
 
-/// Monolog: testNormalizeHandleLargeArrays — over the cap, the array is truncated
+/// Monolog: testNormalizeHandleLargeArrays - over the cap, the array is truncated
 /// and carries a marker naming the real size.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
@@ -101,7 +101,7 @@ fn huge_strings_are_capped() {
     );
 }
 
-/// Monolog: testMaxNormalizeDepth — over-deep branches abort with a marker naming
+/// Monolog: testMaxNormalizeDepth - over-deep branches abort with a marker naming
 /// the limit. PHP_JSON_PARTIAL_OUTPUT_ON_ERROR disables json's depth ceiling
 /// entirely (json_encoder.c:192-197), so encoding runs until Zend's stack guard
 /// trips and substitutes a bare null: bounded, but silent.

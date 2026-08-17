@@ -136,7 +136,7 @@ jobs:
                   dnf -y install \
                     gcc gcc-c++ make cmake git tar gzip xz findutils python3 \
                     pkgconf-pkg-config clang-devel llvm-devel \
-                    openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel
+                    openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel libffi-devel gettext-devel
 
             - name: Resolve PHP patch version
               id: php
@@ -165,7 +165,7 @@ jobs:
 
             - name: Install build deps (macOS)
               if: matrix.provision == 'source-unix' && runner.os == 'macOS'
-              run: brew install pkg-config openssl@3 curl oniguruma libxml2 sqlite
+              run: brew install pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext
 
             # Split restore/save (as master.yml): the PHP build survives later failures.
             - name: Restore PHP embed runtime
@@ -174,7 +174,7 @@ jobs:
               uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v2
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('.github/php-configure-flags.txt') }}-v2
 
             - name: Build PHP embed from release tarball (Unix)
               if: matrix.provision == 'source-unix' && steps.phpcache.outputs.cache-hit != 'true'
@@ -183,12 +183,13 @@ jobs:
                   set -euo pipefail
                   curl -fsSL "https://www.php.net/distributions/php-${{ steps.php.outputs.full }}.tar.gz" -o php.tar.gz
                   tar xf php.tar.gz && cd "php-${{ steps.php.outputs.full }}"
+                  export CFLAGS="-O2"
                   EXTRA=""
                   if [ "$RUNNER_OS" = "macOS" ]; then
-                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-                    EXTRA="--with-iconv=$(xcrun --show-sdk-path)/usr"
+                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                    EXTRA="--with-iconv=$(xcrun --show-sdk-path)/usr --with-gettext=$(brew --prefix gettext)"
                   fi
-                  ./configure --prefix="$PHP_PREFIX" $(tr '\n' ' ' < "$GITHUB_WORKSPACE/ci/php-configure-flags.txt") $EXTRA
+                  ./configure --prefix="$PHP_PREFIX" $(tr '\n' ' ' < "$GITHUB_WORKSPACE/.github/php-configure-flags.txt") $EXTRA
                   make -j"$(getconf _NPROCESSORS_ONLN)"
                   make install
 
@@ -197,7 +198,7 @@ jobs:
               uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('ci/php-configure-flags.txt') }}-v2
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('.github/php-configure-flags.txt') }}-v2
 
             - name: Expose PHP + rpath (Linux)
               if: runner.os == 'Linux'
@@ -310,7 +311,7 @@ jobs:
                   for arch in amd64 arm64; do
                     for minor in 8.4 8.5; do
                       test -d "dist/pkgroot-${arch}-php${minor}" || { echo "::error::missing pkgroot ${arch}/php${minor}"; exit 1; }
-                      # nfpm does not env-expand contents.src — stage each variant at the fixed path
+                      # nfpm does not env-expand contents.src - stage each variant at the fixed path
                       rm -rf dist/pkgroot-current
                       cp -r "dist/pkgroot-${arch}-php${minor}" dist/pkgroot-current
                       NFPM_ARCH=$arch PHP_MINOR=$minor VERSION="$VERSION" nfpm pkg -p deb -f nfpm.yaml -t dist/

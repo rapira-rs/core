@@ -89,7 +89,7 @@ fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     host.register::<Driver>(())?;
     let outcomes = host
         .run(
-            rapira.handle()?,
+            rapira.handle(),
             fixture("extension_tests/ext-driver-worker.php"),
         )
         .join();
@@ -227,7 +227,7 @@ fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
     };
     let outcomes = host
         .run_with_options(
-            rapira.handle()?,
+            rapira.handle(),
             fixture("dispatcher/echo-loop-worker.php"),
             rapira_runtime::RuntimeOptions {
                 uploads: std::sync::Arc::new(limits),
@@ -245,13 +245,13 @@ fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
 fn classic_mode_serves_exec() -> anyhow::Result<()> {
     let _guard = php_lock();
     // Classic mode runs the front controller per exec, with the URI in $_GET, so it
-    // echoes "ok:<from>" — exec works with a real front controller (why serve takes a SCRIPT).
+    // echoes "ok:<from>" - exec works with a real front controller (why serve takes a SCRIPT).
     let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionRuntime::new();
     host.register::<Driver>(())?;
     let outcomes = host
         .run(
-            rapira.handle()?,
+            rapira.handle(),
             fixture("extension_tests/ext-driver-classic.php"),
         )
         .join();
@@ -266,7 +266,7 @@ fn classic_mode_serves_exec() -> anyhow::Result<()> {
 }
 
 /// Drives one request whose PHP handler sets a status + session cookie and then throws
-/// with output buffered — a COMPLETE, head-only error response. Regression guard for the
+/// with output buffered - a COMPLETE, head-only error response. Regression guard for the
 /// truncation rule (`Context::is_truncated`): `exec` maps a truncated terminal frame to
 /// an error, so a buffered/head-only error response must NOT be flagged truncated, or the
 /// extension would serve a generic 502 instead of the real 404.
@@ -306,7 +306,7 @@ fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     host.register::<ErrorPathDriver>(())?;
     let outcomes = host
         .run(
-            rapira.handle()?,
+            rapira.handle(),
             fixture("shared/error-keeps-headers-worker.php"),
         )
         .join();
@@ -320,7 +320,7 @@ fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drives one request whose handler echoes and THEN throws — body output began
+/// Drives one request whose handler echoes and THEN throws - body output began
 /// during the handler, so the sealed frame is truncated and `exec` must surface
 /// it as an error rather than deliver a possibly-incomplete body.
 struct TruncatedDriver;
@@ -361,7 +361,7 @@ fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     host.register::<TruncatedDriver>(())?;
     let outcomes = host
         .run(
-            rapira.handle()?,
+            rapira.handle(),
             fixture("shared/output-then-throw-worker.php"),
         )
         .join();
@@ -382,7 +382,7 @@ fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     let mut host = ExtensionRuntime::new();
     host.register::<ErrorPathDriver>(())?;
     let outcomes = host
-        .run(rapira.handle()?, fixture("shared/error-keeps-headers.php"))
+        .run(rapira.handle(), fixture("shared/error-keeps-headers.php"))
         .join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
@@ -394,7 +394,7 @@ fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A long-lived server extension whose `run` never returns on its own — it runs until the
+/// A long-lived server extension whose `run` never returns on its own - it runs until the
 /// host signals shutdown.
 struct Resident;
 
@@ -429,12 +429,12 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
     let mut host = ExtensionRuntime::new();
     host.register::<Resident>(())?;
     let running = host.run(
-        rapira.handle()?,
+        rapira.handle(),
         fixture("extension_tests/ext-driver-classic.php"),
     );
 
     // Dropping the guard fires the internal stop: `run` (which never returns) is
-    // cancelled, `shutdown` is driven, and the tasks drain — promptly, not hanging.
+    // cancelled, `shutdown` is driven, and the tasks drain - promptly, not hanging.
     let start = Instant::now();
     drop(running);
     drop(rapira);
@@ -464,7 +464,7 @@ fn many_extensions_run() -> anyhow::Result<()> {
     }
     let outcomes = host
         .run(
-            rapira.handle()?,
+            rapira.handle(),
             fixture("extension_tests/ext-driver-worker.php"),
         )
         .join();
@@ -514,7 +514,7 @@ fn run_one<E: Extension<Config = ()>>() -> anyhow::Result<Vec<Result<(), String>
     host.register::<E>(())?;
     let outcomes = host
         .run(
-            rapira.handle()?,
+            rapira.handle(),
             fixture("extension_tests/ext-driver-classic.php"),
         )
         .join();
@@ -613,14 +613,14 @@ fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     host.register::<SlowShutdown>(())?;
     // A tiny grace so the timeout branch fires fast instead of after the 30s default.
     let running = host.run_with_options(
-        rapira.handle()?,
+        rapira.handle(),
         fixture("extension_tests/ext-driver-classic.php"),
         rapira_runtime::RuntimeOptions {
             grace: Duration::from_millis(100),
             ..rapira_runtime::RuntimeOptions::default()
         },
     );
-    // `stop` cancels the pending `run`, then drives `shutdown` — which overruns the grace.
+    // `stop` cancels the pending `run`, then drives `shutdown` - which overruns the grace.
     let start = Instant::now();
     let outcomes = running.stop();
     drop(rapira);

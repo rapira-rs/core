@@ -29,6 +29,7 @@
 
 sapi_globals_struct *rapira_sg(void);
 zend_executor_globals *rapira_eg(void);
+zend_compiler_globals *rapira_cg(void);
 php_core_globals *rapira_pg(void);
 void rapira_init_call_stack(void);
 void rapira_process_init(void);
@@ -81,9 +82,6 @@ typedef struct {
 // static muts; all are assigned before any object of these classes can exist.
 // rapira.stub.php
 extern zend_class_entry *rapira_ce_log_level;
-extern zend_class_entry *rapira_ce_work;
-extern zend_class_entry *rapira_ce_dispatcher_info;
-extern zend_class_entry *rapira_ce_dispatcher;
 // exceptions
 extern zend_class_entry *rapira_ce_closed_exception;
 extern zend_class_entry *rapira_ce_timeout_exception;

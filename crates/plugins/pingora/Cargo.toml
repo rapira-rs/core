@@ -3,7 +3,7 @@ name = "rapira_pingora"
 version = "0.3.0"
 edition = "2024"
 license = "MIT"
-description = "Rapira HTTP front — a Pingora server plugin that streams requests through PHP"
+description = "Rapira HTTP front - a Pingora server plugin that streams requests through PHP"
 
 [lints]
 workspace = true

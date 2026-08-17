@@ -1,13 +1,13 @@
 //! Native rapira extension contract.
 //!
-//! An extension is a standalone crate — its own repository, compiled into rapira — that
+//! An extension is a standalone crate - its own repository, compiled into rapira - that
 //! **drives PHP**: its async [`Extension::run`] reaches rapira's PHP worker pool through
 //! [`Php`]. The host constructs it ([`Extension::init`], injecting its typed
 //! [`Extension::Config`]), drives `run`, and asks it to stop with
 //! [`Extension::shutdown`].
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -25,7 +25,7 @@ pub type FieldLines = Vec<(String, Vec<u8>)>;
 ///
 /// Lifecycle: `init` (construct, injecting [`Extension::Config`]) → `prepare`
 /// (master-side, pre-fork: bind inheritable resources) → `run` (serve, in the worker
-/// process) → `shutdown` (drain). `run` and `shutdown` are never borrowed at once — the
+/// process) → `shutdown` (drain). `run` and `shutdown` are never borrowed at once - the
 /// host drops the in-flight `run` future before it calls `shutdown` (see
 /// `rapira_runtime`).
 pub trait Extension: Send + 'static {
@@ -44,7 +44,7 @@ pub trait Extension: Send + 'static {
 
     /// Master-side pre-fork hook: synchronous, single-threaded, no runtime exists.
     /// Runs once after `init`, before any fork and before `run`. Bind inheritable
-    /// resources here (listen sockets via [`PrepareCtx`]) and store them in `self` —
+    /// resources here (listen sockets via [`PrepareCtx`]) and store them in `self` -
     /// this same value crosses the fork, and `run` consumes them in the worker.
     /// Must not spawn threads or create runtime primitives. Default: no-op
     /// (queue-consumer extensions prepare nothing).
@@ -53,7 +53,7 @@ pub trait Extension: Send + 'static {
     }
 
     /// Drive to completion. Serve requests here, reaching PHP through `php`. `Ok` on a
-    /// clean finish, `Err` to report a failure. Must stay cooperative — reach `.await`
+    /// clean finish, `Err` to report a failure. Must stay cooperative - reach `.await`
     /// points regularly so the host can cancel `run` on shutdown; a tight non-awaiting
     /// loop cannot be stopped.
     ///
@@ -207,34 +207,25 @@ fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Ve
 }
 
 /// The PHP bridge handed to every extension. Cheap to clone; every clone shares the
-/// host's backend handle — never keep a spare past `run`/`shutdown` (the host's
+/// host's backend handle - never keep a spare past `run`/`shutdown` (the host's
 /// shutdown contract).
 #[derive(Clone)]
 pub struct Php {
     backend: Arc<dyn Backend>,
-    script: Arc<Path>,
 }
 
 impl Php {
     /// Host-internal: `rapira_runtime` builds one and clones it into every `run`.
     /// Not part of the extension-facing API and not semver-guarded.
     #[doc(hidden)]
-    pub fn new(backend: Arc<dyn Backend>, script: PathBuf) -> Self {
-        Self {
-            backend,
-            script: Arc::from(script),
-        }
-    }
-
-    /// The entry script every request runs (front controller / worker).
-    pub fn script(&self) -> &Path {
-        &self.script
+    pub fn new(backend: Arc<dyn Backend>) -> Self {
+        Self { backend }
     }
 
     /// Submit `req`; resolves with the response stream once the unit is
     /// dispatched. Errors with a downcastable [`Rejected`] when the host
     /// refused the request before dispatch (malformed multipart → 400, past a
-    /// configured limit → 413) — nothing rejected ever reaches a worker.
+    /// configured limit → 413) - nothing rejected ever reaches a worker.
     /// Response-shape failures surface from [`Reply::next`]/[`Reply::collect`].
     pub async fn exec(&self, req: Request) -> Result<Reply> {
         self.backend.exec(req).await
@@ -247,7 +238,7 @@ impl Php {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Addr {
     Inet(std::net::SocketAddr),
-    /// None is an unnamed endpoint — the usual case for a peer connecting to a unix
+    /// None is an unnamed endpoint - the usual case for a peer connecting to a unix
     /// listener, which binds no path of its own.
     Unix(Option<PathBuf>),
 }
@@ -282,7 +273,7 @@ pub struct Tls {
 }
 
 /// A request the host rejected before dispatch; the extension answers it in its own
-/// protocol. Surfaces as [`Php::exec`]'s error — downcast from `anyhow::Error`.
+/// protocol. Surfaces as [`Php::exec`]'s error - downcast from `anyhow::Error`.
 #[derive(Debug)]
 pub struct Rejected {
     /// 400 for a malformed body, 413 past a configured limit.
@@ -302,7 +293,7 @@ impl std::error::Error for Rejected {}
 /// A request an extension runs through PHP. Pool-internal fields (`query`,
 /// `content_type`, script paths) are derived by the host's backend.
 ///
-/// Every fidelity field is populated or honestly omitted (`Option`/enum) — an extension
+/// Every fidelity field is populated or honestly omitted (`Option`/enum) - an extension
 /// with no wire form for a fact passes None, never a fabricated default.
 pub struct Request {
     pub method: String,
@@ -319,14 +310,14 @@ pub struct Request {
     pub protocol: String, // "HTTP/1.1"
     /// The peer's end of the connection, as the socket reports it.
     pub remote: Addr,
-    /// The accepting socket — which listener took the call, not configuration.
+    /// The accepting socket - which listener took the call, not configuration.
     pub server: Addr,
     /// Configured CGI facts (`SERVER_NAME`/`SERVER_PORT`, RFC 3875) and the `$uri`
     /// synthesis fallback; distinct from the socket-derived `server`.
     pub server_name: String,
     pub server_port: u16,
     /// What the handshake settled, when this listener terminated TLS itself. None on a
-    /// plaintext listener — `https` may still be true behind a terminating front.
+    /// plaintext listener - `https` may still be true behind a terminating front.
     pub tls: Option<Tls>,
     /// Unix seconds when the extension accepted the request: after the head was parsed,
     /// before the body was read. None when the extension has no ingress stamp; the host

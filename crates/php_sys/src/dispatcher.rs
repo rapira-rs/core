@@ -145,7 +145,7 @@ unsafe fn flatten_throwable(dst: *mut zval, ex: *mut zend_object, depth: i32) {
 /// the original untouched, and JSON-encode the result.
 /// # Safety
 /// `context` a live, non-empty array; frame rules (zend.rs) until the encode
-/// completes — the returned Vec is created after the last bailing call.
+/// completes - the returned Vec is created after the last bailing call.
 unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
     unsafe {
         let mut rebuilt: zval = std::mem::zeroed();
@@ -204,7 +204,7 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
 
 /// # Safety
 /// `message` a live zend_string; `level` NULL or a LogLevel case; `context`
-/// NULL or a live array — all ZPP-owned for the call. Engine active.
+/// NULL or a live array - all ZPP-owned for the call. Engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_log_call(
     message: *mut zend_string,

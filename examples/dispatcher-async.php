@@ -1,7 +1,7 @@
 <?php
 // Asynchronous dispatcher: a fiber per request. While requests are in flight
 // the loop polls tryReceive() between resumes, so it never blocks them; once
-// none are left it parks in a blocking receive() — no sleep, no idle spin.
+// none are left it parks in a blocking receive() - no sleep, no idle spin.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\RapiraThrowable;
@@ -47,7 +47,7 @@ $serve = static function (Exchange $ex): void {
             $ex->writeBody($body);
         }
     } catch (RapiraThrowable) {
-        // The host closed the exchange first — nothing to answer.
+        // The host closed the exchange first - nothing to answer.
     } catch (PageNotFound $e) {
         try {
             $ex->writeHead(404, ['content-type' => ['text/plain']]);
