@@ -2,7 +2,6 @@
 #include "wrapper.h"
 
 #include "zend_API.h"
-#include "zend_exceptions.h"
 
 // rust glue; the verbs throw from Rust and report false with the throw pending
 extern bool rapira_rs_exchange_build_request(rapira_exchange_obj *ex,
