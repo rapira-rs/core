@@ -1,10 +1,5 @@
 <?php
-// The bootstrap opens a session whose save handler fatals the first time it is
-// written. The worker's first-call rapira_request_teardown() flushes that session,
-// so that teardown bails. The bootstrap also bumps a persistent counter, so
-// the served request reports which cycle it ran in: the bailout recycles and
-// re-bootstraps, so it reads "2".
-// Paths key off getmypid() so the (in-process) test can clean them.
+// the bootstrap opens a session whose save handler fatals on first write, so the worker's first rapira_request_teardown() bails while flushing it; the persistent counter (keyed on getmypid() so the in-process test can clean it) lets the served request report its cycle, which reads "2" once the bailout recycles and re-bootstraps
 $dir = sys_get_temp_dir();
 $sentinel = $dir . '/rapira_h2_sentinel_' . getmypid();
 $boot = $dir . '/rapira_h2_boot_' . getmypid();

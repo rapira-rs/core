@@ -1,7 +1,6 @@
 <?php
 
-// `precision` is a plain scalar ini with a well-known built-in default (14), so a
-// planted php.ini is detectable from the response body.
+// precision is a plain scalar ini with a well-known built-in default (14), so a planted php.ini is detectable from the body.
 
 $d = \Rapira\get_dispatcher();
 try {

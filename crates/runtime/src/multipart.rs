@@ -1,12 +1,4 @@
-//! multipart/form-data parsing for the dispatcher request path.
-//!
-//! Parses the already-buffered request body (the front caps it at
-//! `http.max_body_size_mb`) into the contract's Multipart shape: field parts
-//! stay in memory, file parts spool to disk and PHP receives the path.
-//! php-src main/rfc1867.c is the behavioral reference for the lenient bits
-//! (quoted boundary, LF-only lines, preamble/padding tolerance).
-//! https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
-//! https://www.rfc-editor.org/rfc/rfc7578
+// https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -15,20 +7,13 @@ use extension_api::Rejected;
 use memchr::memmem;
 use php_sys::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 
-/// Spool and limit knobs from `[http.uploads]`.
 #[derive(Debug, Clone)]
 pub struct Limits {
-    /// Spool directory for file parts; validated writable at boot.
     pub dir: PathBuf,
-    /// Per file part → 413.
     pub max_file_size: u64,
-    /// Per field part → 413 (fields are buffered in memory).
     pub max_field_size: usize,
-    /// File parts per request → 413.
     pub max_files: usize,
-    /// Total parts → 413.
     pub max_parts: usize,
-    /// Header lines per part → 413.
     pub max_part_headers: usize,
 }
 
@@ -47,9 +32,7 @@ impl Default for Limits {
 
 #[derive(Debug)]
 pub enum ParseError {
-    /// 400 malformed / 413 over a limit - the extension answers it pre-dispatch.
     Rejected(Rejected),
-    /// Spool failure (ENOSPC, EACCES…): a host fault, not the client's.
     Io(std::io::Error),
 }
 
@@ -83,17 +66,12 @@ fn trim_ows(mut b: &[u8]) -> &[u8] {
     b
 }
 
-/// Exact media-type match on bytes: `multipart/form-data-foo` stays raw,
-/// `MULTIPART/FORM-DATA` and `multipart/form-data ; boundary=x` parse.
 pub fn is_multipart(content_type: &[u8]) -> bool {
     let media = content_type.split(|&b| b == b';').next().unwrap_or(b"");
     trim_ows(media).eq_ignore_ascii_case(b"multipart/form-data")
 }
 
-/// The boundary parameter: matched case-insensitively, quoted form unquoted,
-/// unquoted form terminated by `,` (php-src rfc1867.c:707-751), and capped at
-/// the RFC 2046 §5.1.1 70 characters - tighter than rfc1867.c's buffer-sized
-/// cap, on purpose.
+/// Case-insensitive, quoted form unquoted, unquoted form terminated by `,` (php-src rfc1867.c:707-751), capped at the RFC 2046 §5.1.1 70 characters.
 pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
         let Some(eq) = memchr::memchr(b'=', seg) else {
@@ -126,18 +104,12 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
 }
 
 struct DelimHit {
-    /// Where the `--boundary` line begins.
     line_start: usize,
-    /// First byte after the boundary line (Part) or after the closing `--` (Close).
     after: usize,
     close: bool,
 }
 
-/// The next real delimiter at or after `from`: a dash-boundary at the start of
-/// a line, followed by `--` and padding to a line ending or end of body
-/// (close), or by transport padding and a line ending (part). A line that
-/// merely starts with the boundary bytes (`--boundaryX…`, `--boundary--X…`) is
-/// content, not a delimiter, and the scan continues past it.
+/// A delimiter must start a line; a line merely beginning with the boundary bytes is content, so the scan continues past it.
 fn next_delimiter(
     body: &[u8],
     mut from: usize,
@@ -148,9 +120,7 @@ fn next_delimiter(
         if i == 0 || body[i - 1] == b'\n' {
             let mut j = i + dlen;
             if body[j..].starts_with(b"--") {
-                // close-delimiter allows only transport padding and a line
-                // ending (or end of body) after the dashes, RFC 2046 §5.1.1;
-                // any other suffix falls through and the line is content
+                // after the dashes a close-delimiter allows only transport padding and a line ending or end of body, RFC 2046 §5.1.1
                 let mut k = j + 2;
                 while matches!(body.get(k), Some(b' ' | b'\t')) {
                     k += 1;
@@ -191,8 +161,8 @@ fn next_delimiter(
     None
 }
 
-/// Parse a non-empty `multipart/form-data` body. The empty-body case never
-/// reaches here: it lands on the contract's string arm (`$body === ''`).
+/// Parses a non-empty body; the empty-body case lands on the contract's string arm (`$body === ''`) instead.
+/// https://www.rfc-editor.org/rfc/rfc7578
 pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, ParseError> {
     let delim: Vec<u8> = [b"--".as_slice(), boundary].concat();
     let finder = memmem::Finder::new(&delim);
@@ -203,7 +173,6 @@ pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartB
     let opening = next_delimiter(body, 0, &finder, delim.len())
         .ok_or_else(|| bad("no opening boundary line"))?;
     if opening.close {
-        // a well-formed zero-part body: valid, empty
         return Ok(MultipartBody { fields, files });
     }
     let mut part_start = opening.after;
@@ -214,8 +183,7 @@ pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartB
         }
         let ending = next_delimiter(body, part_start, &finder, delim.len())
             .ok_or_else(|| bad("no closing boundary line"))?;
-        // the part's bytes end before the line terminator that precedes the
-        // delimiter line (the CRLF belongs to the delimiter, RFC 2046 §5.1.1)
+        // the line terminator preceding a delimiter line belongs to the delimiter, not the part, RFC 2046 §5.1.1
         let mut part_end = ending.line_start;
         if part_end > part_start && body[part_end - 1] == b'\n' {
             part_end -= 1;
@@ -232,8 +200,7 @@ pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartB
     }
 }
 
-/// The part's header section ends at the first empty line; CRLF and bare LF
-/// both count (php-src's leniency). Returns (headers incl. terminator, body).
+/// Header section ends at the first empty line, CRLF or bare LF; returns (head including the terminator, body).
 fn split_head(part: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
     if let Some(rest) = part.strip_prefix(b"\r\n") {
         return Ok((&part[..2], rest));
@@ -254,8 +221,7 @@ fn split_head(part: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
     Err(bad("part without a header/body separator"))
 }
 
-/// httparse only sees CRLF: normalize the (small) header section rather than
-/// depend on its bare-LF tolerance.
+/// httparse parses CRLF line endings only.
 fn normalize_crlf(head: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(head.len() + 8);
     let mut prev = 0u8;
@@ -272,9 +238,7 @@ fn normalize_crlf(head: &[u8]) -> Vec<u8> {
 /// (name, filename) from a content-disposition value.
 type Disposition = (Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// name/filename out of a content-disposition value. The disposition type
-/// token itself is not enforced (rfc1867.c reads the parameters regardless).
-/// A duplicated name/filename parameter is the contract's explicit 400.
+/// The disposition type token is not enforced: php-src rfc1867.c reads the parameters regardless.
 fn disposition_params(v: &[u8]) -> Result<Disposition, ParseError> {
     let mut name: Option<Vec<u8>> = None;
     let mut filename: Option<Vec<u8>> = None;
@@ -289,7 +253,6 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, ParseError> {
             j += 1;
         }
         let (val, next) = if v.get(j) == Some(&b'"') {
-            // quoted-string with quoted-pair escapes
             let mut out = Vec::new();
             let mut k = j + 1;
             loop {
@@ -337,18 +300,16 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, ParseError> {
     Ok((name, filename))
 }
 
-/// Nothing fallible sits between keep() and the SpooledFile wrap: an error
-/// before keep() is unlinked by NamedTempFile's own Drop, an error after this
-/// function by SpooledFile's.
+/// Nothing fallible may sit between keep() and the SpooledFile wrap, or the kept file has no owner to unlink it.
 fn spool(bytes: &[u8], dir: &std::path::Path) -> Result<SpooledFile, ParseError> {
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(bytes)?;
     let (file, path) = tmp.keep().map_err(|e| ParseError::Io(e.error))?;
-    // the handle is not carried; a streaming spool would need it
     drop(file);
     Ok(SpooledFile { path })
 }
 
+/// A filename parameter, even an empty one, makes the part a file part.
 fn parse_part(
     part: &[u8],
     limits: &Limits,
@@ -362,12 +323,10 @@ fn parse_part(
     let parsed = match httparse::parse_headers(&head, &mut hbuf) {
         Ok(httparse::Status::Complete((_, headers))) => headers,
         Ok(httparse::Status::Partial) => return Err(bad("truncated part header section")),
-        // a limit, not malformation
         Err(httparse::Error::TooManyHeaders) => {
             return Err(over("part headers over max_part_headers"));
         }
-        // httparse enforces RFC 9110 token field names - stricter than
-        // rfc1867.c's leniency, on purpose
+        // httparse enforces RFC 9110 token field names, stricter than rfc1867.c
         Err(_) => return Err(bad("unparseable part header section")),
     };
 
@@ -380,8 +339,6 @@ fn parse_part(
             dispositions += 1;
             disposition = Some(h.value);
         } else if h.name.eq_ignore_ascii_case("content-type") && media_type.is_none() {
-            // repeats: first wins for the lifted value, every line stays in
-            // the part's header list
             media_type = Some(h.value);
         }
         headers.push((h.name.to_owned(), h.value.to_vec()));
@@ -394,22 +351,17 @@ fn parse_part(
     }
 
     let (name, filename) = disposition_params(disposition.unwrap_or_default())?;
-    // the contract types $name non-empty-string: present-but-empty is as
-    // unrepresentable as missing
     let Some(name) = name.filter(|n| !n.is_empty()) else {
         return Err(bad(
             "content-disposition without a non-empty name parameter",
         ));
     };
-    // an empty or OWS-only part content-type maps to null (non-empty-string|null)
     let client_media_type = media_type
         .map(trim_ows)
         .filter(|v| !v.is_empty())
         .map(<[u8]>::to_vec);
 
     match filename {
-        // filename presence - even empty - makes a file part: an empty
-        // clientFilename is a browser submitting an empty file input
         Some(client_filename) => {
             if files.len() + 1 > limits.max_files {
                 return Err(over("file parts over max_files"));
@@ -483,7 +435,6 @@ mod tests {
         );
         assert_eq!(f.size, 7);
         assert_eq!(std::fs::read(&f.file.path).unwrap(), b"PAYLOAD");
-        // the content-disposition line stays in the part's header list
         assert!(
             f.headers
                 .iter()
@@ -515,10 +466,9 @@ mod tests {
         assert!(mb.fields.is_empty() && mb.files.is_empty());
     }
 
+    /// A close-delimiter is `--boundary--` plus padding and a line ending or end of body, RFC 2046 §5.1.1.
     #[test]
     fn close_dashes_with_trailing_junk_are_content_not_close() {
-        // close-delimiter is `--boundary--` + transport padding + line ending
-        // or end of body (RFC 2046 §5.1.1); `--B--junk` is part content
         let body = b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nbefore\r\n--B--junk\r\nafter\r\n--B--";
         let mb = ok(body);
         assert_eq!(mb.fields.len(), 1);
@@ -529,9 +479,9 @@ mod tests {
     fn close_delimiter_padding_and_epilogue_forms_stay_accepted() {
         let field = b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n";
         for close in [
-            &b"--B-- \t"[..],        // padding then end of body
-            b"--B--\r\nepilogue",    // CRLF then epilogue
-            b"--B-- \t\r\nepilogue", // padding, CRLF, epilogue
+            &b"--B-- \t"[..],
+            b"--B--\r\nepilogue",
+            b"--B-- \t\r\nepilogue",
         ] {
             let body = [field.as_slice(), close].concat();
             let mb = ok(&body);
@@ -566,7 +516,6 @@ mod tests {
         ] {
             assert_eq!(rejected(body, &l).status, 400, "body: {body:?}");
         }
-        // boundary extraction rejections
         assert!(
             matches!(boundary(b"multipart/form-data"), Err(ParseError::Rejected(r)) if r.status == 400)
         );
@@ -619,17 +568,15 @@ mod tests {
         );
     }
 
+    /// Uses its own spool dir: scanning the shared system temp dir races sibling tests.
     #[test]
     fn spooled_files_unlink_on_a_later_rejection() {
-        // own spool dir: scanning the shared system temp dir races sibling tests
         let dir = tempfile::tempdir().unwrap();
         let mut l = limits();
         l.dir = dir.path().to_path_buf();
         l.max_field_size = 1;
         let body = b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\nDATA\r\n\
 --B\r\ncontent-disposition: form-data; name=x\r\n\r\ntoolong\r\n--B--";
-        // parse spools the file part, then rejects the oversized field; the
-        // SpooledFile drop must have unlinked the orphan
         assert_eq!(rejected(body, &l).status, 413);
         let leaked: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()

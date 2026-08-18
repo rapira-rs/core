@@ -1,7 +1,3 @@
-//! Worker-side bridge to the shared-memory scoreboard. The slot pointer is
-//! thread-local to the single PHP worker thread; every update is an atomic
-//! store on the slot this process owns.
-
 use std::cell::Cell;
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
@@ -16,7 +12,7 @@ thread_local! {
 
 pub enum Event {
     Handled(bool),
-    Shed, // boot-failure 503: counted on the board, but not a served request
+    Shed,
     Recycled,
     Restart,
     Unhealthy,
@@ -30,6 +26,7 @@ pub fn sb_set(slot: &'static SharedSlot) {
     SB.set(Some(slot));
 }
 
+/// Each Release store publishes the Relaxed write before it (errors, last_activity_ms) to the master's Acquire load.
 pub fn sb_update(event: Event) {
     let Some(s) = SB.get() else { return };
     match event {
@@ -37,8 +34,6 @@ pub fn sb_update(event: Event) {
             if errored {
                 s.errors.fetch_add(1, Relaxed);
             }
-            // Release pairs with the master's Acquire load of `handled`: an
-            // observed count implies its matching error increment is visible.
             s.handled.fetch_add(1, Release);
             crate::quota::tick();
         }
@@ -57,9 +52,6 @@ pub fn sb_update(event: Event) {
             crate::quota::fire_unhealthy();
         }
         Event::Healthy => s.unhealthy.store(0, Relaxed),
-        // timestamp before state, Release-paired with the master's Acquire
-        // state load: a reader must never see a fresh state with the previous
-        // request's timestamp (the watchdog would TERM a fresh request)
         Event::Idle => {
             let state = if DRAINING.get() {
                 SLOT_DRAINING
@@ -77,15 +69,13 @@ pub fn sb_update(event: Event) {
     }
 }
 
-/// Totals kept for `Rapira::scoreboard()` (in-process tests assert on these
-/// fields); filled from the shared board's slots.
 #[derive(Debug, Default, Clone)]
 pub struct ScoreboardSnapshot {
     pub handled: u64,
     pub errors: u64,
     pub recycles: u64,
     pub restarts: u64,
-    pub unhealthy: usize, // workers currently flagged unhealthy
+    pub unhealthy: usize,
     pub workers: Vec<SlotSnapshot>,
 }
 

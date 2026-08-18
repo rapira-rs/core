@@ -41,8 +41,6 @@ echo $req->authority, ' ', $req->receivedAt, "\n";
 $plain = new Request('GET', '/', '/', null, 'HTTP/1.1', [], '', $remote, $server, null, 1.0);
 echo 'tls-null: ', var_export($plain->tls, true), "\n";
 
-// The three ways construction must refuse: readonly reassignment, wrong arity
-// (which is what proves the constructors exist at all), and the address union.
 try {
     $req->method = 'GET';
     echo "reassigned\n";
@@ -50,6 +48,7 @@ try {
     echo "readonly: enforced\n";
 }
 
+// the arity rejection is what proves the constructor exists at all
 try {
     new Request('GET');
     echo "partial accepted\n";

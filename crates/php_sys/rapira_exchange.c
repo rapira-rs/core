@@ -144,16 +144,13 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     }
 }
 
-// __destruct is the contract's safety-net surface; the reporting runs in
-// free_obj when the last reference actually drops, so the method body is empty
+// body is empty: the reporting runs in free_obj when the last reference drops
 ZEND_METHOD(Rapira_Internal_Http_Exchange, __destruct) {
     (void)return_value;
     ZEND_PARSE_PARAMETERS_NONE();
 }
 
-// ---- getRequest: the graph builder lives in Rust (exchange.rs); this shell
-// owns the macro layer only
-
+// the request graph builder lives in Rust (exchange.rs); this shell owns the macro layer
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     ZEND_PARSE_PARAMETERS_NONE();
     if (exchange_job(ZEND_THIS) == NULL) {
@@ -161,8 +158,7 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     }
     rapira_exchange_obj *ex = rapira_exchange_from(Z_OBJ_P(ZEND_THIS));
     if (!rapira_rs_exchange_build_request(ex, return_value)) {
-        // the builder throws before returning false; a caught Rust panic is
-        // the one path that cannot, so backstop it here
+        // the builder throws before returning false; a caught Rust panic cannot, so backstop here
         if (!EG(exception)) {
             zend_throw_error(NULL, "request construction failed");
         }

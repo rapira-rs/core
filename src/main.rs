@@ -22,9 +22,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[derive(Parser)]
 #[command(name = "rapira", version)]
 struct Cli {
-    // Optional so a bare `rapira` prints help, and so future top-level forms (a naked
-    // `rapira <script.php>` positional, a `rapira run` subcommand) slot in without
-    // breaking `serve`.
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -63,14 +60,12 @@ struct ServeArgs {
     script: Option<PathBuf>,
 }
 
+/// Signals are blocked first: USR1/USR2/HUP terminate by default until the master installs its handlers.
 fn main() -> anyhow::Result<()> {
-    // First statement: USR1/USR2/HUP default to terminate, and no handler
-    // exists until the master installs its own. Harmless on non-serve paths.
     rapira_master::block_early_signals();
 
     match Cli::parse().command {
         Some(Commands::Serve(args)) => serve(args),
-        // Bare `rapira`: nothing to run, so show usage and exit cleanly.
         None => {
             Cli::command().print_help()?;
             println!();
@@ -79,10 +74,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// A `rapira-spool-<pid>` entry is reclaimable only when its owner is gone:
-/// kill(pid, 0) probes existence without signaling, and ESRCH means no such
-/// process. EPERM means it exists under another uid - not ours to sweep.
-/// https://man7.org/linux/man-pages/man2/kill.2.html
+/// kill(pid, 0) probes existence without signaling: ESRCH means the owner is gone, EPERM means it runs under another uid. https://man7.org/linux/man-pages/man2/kill.2.html
 fn spool_dir_reclaimable(name: &str) -> bool {
     let Some(pid) = name
         .strip_prefix("rapira-spool-")
@@ -95,15 +87,12 @@ fn spool_dir_reclaimable(name: &str) -> bool {
     gone && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
+/// PHP MINIT runs once in the still-single-threaded master before any fork: the opcache SHM it creates is what every worker inherits.
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
-    // Manual conflict check: clap's conflicts_with would also reject the
-    // agreeing pair (--classic --mode classic).
     if args.classic && args.mode.is_some_and(|m| m != RunMode::Classic) {
         anyhow::bail!("--classic conflicts with --mode; use --mode classic");
     }
-    // Collapse CLI flags, the config file, and defaults into one validated struct. This
-    // also resolves the entry script to an absolute path before anything daemonizes; a
-    // daemon's cwd is not the deploy directory.
+
     let settings: Settings = rapira_config::resolve(
         args.config.as_deref(),
         Overrides {
@@ -114,27 +103,17 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         },
     )?;
 
-    // The logger goes up the moment the config exists, and not before: the
-    // config owns both the filter and the format, and the global logger installs
-    // only once. Nothing earlier logs - signal blocking is syscalls, clap writes
-    // its own usage/errors to stderr, and `resolve` reports failure by returning
-    // it (a config error cannot be rendered in the format that failed to parse).
-    // Non-serve paths never install a logger; stray `log::` calls are dropped.
     logging::init(&settings.log)?;
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
     let script: PathBuf = settings.pool.entrypoint.clone();
 
-    // computed once: the pingora superglobals screen and the php_sys flag both
-    // derive from it and must not disagree
     let mode: Mode = match settings.pool.mode {
         RunMode::Classic => Mode::Classic,
         RunMode::Worker => Mode::Worker(script.clone()),
         RunMode::Dispatcher => Mode::Dispatcher(script.clone()),
     };
 
-    // sendFile containment: the configured root, else the entrypoint's
-    // directory. Set pre-fork; workers inherit it.
     php_sys::set_sendfile_root(
         settings
             .http
@@ -144,9 +123,6 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             .unwrap_or_else(|| PathBuf::from("/")),
     );
 
-    // rapira_config::Listen and rapira_pingora::Listen are distinct types on purpose: the
-    // extension crate stays independent of core's config crate, and core owns the one
-    // mapping between them (a From impl is barred by the orphan rule anyway).
     let http_cfg: HttpConfig = HttpConfig {
         listen: match settings.http.listen {
             Listen::Tcp(addr) => HttpListen::Tcp(addr),
@@ -161,16 +137,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
             UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
         },
-        // the Drop screen protects the $_SERVER mapping, which the superglobal
-        // modes (classic, worker) build and the dispatcher never reads
         superglobals: !matches!(mode, Mode::Dispatcher(_)),
     };
 
-    // Spool boot: the root must take a file now, not fail per-request; sweep
-    // spool dirs whose owning process is gone. The dir may be shared (the
-    // default is the system temp dir), so liveness gates the sweep - another
-    // running instance's dirs stay. Dispatcher-only: the other modes never
-    // spool (php-src parses their bodies), so they touch no shared temp state.
     let uploads = &settings.http.uploads;
     if matches!(mode, Mode::Dispatcher(_)) {
         std::fs::create_dir_all(&uploads.dir).map_err(|e| {
@@ -179,10 +148,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         let probe = uploads
             .dir
             .join(format!(".rapira-probe-{}", std::process::id()));
-        // stale probe from a crashed same-pid boot; unlink never follows symlinks
         let _ = std::fs::remove_file(&probe);
-        // O_CREAT|O_EXCL: a symlink planted at the predictable name in the shared
-        // spool root must fail the probe, never be followed and truncated
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -220,24 +186,15 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         max_part_headers: uploads.max_part_headers,
     };
 
-    // Extensions are compiled in; register the HTTP front (and any others)
-    // here, each with its config.
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
     host.register::<HttpServer>(http_cfg)?;
 
-    // Master-side pre-fork binds: every worker inherits these fds; the master
-    // holds them for its whole life so respawned generations re-inherit.
     let mut prepare_ctx: PrepareCtx = PrepareCtx::new();
     host.prepare_all(&mut prepare_ctx)?;
     let listeners: Vec<i32> = prepare_ctx.listener_fds().to_vec();
 
-    // PHP MINIT once, in the still-single-threaded master (opcache SHM created
-    // here is shared with every forked worker). Workers never tear this down.
     let module: php_sys::PhpModule = Rapira::boot_master()?;
 
-    // Reload needs at most `processes + 1` slots (one overlap headroom worker);
-    // 2x is generous slack. Reject configs the board cannot hold instead of
-    // silently clamping below the configured worker count.
     anyhow::ensure!(
         settings.pool.processes <= rapira_scoreboard::SB_MAX_SLOTS / 2,
         "pool.processes ({}) exceeds the supported maximum ({})",
@@ -266,13 +223,8 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         listeners,
     };
     let max_requests: u64 = settings.pool.max_requests;
-    // The extension runtime's own shutdown bound. It wraps the front's drain, so
-    // it is the master's full budget rather than the reduced one the front gets.
     let grace: std::time::Duration = settings.supervisor.process_control_timeout;
 
-    // The closure runs ONLY in freshly-forked children: each child's COW copy
-    // of `host_cell` is Some, taken exactly once per child. The parent's copy
-    // stays untouched (and keeps the prepared fds alive for re-inheritance).
     let mut host_cell: Option<ExtensionRuntime> = Some(host);
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
         rapira_master::run(cfg, scoreboard, move |env: rapira_master::WorkerEnv| {
@@ -290,7 +242,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     match stop {
         Ok(rapira_master::StopReason::Drained) => {
-            drop(module); // clean php_module_shutdown in the master
+            drop(module);
             Ok(())
         }
         Ok(rapira_master::StopReason::Forced) => std::process::exit(130),
@@ -305,15 +257,13 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 mod tests {
     use super::spool_dir_reclaimable;
 
-    /// The sweep must only reclaim dirs whose owning process is gone: foreign
-    /// names, malformed pids, and live processes (this one) all stay.
+    /// The sweep reclaims only dirs whose owning process is gone.
     #[test]
     fn spool_sweep_reclaims_only_dead_pid_dirs() {
         assert!(!spool_dir_reclaimable("other-dir"));
         assert!(!spool_dir_reclaimable("rapira-spool-"));
         assert!(!spool_dir_reclaimable("rapira-spool-x"));
         assert!(!spool_dir_reclaimable("rapira-spool--5"));
-        // pid 0 signals the whole process group; never probe it
         assert!(!spool_dir_reclaimable("rapira-spool-0"));
         let live = std::process::id();
         assert!(!spool_dir_reclaimable(&format!("rapira-spool-{live}")));

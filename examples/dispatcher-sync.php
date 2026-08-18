@@ -1,6 +1,5 @@
 <?php
-// Synchronous dispatcher, RoadRunner-2 style: one request at a time. receive()
-// blocks the thread, so the worker either waits for a request or handles one.
+// Synchronous dispatcher: receive() blocks the thread, so the worker handles one request at a time.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\RapiraThrowable;
@@ -8,7 +7,6 @@ use Rapira\Http\Request;
 
 final class PageNotFound extends \RuntimeException {}
 
-/** Routes a request to a response body */
 function handle(Request $req): Generator|string
 {
     return match ($req->target) {

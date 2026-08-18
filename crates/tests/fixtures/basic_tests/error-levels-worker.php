@@ -1,7 +1,5 @@
 <?php
-// The engine fills PG(last_error_*) whatever the mask is, so the teardown log is the only
-// place error_reporting() can still be honoured. Set at bootstrap: worker mode restores INI
-// per cycle, not per job, so the mask holds for every request below.
+// the engine fills PG(last_error_*) whatever the mask is, so the teardown log is the only place error_reporting() can still be honoured; set at bootstrap because worker mode restores INI per cycle, not per job
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
 
 $handler = static function (): void {
@@ -13,8 +11,7 @@ $handler = static function (): void {
 			trigger_error('REPORTED-WARNING', E_USER_WARNING);
 			break;
 		case 'boom':
-			// an uncaught throw reaches php_error_cb as E_ERROR without bailing out;
-			// trigger_error(E_USER_ERROR) would emit its own deprecation on 8.4+
+			// an uncaught throw reaches php_error_cb as E_ERROR without bailing out, and trigger_error(E_USER_ERROR) would emit its own deprecation on 8.4+
 			throw new \RuntimeException('REPORTED-FATAL');
 		case 'silent-fatal':
 			error_reporting(0);

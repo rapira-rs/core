@@ -1,5 +1,3 @@
-//! php.ini discovery: the process working directory must not be part of it.
-
 use crate::harness::{self, http_get};
 use std::time::Duration;
 
@@ -18,10 +16,9 @@ fn php_ini_in_the_working_directory_is_ignored() {
     );
 }
 
+/// Control for the test above: proves the fixture does read the ini, so a green cwd test is not vacuous.
 #[test]
 fn the_same_file_applies_through_phprc() {
-    // Control: without it a fixture that never reached the ini at all would let
-    // the test above pass vacuously.
     let srv = harness::spawn_in_cwd_with_phprc("ini/precision.php", 1, "precision = 5\n");
     let (code, body) = http_get(srv.addr, "/", REQ).expect("request");
     assert_eq!(code, 200, "{}", harness::diagnostics(&srv));

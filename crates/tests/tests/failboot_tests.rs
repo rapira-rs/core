@@ -3,8 +3,7 @@ use std::path::Path;
 use php_sys::{Mode, Rapira};
 use tests::{drain, php_lock, req, set_phprc};
 
-// A removed ini directive is a module-startup fatal, which is what makes Rapira::start fail;
-// the follow-up clean-ini start must then run a full module startup.
+/// Pins that a start after a module-startup failure still runs a full module startup, not the early-return path.
 #[test]
 fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
     let php = php_lock();
@@ -27,7 +26,7 @@ fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
             "/fixtures/ini/shared/php.ini"
         )),
     );
-    let r = Rapira::start(Mode::Classic)?; // must run a full module startup, not the early-return
+    let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
     assert_eq!(
         drain(h.handle_blocking(req("/", "shared/hello.php"))?).0,

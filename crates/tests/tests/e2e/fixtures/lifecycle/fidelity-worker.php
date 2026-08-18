@@ -18,8 +18,7 @@ try {
                 }
             }
             $lines = ['x-probe=' . implode('|', $vals)];
-            // a dispatcher pool has no $_SERVER mapping to protect: underscore
-            // names pass through as received
+            // a dispatcher pool has no $_SERVER mapping to protect: underscore names pass through as received
             $lines[] = 'x_forwarded_for=' . implode('|', $req->headers['x_forwarded_for'] ?? []);
             $ex->writeBody(implode("\n", $lines));
         } elseif ($probe === 'head') {

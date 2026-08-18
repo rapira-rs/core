@@ -1,15 +1,10 @@
-//! Streaming over the wire: the frame protocol as an HTTP client sees it -
-//! flush timing, chunked framing, keepalive reuse, interim heads, the CLEE
-//! prefix, client aborts, and truncated closes.
-
 use std::time::{Duration, Instant};
 
 use crate::harness::{Conn, decode_chunked, http_get_raw, spawn_with_config, wait_log_contains};
 
 const T: Duration = Duration::from_secs(10);
 
-/// `flush()` puts the head on the wire while the first body byte is still
-/// 400ms away; each later chunk arrives while the response is open.
+/// `flush()` puts the head on the wire ahead of the 400ms-late first event.
 #[test]
 fn sse_head_and_events_reach_the_wire_incrementally() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
@@ -41,8 +36,7 @@ fn sse_head_and_events_reach_the_wire_incrementally() {
     );
 }
 
-/// A chunked stream keeps the connection reusable: a second request on the
-/// same socket is served.
+/// A chunked stream keeps the connection reusable for a second request.
 #[test]
 fn chunked_stream_preserves_keepalive() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
@@ -100,8 +94,7 @@ fn http10_gets_no_interim_and_no_chunked() {
     assert_eq!(rest, b"hello");
 }
 
-/// The CLEE prefix on the wire: content-length 5, exactly the 5 fitting bytes,
-/// a clean end (keepalive-safe framing).
+/// An over-long body is cut to the declared content-length, keeping framing keepalive-safe.
 #[test]
 fn content_length_exceeded_serves_the_declared_prefix() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
@@ -111,26 +104,22 @@ fn content_length_exceeded_serves_the_declared_prefix() {
         text.to_ascii_lowercase().contains("content-length: 5"),
         "declared length must be honoured: {text}"
     );
-    // anchored to the head terminator: the body is exactly the 5 bytes
     assert!(
         text.ends_with("\r\n\r\n01234"),
         "exactly the fitting prefix: {text}"
     );
 }
 
-/// A client that walks away mid-stream surfaces as WorkDiscardedException in
-/// the worker (visible through the app log).
+/// A client that walks away mid-stream surfaces as WorkDiscardedException in the worker.
 #[test]
 fn client_abort_discards_the_unit() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=discard HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
-    // the flushed head proves the unit is out with PHP - leaving earlier can
-    // race the pre-handout probe, which fails the unit before PHP sees it
     let (status, _) = c.read_head(T).expect("flushed head");
     assert_eq!(status, 200);
-    c.abandon(); // leave while the worker sleeps 300ms
+    c.abandon();
 
     assert!(
         wait_log_contains(&srv, "WorkDiscardedException", T),
@@ -138,8 +127,7 @@ fn client_abort_discards_the_unit() {
     );
 }
 
-/// A worker dying mid-stream must not fake a clean end: the chunked terminator
-/// never arrives.
+/// A worker dying mid-stream must not fake a clean end: no chunked terminator arrives.
 #[test]
 fn worker_death_mid_stream_truncates_the_response() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
@@ -157,12 +145,10 @@ fn worker_death_mid_stream_truncates_the_response() {
     );
 }
 
-/// sendFile: the host streams the file with a real content-length; PHP never
-/// holds the bytes.
+/// sendFile streams the file from disk with a real content-length; PHP never holds the bytes.
 #[test]
 fn sendfile_streams_from_disk_with_length() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
-    // under the default root (the entrypoint's directory = the scratch dir)
     let payload = srv.dir.join("payload.bin");
     std::fs::write(&payload, vec![b'z'; 100_000]).expect("payload");
 
@@ -188,8 +174,7 @@ fn sendfile_streams_from_disk_with_length() {
     assert!(rest.iter().all(|&b| b == b'z'), "file bytes intact");
 }
 
-/// Trailers are dropped on h1 - the response still ends cleanly, with no
-/// trailer bytes in the chunked epilogue, and the connection stays reusable.
+/// Trailers are dropped on h1: no trailer bytes in the epilogue, connection stays reusable.
 #[test]
 fn trailers_are_dropped_on_h1_and_the_response_ends_cleanly() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
@@ -209,7 +194,6 @@ fn trailers_are_dropped_on_h1_and_the_response_ends_cleanly() {
     c.read_body_until(b"0\r\n\r\n", T)
         .expect("a clean terminator with no trailer section");
 
-    // the connection survives the dropped section
     c.send(b"GET /?probe=chunks HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("second request");
     let (status, _) = c.read_head(T).expect("reused connection must serve");

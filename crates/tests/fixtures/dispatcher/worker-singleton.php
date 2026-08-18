@@ -9,8 +9,7 @@ try {
     $clone = 'blocked';
 }
 
-// Worker output has nowhere to go until the Exchange verbs land, so the
-// results travel out through the app log.
+// No response to write into here, so the results travel out through the app log.
 \Rapira\log('dispatcher', context: [
     'class' => $d::class,
     'name' => $d->name(),

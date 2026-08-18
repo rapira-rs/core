@@ -49,8 +49,7 @@ fn killed_worker_respawns() {
     }
 }
 
-// After the master exits its workers reparent away, so `worker_pids` can no
-// longer see them - poll the captured pids directly until every one is gone.
+// After the master exits its workers reparent away and `worker_pids` cannot see them, so poll the captured pids directly.
 fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
     let end = Instant::now() + timeout;
     loop {
@@ -70,8 +69,7 @@ fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
     }
 }
 
-// Stop budget: past supervisor.process_control_timeout (30s) the master escalates
-// a stuck worker QUIT → TERM → KILL and still exits 0, so the wait must outlast it.
+// Must outlast supervisor.process_control_timeout (30s): after it the master escalates a stuck worker QUIT/TERM/KILL and still exits 0.
 const STOP_BUDGET: Duration = Duration::from_secs(45);
 
 #[test]
@@ -101,13 +99,6 @@ fn max_requests_recycles() {
     let srv = spawn_with_config("shared/echo-worker.php", 1, "max_requests = 5\n");
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
     let pid0 = pids0[0];
-    // The backlog covers the swap gap: the master never closes the listen fd, so
-    // every parsed request is served across recycles. The one droppable sliver
-    // is a connection accepted but not yet read when the drain starts - the
-    // front closes it before any response byte, like any graceful stop. A real
-    // client retries an idempotent request whose connection died responseless,
-    // and the retry lands in the shared backlog for the next worker: model
-    // exactly that. Partial responses, timeouts and bad statuses stay fatal.
     for _ in 0..40 {
         let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10))
             .or_else(|e| {
@@ -141,18 +132,14 @@ fn request_timeout_kills_and_replaces_worker() {
         "request_terminate_timeout_secs = 2\n",
     );
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    // Sanity: the worker serves before it is asked to hang.
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    // The hanging request pins the worker ACTIVE past the 2s limit; the
-    // watchdog TERMs it, so the client sees a reset/EOF, never a response.
     let hung = http_get(srv.addr, "/?hang=1", Duration::from_secs(15));
     assert!(
         hung.is_err(),
         "hung request must die with the worker, got {hung:?}\n{}",
         diagnostics(&srv)
     );
-    // The kill is a TimeoutKill: replaced immediately, no backoff.
     wait_workers(
         &srv,
         Duration::from_secs(20),
@@ -175,18 +162,13 @@ fn master_failboot_exits_70() {
         if Instant::now() >= end {
             panic!("master never exited\n{}", diagnostics(&srv));
         }
-        // Load-bearing: each request pumps one boot retry (strikes are demand-driven).
-        // 503s / connection errors are expected until the worker strikes out and the
-        // master exits.
         let _ = http_get(addr, "/", Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(100));
     };
     assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
 }
 
-/// A worker-mode bootstrap that never calls handle_request() is a gen-0 boot
-/// failure: strikes accumulate and the master failboots - never a hang, never
-/// a healthy-looking pool shedding 503s forever.
+/// A worker-mode bootstrap that never calls handle_request() must failboot the master, not hang or shed 503s forever.
 #[test]
 fn worker_bootstrap_that_never_serves_failboots() {
     let mut srv = spawn_with_config("lifecycle/never-loop-worker.php", 1, "mode = \"worker\"\n");
@@ -199,22 +181,19 @@ fn worker_bootstrap_that_never_serves_failboots() {
         if Instant::now() >= end {
             panic!("master never exited\n{}", diagnostics(&srv));
         }
-        // each request pumps one boot retry (strikes are demand-driven)
         let _ = http_get(addr, "/", Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(100));
     };
     assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
 }
 
-/// A client that walks away mid-handler must not take the worker down with it:
-/// the abort recycles the cycle and the next request is served.
+/// A client that walks away mid-handler must not take the worker down: the abort recycles the cycle and the next request is served.
 #[test]
 fn worker_survives_client_abandon() {
     let srv = spawn_with_config("lifecycle/hold-worker.php", 1, "mode = \"worker\"\n");
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
     c.send(b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
-    // the handler is provably executing before the client leaves
     assert!(
         wait_log_contains(&srv, "held", Duration::from_secs(10)),
         "\n{}",
@@ -222,16 +201,12 @@ fn worker_survives_client_abandon() {
     );
     c.abandon();
 
-    // the abort recycle is an in-process re-bootstrap: pingora keeps serving,
-    // the probe just waits in the intake for the fresh cycle
     let (code, body) = http_get(srv.addr, "/?probe=1", Duration::from_secs(10)).expect("GET");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert_eq!(body, b"ok", "\n{}", diagnostics(&srv));
 }
 
-/// A field php-src let through but no front can represent must cost only that field.
-/// Reachable only over a real socket: the 500 is synthesized inside pingora, below the
-/// in-process harness.
+/// A field php-src lets through but no front can represent must cost only that field, not the response.
 #[test]
 fn unrepresentable_header_still_serves_the_response() {
     let srv = spawn_with_config("lifecycle/bad-header-worker.php", 1, "mode = \"worker\"\n");
@@ -241,9 +216,7 @@ fn unrepresentable_header_still_serves_the_response() {
     assert_eq!(body, b"body", "\n{}", diagnostics(&srv));
 }
 
-/// The multipart boundary is opaque octets and must reach php-src byte for byte: decode
-/// it lossily and rfc1867 searches for a boundary the body never contains, so the upload
-/// silently vanishes. This is the only level that covers the rapira_runtime mapping.
+/// The multipart boundary must reach php-src byte for byte: decoded lossily, rfc1867 searches for a boundary the body never contains and the upload silently vanishes.
 #[test]
 fn non_utf8_multipart_boundary_uploads() {
     let srv = spawn_with_config("lifecycle/upload-worker.php", 1, "mode = \"worker\"\n");
@@ -265,8 +238,6 @@ fn non_utf8_multipart_boundary_uploads() {
     let tmp = out.strip_prefix("foo.txt|0|bar|").unwrap_or_else(|| {
         panic!("upload must parse (got {out:?})\n{}", diagnostics(&srv));
     });
-    // Only level running a resident worker, so the only one where a temp file rfc1867 never
-    // unlinks would pile up across requests until upload_tmp_dir runs out of inodes.
     assert!(
         !std::path::Path::new(tmp).exists(),
         "upload temp file {tmp} must be cleaned up\n{}",
@@ -274,9 +245,7 @@ fn non_utf8_multipart_boundary_uploads() {
     );
 }
 
-/// A field sent more than once reaches PHP as one value: a comma list, and `"; "` for
-/// Cookie. Only observable over a real socket - the in-process harness builds a request
-/// whose fields are already combined.
+/// A field sent more than once reaches PHP as one value: a comma list, and `"; "` for Cookie.
 #[test]
 fn repeated_request_fields_reach_php_combined() {
     let srv = spawn_with_config(
@@ -306,9 +275,7 @@ fn repeated_request_fields_reach_php_combined() {
     );
 }
 
-/// A wire name carrying `_` or `.` maps onto the CGI variable a `-` name owns. The `.`
-/// half of that only closes end to end, because PHP is what rewrites `.` to `_` when it
-/// registers the variable - the front never produces the colliding name itself.
+/// A wire name carrying `_` or `.` must never reach the CGI variable a `-` name owns; PHP itself rewrites `.` to `_` when registering it.
 #[test]
 fn alias_names_never_reach_a_cgi_variable() {
     let srv = spawn_with_config(
@@ -336,8 +303,7 @@ fn alias_names_never_reach_a_cgi_variable() {
     );
 }
 
-/// `reject` turns the module's HTTPStatus(400) into a real 400 on the wire - that
-/// translation happens in pingora's fail_to_proxy, so only an e2e run proves it.
+/// `reject` turns the module's HTTPStatus(400) into a real 400 on the wire, translated in pingora's fail_to_proxy.
 #[test]
 fn reject_policy_answers_400_for_an_alias_name() {
     let srv = spawn_with_http_extra(
@@ -356,7 +322,6 @@ fn reject_policy_answers_400_for_an_alias_name() {
     .expect("GET / with an alias name");
     assert_eq!(code, 400, "\n{}", diagnostics(&srv));
 
-    // A request with no unsafe name is untouched by the policy.
     let (code, _) = http_get_with_headers(
         srv.addr,
         "/",
@@ -367,18 +332,13 @@ fn reject_policy_answers_400_for_an_alias_name() {
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 }
 
-/// More than one `Host` line is a 400 (RFC 9112 §3.2,
-/// https://www.rfc-editor.org/rfc/rfc9112#section-3.2). Only a real socket shows that the
-/// pair survives the h1 parser to be caught here: pingora appends every parsed line to the
-/// map and its `validate_request` screens duplicate `Content-Length` only, so nothing
-/// upstream collapses or rejects the second one.
+/// More than one `Host` line is a 400; pingora's `validate_request` screens duplicate `Content-Length` only, so the pair survives the h1 parser to be caught here.
+/// RFC 9112 §3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 #[test]
 fn a_second_host_field_line_answers_400() {
-    // The 400 is pre-dispatch; the fixture only has to boot.
     let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
-    // The harness writes `Host: e2e` itself, so one extra makes two lines on the wire.
     let (code, _) = http_get_with_headers(
         srv.addr,
         "/",
@@ -389,9 +349,7 @@ fn a_second_host_field_line_answers_400() {
     assert_eq!(code, 400, "\n{}", diagnostics(&srv));
 }
 
-/// `header("Status: 404")` must become the response code, not a literal field on a 200.
-/// php-src's sapi_header_op does not special-case it, so the field arrives verbatim and the
-/// origin server is what has to convert it (RFC 3875 §6.2.1).
+/// `header("Status: 404")` must become the response code, not a literal field on a 200: php-src's sapi_header_op passes it through verbatim and the origin server converts it (RFC 3875 §6.2.1).
 #[test]
 fn status_field_sets_the_code_and_never_reaches_the_client() {
     let srv = spawn_with_config(
@@ -421,10 +379,8 @@ fn status_field_sets_the_code_and_never_reaches_the_client() {
     );
 }
 
-/// Request fidelity over a real socket: repeated field lines reach PHP as a
-/// list, receivedAt is a plausible ingress stamp, and a Host-less HTTP/1.1
-/// request is answered 400 before dispatch (RFC 9112 §3.2,
-/// https://www.rfc-editor.org/rfc/rfc9112#section-3.2).
+/// Request fidelity over a real socket: repeated field lines reach PHP as a list, receivedAt is a plausible ingress stamp, and a Host-less HTTP/1.1 request is answered 400 before dispatch.
+/// RFC 9112 §3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 #[test]
 fn dispatcher_request_fidelity_over_the_wire() {
     let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
@@ -436,8 +392,6 @@ fn dispatcher_request_fidelity_over_the_wire() {
         &[
             ("X-Probe", "one"),
             ("X-Probe", "two"),
-            // dispatcher pools have no $_SERVER mapping, so the underscore
-            // screen must be inert and the name arrives as received
             ("x_forwarded_for", "1.2.3.4"),
         ],
         Duration::from_secs(10),
@@ -471,11 +425,8 @@ fn dispatcher_request_fidelity_over_the_wire() {
     assert_eq!(code, 400, "missing Host on HTTP/1.1 must answer 400");
 }
 
-/// A PHP-written head crosses the wire: the status line, one field line per
-/// list value, and the front's own framing (PHP's content-length dropped, the
-/// real one sent). HEAD on the same probe carries neither body nor a
-/// content-length - the buffered length is not what a GET would send
-/// (RFC 9110 §8.6, https://www.rfc-editor.org/rfc/rfc9110#section-8.6).
+/// A PHP-written head crosses the wire: the status line, one field line per list value, the front's own framing, and a HEAD carrying neither body nor content-length.
+/// RFC 9110 §8.6: https://www.rfc-editor.org/rfc/rfc9110#section-8.6
 #[test]
 fn dispatcher_write_head_reaches_the_wire() {
     let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
@@ -496,8 +447,6 @@ fn dispatcher_write_head_reaches_the_wire() {
         "one field line per list value\n{}",
         diagnostics(&srv)
     );
-    // honour-then-enforce: the declared 999 is the framing; the 4-byte body
-    // under-runs it, so the front closes the connection instead of reusing it
     assert!(
         text.contains("\r\ncontent-length: 999\r\n"),
         "the declared content-length must be honoured\n{}",
@@ -530,9 +479,7 @@ fn dispatcher_write_head_reaches_the_wire() {
     );
 }
 
-/// Host-side multipart over the wire: a non-UTF-8 boundary round-trips, the
-/// spool file dies with finalization, malformed framing answers 400 and an
-/// over-limit file part 413 - before any of it reaches PHP.
+/// Host-side multipart over the wire: a non-UTF-8 boundary round-trips, the spool file dies with finalization, malformed framing answers 400 and an over-limit file part 413.
 #[test]
 fn dispatcher_multipart_over_the_wire() {
     let srv = spawn_with_http_extra(

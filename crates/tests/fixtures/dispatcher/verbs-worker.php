@@ -178,8 +178,7 @@ try {
             exit(0); // served > 0: the host must recycle and keep serving
         }
         if ($probe === 'spin') {
-            // Never finalizes: the re-armed per-unit budget must kill this
-            // (timeout_tests.rs); the unit fails upstream and the cycle recycles.
+            // never finalizes: the re-armed per-unit budget must kill this (timeout_tests.rs)
             while (true) {
             }
         }

@@ -1,10 +1,9 @@
 use crate::harness::*;
 use std::time::{Duration, Instant};
 
+/// pool.processes is the ceiling; dynamic must keep only min_spare..max_spare idle once the storm stops.
 #[test]
 fn dynamic_scales_up_down() {
-    // `pool.processes` is the ceiling (max children); dynamic keeps
-    // min_spare..max_spare idle.
     let srv = spawn_with_config(
         "scaling/sleep-worker.php",
         4,
@@ -26,6 +25,7 @@ fn dynamic_scales_up_down() {
     );
 }
 
+/// The listener is bound pre-fork, so the readiness probe itself is a demand event: ondemand must retire that worker and stay at zero until real traffic arrives.
 #[test]
 fn ondemand_spawns_on_connect() {
     let srv = spawn_with_config(
@@ -33,10 +33,6 @@ fn ondemand_spawns_on_connect() {
         2,
         "scaling = \"ondemand\"\nprocess_idle_timeout_secs = 2\n",
     );
-    // The master binds the listener pre-fork, so the harness readiness probe
-    // connects - which is itself a demand event that forks one worker. Wait for
-    // it to appear (the fork may lag the probe), let it idle-retire, then
-    // assert the pool sits at zero with no traffic.
     wait_workers(
         &srv,
         Duration::from_secs(20),

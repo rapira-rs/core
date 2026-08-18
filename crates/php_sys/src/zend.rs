@@ -1,16 +1,3 @@
-//! Thin wrappers over exported Zend API calls, plus a handful of one-line
-//! macro replications (type-tag reads, ZVAL_NULL, ZVAL_DEREF, instanceof's
-//! fast half). Everything allocating or semantic - symtable key normalization,
-//! refcounting, array construction - stays php-src's own compiled code.
-//!
-//! Frame rule: every allocating Zend call can zend_bailout (OOM) and longjmp
-//! through the calling frame, so builder frames hold only zvals and raw
-//! pointers - no Drop glue - and borrow their bytes from owned state; leaked
-//! refcounts are reclaimed by the request-shutdown arena.
-//!
-//! Empty-slice rule: `Vec::as_ptr()` on an empty vec dangles; every call that
-//! hands Zend a (ptr,len) pair substitutes `c""` when the slice is empty.
-
 use std::ffi::{CStr, c_char};
 
 use crate::{
@@ -175,7 +162,6 @@ pub(crate) unsafe fn zval_type(zv: *const zval) -> u32 {
     unsafe { u32::from((*zv).u1.v.type_) }
 }
 
-/// ZVAL_NULL: a bare type-tag store - no payload, no refcount.
 /// # Safety
 /// `zv` writable.
 pub(crate) unsafe fn zval_null(zv: *mut zval) {
@@ -184,7 +170,6 @@ pub(crate) unsafe fn zval_null(zv: *mut zval) {
     }
 }
 
-/// ZVAL_DEREF: follow an IS_REFERENCE to its payload zval.
 /// # Safety
 /// `zv` a live zval; a reference's payload stays owned by the reference.
 pub(crate) unsafe fn deref(zv: *mut zval) -> *mut zval {

@@ -1,7 +1,3 @@
-//! `\Rapira\get_version()` and `\Rapira\log()`: the version string, the
-//! LogLevel mapping, and the context serialization (throwables flattened, then
-//! `php_json_encode`). The C shells own only the ZPP layer.
-
 use std::{
     ffi::{CStr, c_char, c_int},
     ptr::null_mut,
@@ -19,7 +15,7 @@ use crate::{
 };
 
 /// # Safety
-/// `len` must be a writable `usize`. The returned pointer is `'static`.
+/// `len` must be a writable `usize`; the returned pointer is `'static`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_version(len: *mut usize) -> *const c_char {
     const VERSION: &CStr =
@@ -58,10 +54,7 @@ fn emit(level: c_int, message: &[u8], context: &[u8]) {
     }
 }
 
-/// An enum case's name is its first property slot (php-src reads
-/// `OBJ_PROP_NUM(zobj, 0)` in `zend_enum_fetch_case_name`, Zend/zend_enum.h).
-/// # Safety
-/// `level` a live `Rapira\LogLevel` case (ZPP-checked).
+/// An enum case's name is its first property slot (`zend_enum_fetch_case_name`, Zend/zend_enum.h).
 unsafe fn level_from_case(level: *mut zend_object) -> c_int {
     unsafe {
         let name_zv = (*level).properties_table.as_ptr();
@@ -71,16 +64,11 @@ unsafe fn level_from_case(level: *mut zend_object) -> c_int {
             b"Info" => 2,
             b"Debug" => 3,
             b"Trace" => 4,
-            // a case added to the stub but not here must not vanish below the
-            // configured log level: fail loud
             _ => 0,
         }
     }
 }
 
-/// Read a property and append a counted copy to `dst`.
-/// # Safety
-/// Frame rules (zend.rs): zvals and raw pointers only.
 unsafe fn add_prop(
     dst: *mut zval,
     scope: *mut zend_class_entry,
@@ -96,11 +84,7 @@ unsafe fn add_prop(
     }
 }
 
-/// Throwable state lives in private props, invisible to json_encode: flatten
-/// class/message/code/file/line explicitly, walking the previous-exception
-/// chain down to `depth`.
-/// # Safety
-/// `ex` a live Throwable; frame rules (zend.rs).
+/// Throwable state lives in private props, invisible to json_encode: flatten it explicitly.
 unsafe fn flatten_throwable(dst: *mut zval, ex: *mut zend_object, depth: i32) {
     unsafe {
         rapira_array_init(dst, 6);
@@ -141,11 +125,7 @@ unsafe fn flatten_throwable(dst: *mut zval, ex: *mut zend_object, depth: i32) {
     }
 }
 
-/// Rebuild `context` with every Throwable value flattened (any key), leaving
-/// the original untouched, and JSON-encode the result.
-/// # Safety
-/// `context` a live, non-empty array; frame rules (zend.rs) until the encode
-/// completes - the returned Vec is created after the last bailing call.
+/// Frame rules (zend.rs) hold until the encode completes: the returned Vec is created after the last bailing call.
 unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
     unsafe {
         let mut rebuilt: zval = std::mem::zeroed();
@@ -153,13 +133,10 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
         let mut pos: HashPosition = 0;
         zend_hash_internal_pointer_reset_ex(context, &mut pos);
         loop {
-            // raw pointer: the pos parameter is *mut on 8.4 and *const on 8.5
             let entry = zend_hash_get_current_data_ex(context, &raw mut pos);
             if entry.is_null() {
                 break;
             }
-            // see through a by-reference slot, or a referenced Throwable
-            // would skip the flattener and encode as {}
             let entry = zend::deref(entry);
             let mut skey: *mut zend_string = null_mut();
             let mut nkey = 0;
@@ -175,8 +152,6 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
             }
             if i64::from(kt) == crate::HASH_KEY_IS_STRING && !skey.is_null() {
                 let kb = zend::zstr_bytes(skey);
-                // zend_strings are NUL-terminated, covering the symtable
-                // prefilter's one-byte overread
                 add_assoc_zval_ex(&mut rebuilt, (*skey).val.as_ptr(), kb.len(), &mut out);
             } else {
                 zend_hash_index_update(rebuilt.value.arr, nkey, &mut out);
@@ -190,7 +165,6 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
             &mut rebuilt,
             PHP_JSON_PARTIAL_OUTPUT_ON_ERROR as c_int,
         );
-        // no bailing call below this line: owning Rust values are safe now
         let json = if buf.s.is_null() {
             Vec::new()
         } else {
@@ -203,16 +177,13 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
 }
 
 /// # Safety
-/// `message` a live zend_string; `level` NULL or a LogLevel case; `context`
-/// NULL or a live array - all ZPP-owned for the call. Engine active.
+/// `message` a live zend_string; `level` NULL or a LogLevel case; `context` NULL or a live array, all ZPP-owned for the call with the engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_log_call(
     message: *mut zend_string,
     level: *mut zend_object,
     context: *mut HashTable,
 ) {
-    // event! dispatches into the installed subscriber, which is arbitrary
-    // code; an unwind out of an extern "C" frame aborts the process.
     guard((), || unsafe {
         let lvl = if level.is_null() {
             2

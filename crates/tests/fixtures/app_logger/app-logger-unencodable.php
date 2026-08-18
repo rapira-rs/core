@@ -1,7 +1,6 @@
 <?php
 
-// Values json_encode cannot represent. A logger is called from catch blocks, so
-// none of these may throw or lose the record: PHP must keep running to the echo.
+// Values json_encode cannot represent: none may throw or lose the record, so PHP keeps running to the echo.
 $fh = fopen('php://memory', 'rb');
 
 \Rapira\log('hostile', \Rapira\LogLevel::Error, [

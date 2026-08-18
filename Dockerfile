@@ -38,11 +38,9 @@ FROM ${PHP_BASE} AS payload
 COPY --from=builder /usr/local/bin/rapira /out/usr/local/bin/rapira
 COPY --from=builder /usr/local/lib/libphp.so /out/usr/local/lib/libphp.so
 
-# PHP 8.4 builds opcache as a shared module and 8.5 links it into libphp.
-# stage opcache
+# PHP 8.4 builds opcache as a shared module and 8.5 links it into libphp, so the copy is conditional.
 RUN set -eux; \
     ext_dir="$(php-config --extension-dir)"; \
-    # will be skipped on php 8.5 (and probably future versions)
     if [ -f "$ext_dir/opcache.so" ]; then \
         install -D "$ext_dir/opcache.so" "/out$ext_dir/opcache.so"; \
         install -D -m 0644 "$PHP_INI_DIR/conf.d/docker-php-ext-opcache.ini" \
@@ -52,9 +50,7 @@ RUN set -eux; \
 
 WORKDIR /out/usr/local/share/rapira
 
-# https://manpages.debian.org/trixie/dpkg/dpkg-query.1.en.html#S
-# list debian packages owning the shared objects the payload needs from outside /usr/local
-# because the purpose of this image is to provide a standalone PHP runtime
+# Records the Debian packages owning shared objects the payload needs from outside /usr/local: https://manpages.debian.org/trixie/dpkg/dpkg-query.1.en.html#S
 RUN find /out/usr/local -type f \( -executable -o -name '*.so' \) -exec ldd '{}' ';' 2>/dev/null \
         | awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); printf "*%s\n", so }' \
         | sort -u \

@@ -1,5 +1,3 @@
-//! End-to-end: a native extension drives requests through PHP via `Php`.
-
 use extension_api::{Extension, Php, Request, Response, Result};
 use php_sys::{Mode, Rapira};
 use rapira_runtime::ExtensionRuntime;
@@ -10,12 +8,10 @@ use tests::{fixture, php_lock};
 /// Distinct ids so the same type can be registered many times (dup-name check).
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
-/// Buffered exec: dispatch, then collect the whole response stream.
 async fn exec_full(php: &Php, req: Request) -> Result<Response> {
     php.exec(req).await?.collect().await
 }
 
-/// A bodyless `GET` for `uri` with the defaults every driver here needs.
 fn get_request(uri: &str) -> Request {
     Request {
         method: "GET".into(),
@@ -54,8 +50,6 @@ impl Extension for Driver {
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
-        // `join!` starts both exec subtasks before awaiting either, so both are in flight
-        // through the PHP pool concurrently (both must complete; not a strict parallelism proof).
         let (a, b) = tokio::join!(
             exec_full(&php, get_request("/?from=a")),
             exec_full(&php, get_request("/?from=b")),
@@ -79,9 +73,6 @@ fn check(res: &Response, want: &str) -> Result<()> {
 #[test]
 fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     let _guard = php_lock();
-    // Worker mode: the resident script answers each exec with "ok:<from>". The two
-    // join!ed execs serialize onto the single interpreter; this proves completion,
-    // not parallelism.
     let rapira = Rapira::start(Mode::Worker(fixture(
         "extension_tests/ext-driver-worker.php",
     )))?;
@@ -99,8 +90,7 @@ fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A rejected body surfaces as a downcastable `Rejected` at exec() and never
-/// reaches the pool; the pool keeps serving afterwards.
+/// A rejected body surfaces as a downcastable `Rejected` at exec() and never reaches the pool.
 struct RejectDriver {
     id: String,
 }
@@ -162,8 +152,6 @@ impl Extension for RejectDriver {
             rejected.status
         );
 
-        // repeated content-type lines with a multipart body reject in either
-        // line order: the boundary-disagreement guard must not be positional
         let plain_line = || ("content-type".to_string(), b"text/plain".to_vec());
         let multipart_line = || {
             (
@@ -193,9 +181,6 @@ impl Extension for RejectDriver {
             );
         }
 
-        // gating negatives: an empty body with a multipart content-type stays a
-        // raw (empty) body, and a multipart-shaped body under a non-multipart
-        // content-type is delivered raw
         check(
             &exec_full(&php, multipart_post(Vec::new())).await?,
             "method=POST body=",
@@ -217,7 +202,6 @@ impl Extension for RejectDriver {
 #[test]
 fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
     let _guard = php_lock();
-    // host-side multipart parsing is a dispatcher-handle behavior
     let rapira = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
     let mut host = ExtensionRuntime::new();
     host.register::<RejectDriver>(())?;
@@ -244,8 +228,6 @@ fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
 #[test]
 fn classic_mode_serves_exec() -> anyhow::Result<()> {
     let _guard = php_lock();
-    // Classic mode runs the front controller per exec, with the URI in $_GET, so it
-    // echoes "ok:<from>" - exec works with a real front controller (why serve takes a SCRIPT).
     let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionRuntime::new();
     host.register::<Driver>(())?;
@@ -265,11 +247,7 @@ fn classic_mode_serves_exec() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drives one request whose PHP handler sets a status + session cookie and then throws
-/// with output buffered - a COMPLETE, head-only error response. Regression guard for the
-/// truncation rule (`Context::is_truncated`): `exec` maps a truncated terminal frame to
-/// an error, so a buffered/head-only error response must NOT be flagged truncated, or the
-/// extension would serve a generic 502 instead of the real 404.
+/// A buffered head-only error response must not be flagged truncated, or exec serves a generic 502 instead of the real 404.
 struct ErrorPathDriver;
 
 impl Extension for ErrorPathDriver {
@@ -320,9 +298,7 @@ fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drives one request whose handler echoes and THEN throws - body output began
-/// during the handler, so the sealed frame is truncated and `exec` must surface
-/// it as an error rather than deliver a possibly-incomplete body.
+/// Output before the throw seals a truncated frame: `exec` must error instead of delivering a possibly-incomplete body.
 struct TruncatedDriver;
 
 impl Extension for TruncatedDriver {
@@ -394,8 +370,7 @@ fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A long-lived server extension whose `run` never returns on its own - it runs until the
-/// host signals shutdown.
+/// A long-lived extension whose `run` never returns on its own: it runs until the host signals shutdown.
 struct Resident;
 
 static RESIDENT_SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -433,8 +408,6 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
         fixture("extension_tests/ext-driver-classic.php"),
     );
 
-    // Dropping the guard fires the internal stop: `run` (which never returns) is
-    // cancelled, `shutdown` is driven, and the tasks drain - promptly, not hanging.
     let start = Instant::now();
     drop(running);
     drop(rapira);
@@ -453,8 +426,6 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
 fn many_extensions_run() -> anyhow::Result<()> {
     let _guard = php_lock();
     const N: usize = 12;
-    // The fan-out (12 drivers × 2 execs) serializes onto the single PHP interpreter.
-    // This proves all N extensions complete, not a strict parallelism bound.
     let rapira = Rapira::start(Mode::Worker(fixture(
         "extension_tests/ext-driver-worker.php",
     )))?;
@@ -477,7 +448,7 @@ fn many_extensions_run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A fixed name (unlike `Driver`, whose id is unique per instance) so two registrations collide.
+/// A fixed name so two registrations collide.
 struct Fixed;
 
 impl Extension for Fixed {
@@ -506,7 +477,6 @@ fn duplicate_extension_name_is_rejected() {
     );
 }
 
-/// Register one `E`, drive it to completion in classic mode, and return its outcomes.
 fn run_one<E: Extension<Config = ()>>() -> anyhow::Result<Vec<Result<(), String>>> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
@@ -599,7 +569,6 @@ impl Extension for SlowShutdown {
         std::future::pending().await
     }
     async fn shutdown(&mut self) -> Result<()> {
-        // Overruns any sane grace; the host's timeout must fire first.
         tokio::time::sleep(Duration::from_secs(3600)).await;
         Ok(())
     }
@@ -611,7 +580,6 @@ fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionRuntime::new();
     host.register::<SlowShutdown>(())?;
-    // A tiny grace so the timeout branch fires fast instead of after the 30s default.
     let running = host.run_with_options(
         rapira.handle(),
         fixture("extension_tests/ext-driver-classic.php"),
@@ -620,7 +588,6 @@ fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
             ..rapira_runtime::RuntimeOptions::default()
         },
     );
-    // `stop` cancels the pending `run`, then drives `shutdown` - which overruns the grace.
     let start = Instant::now();
     let outcomes = running.stop();
     drop(rapira);

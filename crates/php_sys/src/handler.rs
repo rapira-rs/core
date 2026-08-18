@@ -10,21 +10,14 @@ use crate::{
     types::{Context, Frame, Job, Request},
 };
 
-// A buffered response is a Head+Chunk+End trio emitted back-to-back; cap 4
-// lets it (plus a stray interim head) queue without parking the PHP thread.
-// Longer streams ride the channel's backpressure.
+// cap 4 lets a buffered Head+Chunk+End trio, plus a stray interim head, queue without parking the PHP thread
 const FRAME_CAP: usize = 4;
 
-/// How long a request may wait for an intake slot before it is shed.
 const INTAKE_WAIT: Duration = Duration::from_secs(30);
 
-/// Why a job could not be handed to the pool. Typed so the front can answer
-/// 503 for shedding instead of blaming a gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleError {
-    /// The intake stayed full for the whole wait budget.
     Saturated,
-    /// The pool is gone: draining or stopped.
     Stopped,
 }
 
@@ -43,15 +36,12 @@ impl std::error::Error for HandleError {}
 pub struct RapiraHandle {
     intake: SyncSender<Job>,
     pending: Arc<AtomicUsize>,
-    /// The pool serves superglobals ($_SERVER): Context materializes ReqC.
     superglobals: bool,
-    /// Exchange-style delivery (`Mode::Dispatcher`).
     dispatcher: bool,
 }
 
 impl Rapira {
     pub fn handle(&self) -> RapiraHandle {
-        // Some from the sole constructor until Drop; &self excludes Drop
         let intake = self.intake.as_ref().expect("intake lives until Drop");
         RapiraHandle {
             intake: intake.tx.clone(),
@@ -69,9 +59,6 @@ fn now_unix_f64() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Holds the `pending` increment until the job is accepted: Drop decrements, a
-/// successful hand-off disarms. Give-up, disconnect and a panicking blocking
-/// task all share the one decrement path.
 struct PendingGuard(Option<Arc<AtomicUsize>>);
 
 impl PendingGuard {
@@ -93,26 +80,18 @@ impl Drop for PendingGuard {
 }
 
 impl RapiraHandle {
-    /// Exchange-style delivery: the host parses multipart before enqueue.
     pub fn dispatcher(&self) -> bool {
         self.dispatcher
     }
 
-    // pending is a diagnostic gauge (Dispatcher::getInfo) - Relaxed. Incremented
-    // before the send, decremented on give-up: the consumer decrements as soon
-    // as it wakes, so the reverse order could wrap the counter below zero.
+    // pending must be incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero
     pub async fn handle(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
-        // a plugin-stamped ingress time wins; this is the fallback for producers
-        // that have none (tests preset it to pin the value)
         req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
         let mut job = Job {
             ctx: Context::new(req, tx, self.superglobals),
         };
         let pending = PendingGuard::arm(&self.pending);
-        // Async try_send/sleep instead of a blocking send: the wait cancels with
-        // the client (the job then drops undelivered and its Frame sender with
-        // it) and parks no blocking-pool thread.
         let deadline = Instant::now() + INTAKE_WAIT;
         loop {
             match self.intake.try_send(job) {

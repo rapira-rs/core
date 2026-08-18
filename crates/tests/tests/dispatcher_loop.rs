@@ -1,18 +1,7 @@
-//! The dispatcher receive loop and the buffered Exchange verbs in
-//! dispatcher mode: `receive()`/`tryReceive()` semantics, head/body
-//! finalization discipline, and the `Rapira\Http\Request` field mapping.
-//!
-//! Locals are declared `r` before `h` on purpose: locals drop in reverse
-//! order, so `h`'s Sender dies first and a failing assertion cannot hang the
-//! suite; dropping both is also what delivers `ClosedException` to a parked
-//! `receive()`.
-
 use php_sys::{Frame, Mode, Rapira};
 use std::io::Cursor;
 use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
-/// Boot `verbs-worker.php`, serve one probe request, tear down - the shared
-/// shape of every single-probe test.
 fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
@@ -23,10 +12,7 @@ fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
     Ok(out)
 }
 
-/// Two sequential units through the echo loop: explicit heads, per-request
-/// bodies, and the worker surviving between them. Dropping the handle and the
-/// pool afterwards must land as `ClosedException` in the parked `receive()`,
-/// which the fixture reports as a `drained` app record.
+/// Two sequential units through the echo loop, then handle and pool drop must land as `ClosedException` in the parked `receive()`.
 #[test]
 fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -53,7 +39,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     assert_eq!(resp.body_string(), "method=GET body=two");
 
     drop(h);
-    r.shutdown(); // joins the worker: receive() saw closure, the script wound down
+    r.shutdown();
 
     let drained = captured()
         .iter()
@@ -66,10 +52,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `tryReceive()`/`receive(0)`/`receive(50ms)` against an empty-but-open
-/// channel: no handle is ever created, so no job can precede the probes. The
-/// pool must stay alive until the fixture has logged - dropping it early would
-/// turn Empty into Closed and fail the probes.
+/// `tryReceive()`/`receive(0)`/`receive(50ms)` on an empty-but-open channel must report null/timeout, never Closed.
 #[test]
 fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -124,8 +107,7 @@ fn implicit_200_on_first_write_body() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A second finalizing verb after the unit sealed throws
-/// `AlreadyFinalizedError`; the already-sealed response is untouched.
+/// A second finalizing verb after the unit sealed throws `AlreadyFinalizedError`; the sealed response is untouched.
 #[test]
 fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -158,8 +140,7 @@ fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A second `writeHead()` after the final head throws
-/// `HeadAlreadyWrittenError`; the first head stands.
+/// A second `writeHead()` after the final head throws `HeadAlreadyWrittenError`; the first head stands.
 #[test]
 fn double_head_throws_head_already_written() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=double-head")?;
@@ -171,9 +152,7 @@ fn double_head_throws_head_already_written() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Out-of-range status codes, non-token header names, CR/LF in values, a
-/// non-list entry, an integer array key, and a non-string list item all raise
-/// `\ValueError` before anything reaches the host.
+/// Out-of-range statuses and malformed header names, values, and shapes raise `\ValueError` before anything reaches the host.
 #[test]
 fn status_range_and_header_shape_value_errors() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=value-errors")?;
@@ -184,8 +163,7 @@ fn status_range_and_header_shape_value_errors() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Contract: an empty chunk without eos does nothing - in particular it must
-/// not commit the implicit 200 and lock out a later `writeHead()`.
+/// An empty chunk without eos must not commit the implicit 200 and lock out a later `writeHead()`.
 #[test]
 fn empty_non_eos_chunk_does_nothing() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=empty-chunk")?;
@@ -193,10 +171,7 @@ fn empty_non_eos_chunk_does_nothing() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The verb edges: `tryReceive()` while a unit is out is the single-flight
-/// `\Error`, a timeout below -1 is a `\ValueError`, and `writeHead()` after
-/// `eos: true` is `HeadAlreadyWrittenError` (writeHead's @throws set has no
-/// AlreadyFinalizedError).
+/// Verb edges: `tryReceive()` with a unit out is the single-flight `\Error`, a timeout below -1 is `\ValueError`, and `writeHead()` after eos is `HeadAlreadyWrittenError`.
 #[test]
 fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -225,8 +200,7 @@ fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The polling verbs' success paths: a unit comes out of `tryReceive()`, and
-/// out of `receive(1s)` after the fixture flips modes.
+/// The polling verbs' success paths: a unit comes out of `tryReceive()`, and out of `receive(1s)` after the fixture flips modes.
 #[test]
 fn try_and_timed_receive_serve_units() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -254,8 +228,7 @@ fn try_and_timed_receive_serve_units() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A 1xx head (other than 101) is advisory and goes out at once, ahead of the
-/// final head; the unit stays open for the real head.
+/// A 1xx head other than 101 goes out at once ahead of the final head; the unit stays open for the real head.
 #[test]
 fn interim_head_is_emitted_before_the_final_head() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -277,9 +250,7 @@ fn interim_head_is_emitted_before_the_final_head() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 101 is the carve-out in the 1xx interim rule: it commits as the final head,
-/// locks out any later `writeHead()`, and - being 1xx - carries no body:
-/// chunks are accepted and dropped.
+/// 101 is the carve-out in the 1xx interim rule: it commits as the final head, locks out later `writeHead()`, and carries no body.
 #[test]
 fn writehead_101_commits_as_final() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -304,9 +275,7 @@ fn writehead_101_commits_as_final() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Buffered chunks concatenate, the unit stays unfinalized between them, and
-/// the first chunk commits the implicit 200 - a later `writeHead()` must see
-/// `HeadAlreadyWrittenError` instead of restamping the status.
+/// Buffered chunks concatenate and the first commits the implicit 200: a later `writeHead()` must throw instead of restamping the status.
 #[test]
 fn chunked_body_buffers_and_locks_the_head() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=chunks")?;
@@ -317,8 +286,7 @@ fn chunked_body_buffers_and_locks_the_head() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Multi-value lists flatten to one field line per value, and PHP references
-/// at both nesting levels (entry and item) are seen through.
+/// Multi-value lists flatten to one field line per value, and PHP references at both nesting levels are seen through.
 #[test]
 fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -343,8 +311,7 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `receive()` while a unit is unfinalized throws the single-flight `\Error`
-/// instead of deadlocking the worker on itself.
+/// `receive()` while a unit is unfinalized throws the single-flight `\Error` instead of deadlocking the worker on itself.
 #[test]
 fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=busy")?;
@@ -356,9 +323,7 @@ fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An Exchange dropped without finalizing fails that unit only: the host
-/// answers 500 for it (a lost unit is a failure, never an implicit response),
-/// and the worker serves the next unit normally.
+/// An Exchange dropped without finalizing fails that unit only: the host answers 500 and the worker serves the next unit.
 #[test]
 fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -390,8 +355,7 @@ fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A unit that dies with the cycle (bailout: fatal, timeout) is a worker
-/// death, not an abandonment: the channel dies unsent, no 500 is synthesized.
+/// A unit that dies with the cycle is a worker death, not an abandonment: the channel dies unsent, no 500 is synthesized.
 #[test]
 fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -419,8 +383,7 @@ fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `Work::__destruct()` is part of the contract surface; an explicit call on
-/// a live unit does nothing.
+/// An explicit `Work::__destruct()` call on a live unit does nothing.
 #[test]
 fn explicit_destruct_call_is_a_noop() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=destruct-explicit")?;
@@ -428,8 +391,7 @@ fn explicit_destruct_call_is_a_noop() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An Exchange abandoned after the head reached the wire cannot be turned
-/// into a 500: the host ends the stream truncated so the client detects it.
+/// An Exchange abandoned after the head reached the wire cannot become a 500: the host ends the stream truncated so the client detects it.
 #[test]
 fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -450,8 +412,7 @@ fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An abandoned unit holding a host-parsed multipart body: the SpooledFile
-/// drop net must unlink the spool the moment the exchange dies.
+/// An abandoned unit holding a host-parsed multipart body must unlink its spool the moment the exchange dies.
 #[test]
 fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -490,8 +451,7 @@ fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `exit()` after serving must land as `Cycle::Recycle`: the script re-runs
-/// and the worker keeps serving instead of shedding as a boot failure.
+/// `exit()` after serving must land as `Cycle::Recycle`: the script re-runs instead of shedding as a boot failure.
 #[test]
 fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -514,8 +474,7 @@ fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// No body on a HEAD response or a 204 - chunks are accepted and dropped at
-/// seal, the head stands.
+/// No body on a HEAD response or a 204: chunks are dropped at seal, the head stands.
 /// https://www.rfc-editor.org/rfc/rfc9112#section-6.3
 #[test]
 fn head_and_204_drop_the_body() -> anyhow::Result<()> {
@@ -523,7 +482,6 @@ fn head_and_204_drop_the_body() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
 
-    // The harness builder hardcodes GET; this test is about the method.
     let mut head_rq = req("/", "dispatcher/verbs-worker.php");
     head_rq.method = "HEAD".into();
     let (status, body) = drain(h.handle_blocking(head_rq)?);
@@ -542,11 +500,7 @@ fn head_and_204_drop_the_body() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The `Rapira\Http\Request` field mapping: per-line headers (repeats stay a
-/// list, casings stay distinct keys, all-digit names land as int keys),
-/// byte-exact `$target` (non-UTF-8 byte included), plugin-supplied
-/// `$authority`, the synthesized `$uri`, socket-typed addresses, null `$tls`,
-/// and the intake fallback stamp for a stampless producer.
+/// The `Rapira\Http\Request` field mapping: per-line headers, byte-exact `$target`, `$authority`, synthesized `$uri`, socket-typed addresses, null `$tls`, and the intake fallback stamp.
 #[test]
 fn request_fields_reach_php() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -565,7 +519,6 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
         ("-1".into(), b"neg".to_vec()),
     ];
     rq.authority = Some(b"example.test".to_vec());
-    // %2F survives un-decoded and the 0xE9 byte survives un-lossied
     rq.target = Some(b"/path%2Fa?x=1\xe9".to_vec());
     rq.body = php_sys::types::Body::Raw(Box::new(Cursor::new(b"hello".to_vec())));
     rq.content_length = 5;
@@ -605,7 +558,6 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
         assert!(body.contains(line), "missing {line:?} in {body:?}");
     }
 
-    // a second unit must serve cleanly after the first is freed (memo included)
     let (status, body) = drain(h.handle_blocking(req("/again", "dispatcher/request-worker.php"))?);
     assert_eq!(status, 200, "body: {body:?}");
     assert!(
@@ -618,9 +570,7 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Producer-stamped facts pass through untouched: an exact `receivedAt`, the
-/// contract protocol spelling (HTTP/2.0 → HTTP/2), and the no-authority `$uri`
-/// fallback to the server socket.
+/// Producer-stamped facts pass through untouched: exact `receivedAt`, the contract protocol spelling, and the no-authority `$uri` fallback to the server socket.
 #[test]
 fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -663,8 +613,6 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
         "remote-detail=NULL",
         "server=Rapira\\UnixAddress",
         "server-detail='/run/rapira.sock'",
-        // a unix listener has no host:port of its own: $uri falls back to the
-        // configured name
         "uri=http://localhost:8080/",
     ] {
         assert!(body.contains(line), "missing {line:?} in {body:?}");
@@ -675,9 +623,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The remaining `$uri` synthesis arms: the https scheme, and an asterisk-form
-/// target collapsing to the authority root; HTTP/3.0 maps to the contract
-/// spelling on the way.
+/// The remaining `$uri` synthesis arms: the https scheme, and an asterisk-form target collapsing to the authority root.
 #[test]
 fn uri_synthesis_covers_https_and_asterisk_form() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -756,9 +702,7 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A host-parsed Multipart reaches PHP as the object graph, and the spool file
-/// is gone the moment the response frame arrives: seal() unlinks before the
-/// frame is sent.
+/// A host-parsed Multipart reaches PHP as the object graph, and seal() unlinks the spool before the response frame is sent.
 #[test]
 fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -814,8 +758,7 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Two fields and two files with distinct contents: the graph must pair each
-/// part with its own headers, spool path, and size by index.
+/// Two fields and two files: the graph must pair each part with its own headers, spool path, and size by index.
 #[test]
 fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -871,10 +814,7 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `getInfo()` while handling: the outstanding unit counts as active. The
-/// counts are deterministic here - the one job was decremented from `pending`
-/// at pull, and nothing else is queued - so assert them exactly (a `>= 0`
-/// assertion would pass for almost any broken counter).
+/// `getInfo()` while handling: the outstanding unit counts as active and was already decremented from `pending` at pull.
 #[test]
 fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=info")?;
@@ -882,10 +822,8 @@ fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---- streaming (stream-worker.php): the frame protocol past the buffered
-// one-shot
+// ---- streaming (stream-worker.php): the frame protocol past the buffered one-shot
 
-/// Boot stream-worker, hand it one probe request, return the receiver.
 fn stream_probe(
     query: &str,
 ) -> anyhow::Result<(
@@ -918,8 +856,7 @@ fn wait_app_record(message: &str) -> String {
     }
 }
 
-/// `flush()` puts the head on the wire while the body is still 300ms away -
-/// the bounded read is the timing proof.
+/// `flush()` puts the head on the wire while the body is still 300ms away.
 #[test]
 fn flush_puts_the_head_on_the_wire_before_eos() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -951,7 +888,6 @@ fn flush_puts_the_head_on_the_wire_before_eos() -> anyhow::Result<()> {
     };
     assert_eq!(head.status, 200);
     assert_eq!(content_length, None, "flush costs the computed length");
-    // the worker is still parked in usleep: nothing else is on the stream yet
     assert!(
         matches!(
             rx.try_recv(),
@@ -981,8 +917,7 @@ fn flush_puts_the_head_on_the_wire_before_eos() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `writeBody(eos: false)` chunks stream in order; the head carries no
-/// computed length (the front chooses the framing).
+/// `writeBody(eos: false)` chunks stream in order and the head carries no computed length.
 #[test]
 fn streamed_chunks_arrive_in_order() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -998,8 +933,7 @@ fn streamed_chunks_arrive_in_order() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The CLEE prefix rule: the bytes that fit the declared content-length are
-/// sent, the response completes per its declaration, the write throws.
+/// The prefix rule on an exceeded content-length: the fitting bytes are sent, the response completes per its declaration, the write throws.
 #[test]
 fn content_length_exceeded_sends_the_fitting_prefix() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1030,9 +964,7 @@ fn content_length_exceeded_sends_the_fitting_prefix() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Dropping the receiver mid-unit is the client-gone signal: the next write
-/// throws WorkDiscardedException, the unit reports cancelled+finalized, and
-/// the worker keeps serving.
+/// Dropping the receiver mid-unit makes the next write throw WorkDiscardedException, the unit report cancelled and finalized, and the worker keep serving.
 #[test]
 fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1042,8 +974,6 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     let h = r.handle();
 
     let rx = h.handle_blocking(req("/?probe=discard", "dispatcher/stream-worker.php"))?;
-    // wait until the unit is out with PHP, then leave - dropping earlier can
-    // race the pre-handout probe, which would fail the unit before PHP sees it
     wait_app_record("discard-held");
     drop(rx);
 
@@ -1055,7 +985,6 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     assert!(ctx.contains(r#""cancelled":true"#), "isCancelled in {ctx}");
     assert!(ctx.contains(r#""finalized":true"#), "isFinalized in {ctx}");
 
-    // the single-flight gate is free again: the worker serves the next unit
     let resp =
         drain_resp(h.handle_blocking(req("/?probe=chunks", "dispatcher/stream-worker.php"))?);
     assert_eq!(resp.body_string(), "one,two,three");
@@ -1065,8 +994,7 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A declared content-length rides the Head frame as the framing; an under-run
-/// is nothing PHP-visible (the front closes the connection).
+/// A declared content-length rides the Head frame as the framing; an under-run is nothing PHP-visible.
 #[test]
 fn declared_content_length_rides_the_head_frame() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1100,8 +1028,7 @@ fn with_path_header(query: &str, path: &std::path::Path) -> php_sys::Request {
     rq
 }
 
-/// A one-shot sendFile: the host knows the length up front, so the head
-/// carries a real content-length; the file bytes ride a File frame.
+/// A one-shot sendFile: the head carries a real content-length and the file bytes ride a File frame.
 #[test]
 fn sendfile_one_shot_carries_the_file_length() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1120,8 +1047,7 @@ fn sendfile_one_shot_carries_the_file_length() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A range response is the handler's own 206 + content-range with the slice
-/// passed as offset/length; no HTTP semantics happen in sendFile itself.
+/// A range response is the handler's own 206 plus content-range with the slice passed as offset/length; sendFile applies no HTTP semantics.
 #[test]
 fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1139,8 +1065,7 @@ fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// FileNotSendableException is raised before anything is written, so the
-/// handler can still answer 404 - the reason it is catchable.
+/// FileNotSendableException is raised before anything is written, so the handler can still answer 404.
 #[test]
 fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1180,8 +1105,7 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
 
 // ---- writeTrailers (stream-worker.php): the third ending
 
-/// Trailers ride the End frame after streamed chunks; the field is validated
-/// and delivered to the frame level (the h1 front drops it on the wire).
+/// Trailers ride the End frame after streamed chunks, validated and delivered at the frame level.
 #[test]
 fn trailers_ride_the_end_frame() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1200,8 +1124,7 @@ fn trailers_ride_the_end_frame() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A trailers-only response spells its head explicitly and keeps real length
-/// framing: content-length 0, not empty chunked.
+/// A trailers-only response keeps real length framing: content-length 0, not empty chunked.
 #[test]
 fn trailers_only_response_keeps_length_framing() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1220,8 +1143,7 @@ fn trailers_only_response_keeps_length_framing() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Nothing on the way to a trailer section commits a head; the throw is
-/// catchable and the unit still serves.
+/// Trailers before any head throw a catchable HeadNotWrittenError and the unit still serves.
 #[test]
 fn trailers_before_a_head_throw_head_not_written() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1240,8 +1162,7 @@ fn trailers_before_a_head_throw_head_not_written() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A field from the forbidden categories raises `\ValueError`, protocol-
-/// independent; the handler recovers.
+/// A field from the forbidden categories raises `\ValueError` regardless of protocol; the handler recovers.
 #[test]
 fn forbidden_trailer_field_is_rejected() -> anyhow::Result<()> {
     let _guard = php_lock();

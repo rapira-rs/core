@@ -9,23 +9,18 @@ on:
 permissions:
     contents: read
 
-# concurrency is decided before any job if, so ineligible runs (failed CI,
-# fork-PR CI runs, dispatch outside main) must not share the publishing group
-# or they cancel an in-flight publish; the predicate mirrors the guard job's if
+# concurrency is decided before any job `if`, so ineligible runs must not share the publishing group or they cancel an in-flight publish; the predicate mirrors the guard job's `if`.
 concurrency:
     group: nightly-${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'publish' || github.run_id }}
     cancel-in-progress: true
 
-# One build per merge to main, gated on that commit's CI run succeeding.
-# Same tag policy as docker.yml (every tag names its PHP minor): an immutable
-# <version>-nightly.<shortsha>-phpN.M tag plus a moving nightly-phpN.M alias.
+# Same tag policy as docker.yml (every tag names its PHP minor): an immutable <version>-nightly.<shortsha>-phpN.M tag plus a moving nightly-phpN.M alias.
 env:
     IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
     guard:
-        # the branches filter alone also admits CI runs of PRs whose fork branch
-        # is named main, so the run must additionally come from a push event
+        # the branches filter alone also admits CI runs of fork PRs whose branch is named main, so the run must additionally come from a push event
         if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
         runs-on: ubuntu-latest
         timeout-minutes: 5
@@ -137,8 +132,7 @@ jobs:
                   set -euo pipefail
                   API="/orgs/${GITHUB_REPOSITORY%%/*}/packages/container/${GITHUB_REPOSITORY#*/}/versions"
 
-                  # tagged nightly versions only; untagged versions hold multi-arch
-                  # children and attestations and must never be deleted
+                  # tagged nightly versions only: untagged versions hold multi-arch children and attestations and must never be deleted
                   gh api --paginate "${API}?per_page=100" --jq '
                     .[]
                     | .metadata.container.tags as $t
@@ -148,8 +142,7 @@ jobs:
                     | [$build, .created_at, .id] | @tsv
                   ' > candidates.tsv
 
-                  # the build this run just pushed must be selected; if it is not,
-                  # the filter no longer matches what merge publishes
+                  # self-check: the build this run just pushed must be selected, otherwise the filter no longer matches what merge publishes
                   awk -F'\t' -v v="$V" '$1 == v { found = 1 } END { exit !found }' candidates.tsv
 
                   keep=$(sort -t$'\t' -k2,2r candidates.tsv | awk -F'\t' -v k="$KEEP" '!seen[$1]++ { if (++n <= k) print $1 }')

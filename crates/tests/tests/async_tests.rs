@@ -26,22 +26,21 @@ async fn worker_survives_exit() -> anyhow::Result<()> {
         h.handle(req("/?boom=0", "shared/bailout-worker.php"))
             .await?,
     )
-    .await; // normal
+    .await;
     let (s2, b2) = drain_async(
         h.handle(req("/?boom=1", "shared/bailout-worker.php"))
             .await?,
     )
-    .await; // exit(1) -> unwind-exit
+    .await;
     let (s3, b3) = drain_async(
         h.handle(req("/?boom=0", "shared/bailout-worker.php"))
             .await?,
     )
-    .await; // worker must still serve
+    .await;
 
     assert_eq!(s1, 200);
     assert!(b1.contains("ok counter=1"), "req1 (got: {b1:?})");
 
-    // exit() before any output: graceful unwind, empty body, default 200
     assert_eq!(
         s2, 200,
         "exit() is a graceful unwind, not a 500 (got status {s2}, body {b2:?})"
@@ -51,7 +50,6 @@ async fn worker_survives_exit() -> anyhow::Result<()> {
         "exit(1) before any output => empty body (got: {b2:?})"
     );
 
-    // worker survived exit(), serves the next request
     assert_eq!(s3, 200, "worker must recover after exit() (got {s3})");
     assert!(
         b3.contains("ok counter=3"),
@@ -93,8 +91,6 @@ async fn many_producers_test() -> anyhow::Result<()> {
         .collect::<Vec<_>>();
 
     for p in producers {
-        // re-raise the producer's *original* assertion (message + location) instead of
-        // masking it behind a generic JoinError, as a bare `.expect()` would.
         if let Err(e) = p.await {
             std::panic::resume_unwind(e.into_panic());
         }

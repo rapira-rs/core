@@ -10,13 +10,12 @@ use anyhow::Context;
 const ALLOWED_BINDINGS: &[&str] = include!("allowed_bindings.rs");
 
 struct PhpBuild {
-    /// include directories (no `-I` prefix).
     includes: Vec<String>,
-    /// directories to search for libphp.
     lib_dirs: Vec<String>,
     version: (u32, u32),
 }
 
+// bindgen 0.72 panics on php-src master's `preserve_none` opcode handlers, so `_zend_op` stays opaque: https://clang.llvm.org/docs/AttributeReference.html#preserve-none
 fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-check-cfg=cfg(php84)");
     println!("cargo:rustc-check-cfg=cfg(php85)");
@@ -30,8 +29,6 @@ fn main() -> anyhow::Result<()> {
     }
     println!("cargo:rustc-link-lib=dylib=php");
 
-    // `php84` covers every version below 8.5, not just 8.4: those are the ones whose
-    // OPcache gates startup on a SAPI-name allowlist (see build_sapi_module).
     if php.version >= (8, 5) {
         println!("cargo:rustc-cfg=php85");
     } else {
@@ -40,9 +37,6 @@ fn main() -> anyhow::Result<()> {
 
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     let mut c = cc::Build::new();
-    // Zend fixes the parameter list of every entry point it declares through a
-    // macro (INTERNAL_FUNCTION_PARAMETERS' `return_value`, PHP_MINIT_FUNCTION's
-    // INIT_FUNC_ARGS `type`/`module_number`), so an unused one is never actionable here.
     c.flag_if_supported("-Wno-unused-parameter");
     c.define("RAPIRA_VERSION", format!("\"{version}\"").as_str());
     c.file("wrapper.c")
@@ -59,14 +53,6 @@ fn main() -> anyhow::Result<()> {
     let mut bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_args(php.includes.iter().map(|d| format!("-I{d}")))
-        // php-src master on clang >=19 compiles the Zend VM in tail-call dispatch mode: every
-        // opcode handler is a function using the `preserve_none` calling convention, and
-        // `zend_op.handler` points to one. bindgen renders C structs field-by-field, so it must
-        // emit that pointer's ABI - but 0.72.1 has no token for `preserve_none` and panics.
-        // `opaque_type` makes bindgen emit `zend_op` as a byte array of clang's reported
-        // size/align instead of its fields, so the handler pointer is never rendered. rapira reads
-        // no `zend_op` field, so nothing is lost; a no-op on 8.4/8.5, which have no preserve_none.
-        // https://clang.llvm.org/docs/AttributeReference.html#preserve-none
         .opaque_type("_zend_op");
     bindings = bindings.layout_tests(true);
     bindings = macos_sysroot(bindings);
@@ -105,10 +91,9 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// libclang 19+ does not infer the macOS SDK path: without -isysroot the parse cannot find <stdlib.h>.
 #[cfg(target_os = "macos")]
 fn macos_sysroot(bindings: bindgen::Builder) -> bindgen::Builder {
-    // libclang 19+ does not infer the macOS SDK path: point it at the active
-    // SDK or the parse fails to find <stdlib.h> and friends.
     if let Ok(out) = Command::new("xcrun").args(["--show-sdk-path"]).output()
         && out.status.success()
     {
@@ -135,8 +120,6 @@ fn parse_version(v: &str) -> anyhow::Result<(u32, u32)> {
 }
 
 fn discover_php() -> anyhow::Result<PhpBuild> {
-    // `php-config --includes` emits space-separated `-I` flags; paths with spaces are
-    // unrepresentable in that output, so splitting on whitespace is as good as it gets here.
     let includes: Vec<String> = php_config("--includes")?
         .split_whitespace()
         .map(|s| s.trim_start_matches("-I").to_string())
@@ -156,8 +139,7 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
     })
 }
 
-// `php-config --php-binary` can name a path that doesn't exist (Homebrew kegs report one),
-// so fall back to `php` on PATH, which setup-php/Homebrew also install.
+// `php-config --php-binary` can name a path that does not exist (Homebrew kegs do), so fall back to `php` on PATH.
 fn resolve_php_binary() -> String {
     if let Ok(bin) = php_config("--php-binary")
         && std::path::Path::new(&bin).exists()
@@ -167,8 +149,6 @@ fn resolve_php_binary() -> String {
     "php".to_string()
 }
 
-// ZTS reads the PHP_ZTS constant first (robust), falling back to the `php -i`
-// "Thread Safety" field if the constant can't be read.
 fn detect_zts(php_binary: &str) -> anyhow::Result<bool> {
     let zts_const = Command::new(php_binary)
         .args(["-r", "echo PHP_ZTS;"])
@@ -177,7 +157,7 @@ fn detect_zts(php_binary: &str) -> anyhow::Result<bool> {
         .and_then(|out| match String::from_utf8_lossy(&out.stdout).trim() {
             "1" => Some(true),
             "0" => Some(false),
-            _ => None, // usually not possible, but fall back to `php -i` if it happens
+            _ => None,
         });
 
     match zts_const {
@@ -196,7 +176,6 @@ fn php_info(php_binary: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-// Value after a `Key => ` field in `php -i` output, trimmed.
 fn php_info_field<'a>(info: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("{key} => ");
     info.lines()

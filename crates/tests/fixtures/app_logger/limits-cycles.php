@@ -1,7 +1,6 @@
 <?php
 
-// Monolog: testIgnoresRecursiveObjectReferences / testCanNormalizeReferences.
-// Both cycles must be broken without a diagnostic and without losing siblings.
+// Monolog testIgnoresRecursiveObjectReferences / testCanNormalizeReferences: both cycles must break without a diagnostic and without losing siblings.
 $foo = new \stdClass();
 $bar = new \stdClass();
 $foo->bar = $bar;

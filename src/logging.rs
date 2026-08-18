@@ -1,11 +1,3 @@
-//! Config-driven logger: installs the tracing subscriber with the `[log]`
-//! filter and format. rapira's crates emit native `tracing` events; upstream
-//! pingora still logs through the `log` facade, which `init()` bridges
-//! automatically (tracing-subscriber's default `tracing-log` feature installs
-//! `LogTracer` and sets the facade's max level from the filter). `RUST_LOG`,
-//! when set, replaces the configured filter wholesale - rapira's one
-//! env-beats-config knob; it never affects the format.
-
 use anyhow::Context;
 use rapira_config::{LogFormat, LogSettings};
 use std::io::{self, IsTerminal};
@@ -16,7 +8,6 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-/// Install the global subscriber. Call once, after config resolution.
 pub fn init(log: &LogSettings) -> anyhow::Result<()> {
     let filter = build_filter(std::env::var("RUST_LOG").ok().as_deref(), log)?;
     let ansi = ansi_enabled(
@@ -80,7 +71,6 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
-    /// Captures layer output for assertions; one buffer shared across writers.
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
 
@@ -118,8 +108,7 @@ mod tests {
         }
     }
 
-    /// Run `emit` under a subscriber built exactly like `init` builds it
-    /// (filter + plain uncolored layer) and return what reached the writer.
+    /// Builds the subscriber the same way `init` does: filter plus plain uncolored layer.
     fn captured(filter: EnvFilter, emit: impl Fn()) -> String {
         let sink = Sink::default();
         let sub = tracing_subscriber::registry().with(filter).with(make_layer(
@@ -148,8 +137,6 @@ mod tests {
             out.contains("php-warn-mark"),
             "target override lost:\n{out}"
         );
-        // Directives match by raw prefix: `php` also covers `php_sys`, the
-        // documented example for [log.targets].
         assert!(
             out.contains("php-scoped-warn-mark"),
             "prefix match lost:\n{out}"
@@ -160,8 +147,6 @@ mod tests {
 
     #[test]
     fn rust_log_replaces_the_config_spec_wholesale() {
-        // Under the config spec php-info is hidden (php=warn); RUST_LOG=info
-        // must win for the whole filter, not merge with the target override.
         let log = settings(LogLevel::Error, &[("php", LogLevel::Warn)]);
         let out = captured(build_filter(Some("info"), &log).unwrap(), emit_probe_events);
         assert!(
@@ -181,9 +166,6 @@ mod tests {
 
     #[test]
     fn invalid_rust_log_drops_the_bad_directive_and_keeps_the_rest() {
-        // The survivor must be `warn`, not `error`: a spec whose directives
-        // were ALL dropped falls back to EnvFilter::new's implicit error
-        // default and would look identical to a kept `error`.
         let log = settings(LogLevel::Trace, &[]);
         let filter = build_filter(Some("!!!,warn"), &log).expect("lossy, never an error");
         let out = captured(filter, emit_probe_events);
@@ -199,9 +181,6 @@ mod tests {
 
     #[test]
     fn config_target_that_breaks_the_grammar_fails_loudly() {
-        // The config validator rejects such keys; if one ever slips past, the
-        // strict parse must fail naming the spec instead of silently dropping
-        // the directive.
         let log = settings(LogLevel::Error, &[(".php", LogLevel::Warn)]);
         let err = build_filter(None, &log).unwrap_err();
         assert!(err.to_string().contains("error,.php=warn"), "{err:#}");
@@ -233,7 +212,6 @@ mod tests {
             });
         });
         let out = sink.text();
-        // "{"timestamp":"2026-08-01T12:12:54.218Z","level":"INFO","fields":{"message":"boot-mark","answer":42},"target":"rapira"}"
         let line = out.lines().next().expect("one record");
         let v: serde_json::Value = serde_json::from_str(line).expect("json record");
         assert_eq!(v["fields"]["message"], "boot-mark");
@@ -265,8 +243,6 @@ mod tests {
 
     #[test]
     fn plain_layer_colors_only_when_asked() {
-        // with_ansi overrides the layer default unconditionally, so the ansi
-        // argument - not the environment - must decide both ways.
         for (ansi, want_escape) in [(false, false), (true, true)] {
             let sink = Sink::default();
             let sub = tracing_subscriber::registry()

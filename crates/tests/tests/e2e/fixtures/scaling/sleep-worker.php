@@ -1,6 +1,5 @@
 <?php
-// Same as echo-worker, but each request stays ACTIVE for 300ms so the pool
-// accrues busy workers under load (scaling tests).
+// Each request stays active for 300ms so the pool accrues busy workers under load.
 
 use Rapira\Exception\ClosedException;
 

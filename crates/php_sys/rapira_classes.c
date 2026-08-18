@@ -12,13 +12,11 @@
 #include "zend_property_hooks.h"
 #include "zend_types.h"
 
-// logger
 zend_class_entry *rapira_ce_log_level;
 zend_class_entry *rapira_ce_work;
 zend_class_entry *rapira_ce_dispatcher_info;
 zend_class_entry *rapira_ce_dispatcher;
 
-// exceptions
 zend_class_entry *rapira_ce_closed_exception;
 zend_class_entry *rapira_ce_timeout_exception;
 zend_class_entry *rapira_ce_work_discarded_exception;
@@ -26,7 +24,6 @@ zend_class_entry *rapira_ce_not_in_dispatcher_mode_error;
 zend_class_entry *rapira_ce_not_in_worker_mode_error;
 zend_class_entry *rapira_ce_already_finalized_error;
 
-// http
 zend_class_entry *rapira_ce_inet_address;
 zend_class_entry *rapira_ce_unix_address;
 zend_class_entry *rapira_ce_http_tls;
@@ -103,13 +100,11 @@ void rapira_register_classes(void) {
         register_class_Rapira_Exception_AlreadyFinalizedError(zend_ce_error,
                                                               throwable);
 
-    // log
     rapira_ce_log_level = register_class_Rapira_LogLevel();
     rapira_ce_work = register_class_Rapira_Work();
     rapira_ce_dispatcher_info = register_class_Rapira_DispatcherInfo();
     rapira_ce_dispatcher = register_class_Rapira_Dispatcher();
 
-    // http
     rapira_ce_inet_address = register_class_Rapira_InetAddress();
     rapira_ce_unix_address = register_class_Rapira_UnixAddress();
     rapira_ce_http_tls = register_class_Rapira_Http_Tls();
@@ -125,7 +120,6 @@ void rapira_register_classes(void) {
     zend_class_entry *http_dispatcher =
         register_class_Rapira_Http_HttpDispatcher(rapira_ce_dispatcher);
 
-    // exceptions
     rapira_ce_http_content_length_exceeded_error =
         register_class_Rapira_Http_Exception_ContentLengthExceededError(
             zend_ce_error, throwable);
@@ -146,8 +140,7 @@ void rapira_register_classes(void) {
     rapira_ce_internal_http_exchange =
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
 
-    // clone_obj = NULL makes the engine throw "Trying to clone an uncloneable
-    // object" for these host-created classes (Zend/zend_vm_def.h:6050-6056)
+    // clone_obj = NULL: engine throws on clone (Zend/zend_vm_def.h:6050-6056)
     memcpy(&rapira_host_handlers, &std_object_handlers,
            sizeof(rapira_host_handlers));
     rapira_host_handlers.clone_obj = NULL;
@@ -158,7 +151,6 @@ void rapira_register_classes(void) {
            sizeof(rapira_exchange_handlers));
     rapira_exchange_handlers.clone_obj = NULL;
     rapira_exchange_handlers.offset = RAPIRA_STD_OFFSET(rapira_exchange_obj);
-    // free_obj must release the Rust job pointer
     rapira_exchange_handlers.free_obj = rapira_exchange_free;
     rapira_ce_internal_http_exchange->create_object = rapira_exchange_create;
     rapira_ce_internal_http_exchange->default_object_handlers =

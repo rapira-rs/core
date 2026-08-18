@@ -1,7 +1,6 @@
 <?php
 
-// One record per LogLevel case, plus one that omits the argument entirely: the
-// stub's `= LogLevel::Info` default is reflection metadata, so C has to apply it.
+// The omitted-level call pins that C applies the stub's `= LogLevel::Info` default, which is only reflection metadata.
 \Rapira\log('lvl-error', \Rapira\LogLevel::Error);
 \Rapira\log('lvl-warning', \Rapira\LogLevel::Warning);
 \Rapira\log('lvl-info', \Rapira\LogLevel::Info);

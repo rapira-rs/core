@@ -2,8 +2,7 @@
 #include "zend_API.h"
 #include "zend_types.h"
 
-// rust glue (src/values.rs); the ctor bodies throw from Rust and report false
-// with the throw pending
+// rust glue (src/values.rs): these return false with a PHP exception already pending
 extern bool rapira_rs_ctor_inet_address(zend_object *obj, zend_string *ip,
                                         int64_t port);
 extern bool rapira_rs_ctor_unix_address(zend_object *obj, zend_string *path);
@@ -141,7 +140,7 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
     Z_PARAM_DOUBLE(received_at)
     ZEND_PARSE_PARAMETERS_END();
 
-    // the ZVAL_OBJ/ZVAL_STR union wrap is macro glue; ownership stays with ZPP
+    // borrowed body zval: ownership stays with ZPP, no refcount taken
     zval body;
     if (body_obj != NULL) {
         ZVAL_OBJ(&body, body_obj);

@@ -1,9 +1,7 @@
 use php_sys::{Mode, Rapira};
 use tests::{drain, fixture, php_lock, req};
 
-// One resident worker per extension; `?boom=1` switches its handler to the throwing
-// call. 1 thread => the follow-up request rides the same interpreter, proving an
-// uncaught extension throw leaves the worker serving.
+// One resident worker per extension: the follow-up request rides the same interpreter, so an uncaught throw must leave it serving.
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture(name)))?;
@@ -19,7 +17,6 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
 
 fn success(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/"])?;
-    // fixtures echo "skip" when their extension is missing from this libphp build
     if out[0].1 == "skip" {
         return Ok(());
     }
@@ -208,8 +205,7 @@ fn filter_exception() -> anyhow::Result<()> {
     exception("php_ext/filter-worker.php", "filter:a@b.com")
 }
 
-// No `exception` counterpart: this guards that OPcache actually started under our SAPI
-// name, which PHP <= 8.4 gates on an allowlist (see build_sapi_module). Nothing to throw.
+/// Pins that OPcache started under our SAPI name, which PHP <= 8.4 gates on an allowlist (see build_sapi_module).
 #[test]
 fn opcache_success() -> anyhow::Result<()> {
     success("php_ext/opcache-worker.php", "opcache:enabled")

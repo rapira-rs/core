@@ -31,7 +31,6 @@ fn base_req() -> Request {
     }
 }
 
-/// A sealed response stream, collected.
 enum Sealed {
     Complete { status: u16, body: Vec<u8> },
     Truncated { status: Option<u16>, body: Vec<u8> },
@@ -61,13 +60,13 @@ fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<crate::types::Frame>) -> Sea
     Sealed::Nothing
 }
 
+/// Channel is sized for a full event trio so seal never parks with no reader.
 fn state_of(
     req: Request,
 ) -> (
     ExchangeState,
     tokio::sync::mpsc::Receiver<crate::types::Frame>,
 ) {
-    // room for a full event trio with no reader (seal must not park)
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let job = Box::new(Job {
         ctx: Context::new(req, tx, /*superglobals=*/ false),
@@ -85,11 +84,7 @@ fn state() -> (
     state_of(base_req())
 }
 
-/// The buffer cap must seal (truncated) rather than merely error: an
-/// unsealed overflow leaves the unit in Handling and wedges every later
-/// receive() on the single-flight check for the life of the worker. The
-/// oversized `len` is checked before the byte slice is formed, so no giant
-/// buffer is needed.
+/// An unsealed overflow would leave the unit in Handling and wedge every later receive() on the single-flight check.
 #[test]
 fn overflow_seals_the_unit_truncated() {
     let (mut st, mut rx) = state();
@@ -102,7 +97,6 @@ fn overflow_seals_the_unit_truncated() {
     assert_eq!(status, Some(200));
     assert!(body.is_empty(), "the overflowing chunk is never sent");
 
-    // The unit is concluded: later verbs see Finalized, not a wedge.
     let v = unsafe { write_body_core(&mut st, c"y".as_ptr(), 1, true) };
     assert_eq!(v, Verb::Finalized);
     let job: *const c_void = (&raw const st).cast();
@@ -159,8 +153,7 @@ fn wire_validators_match_the_classic_byte_sets() {
     assert!(!wire_value(b"nul\0"));
 }
 
-/// Construction normalizes the contract protocol spelling and treats an
-/// empty unix path as the unnamed endpoint.
+/// Construction normalizes the protocol spelling and maps an empty unix path to the unnamed endpoint.
 #[test]
 fn construction_normalizes_protocol_and_empty_unix_path() {
     let mut req = base_req();
@@ -171,8 +164,7 @@ fn construction_normalizes_protocol_and_empty_unix_path() {
     assert!(matches!(st.remote, AddrOwned::Unix(None)));
 }
 
-/// A one-shot body write carries its computed length on the Head frame; a
-/// streamed first write leaves the framing to the front.
+/// A one-shot write carries its computed length on the Head frame; a streamed write leaves framing to the front.
 #[test]
 fn head_frame_length_follows_the_write_shape() {
     use crate::types::Frame;
@@ -193,8 +185,7 @@ fn head_frame_length_follows_the_write_shape() {
     assert_eq!(content_length, None, "streaming: the front frames");
 }
 
-/// The CLEE prefix rule: the fitting bytes go out, the response completes
-/// per its declaration (not truncated), and later writes see Finalized.
+/// Over-declared length sends the fitting prefix and seals untruncated, so later writes see Finalized.
 #[test]
 fn content_length_exceeded_sends_the_prefix_and_seals() {
     use crate::types::Frame;
@@ -240,8 +231,7 @@ fn repeated_content_length_is_a_bad_field() {
     assert_eq!(st.stage, Stage::Open, "a rejected head commits nothing");
 }
 
-/// An interim head emits at once, minus framing fields, and leaves the
-/// final-head slot open.
+/// An interim head emits at once minus framing fields and leaves the final-head slot open.
 #[test]
 fn interim_head_emits_without_framing_fields() {
     use crate::types::Frame;
@@ -273,8 +263,7 @@ fn interim_head_emits_without_framing_fields() {
     assert_eq!(v, Verb::Ok, "the final-head slot stays open");
 }
 
-/// A gone client discards the unit exactly once; the latch is sticky and
-/// the unit reports finalized + cancelled.
+/// A gone client discards the unit once and the latch stays sticky: finalized plus cancelled.
 #[test]
 fn gone_client_discards_once_and_stays_discarded() {
     let (mut st, rx) = state();
@@ -289,8 +278,7 @@ fn gone_client_discards_once_and_stays_discarded() {
     assert!(unsafe { rapira_rs_exchange_is_cancelled(job) });
 }
 
-/// `flush()` commits and emits the implicit 200 once; a repeat flush puts
-/// nothing new on the stream.
+/// `flush()` emits the implicit 200 once; a repeat flush puts nothing new on the stream.
 #[test]
 fn flush_emits_the_implicit_head_once() {
     use crate::types::Frame;
@@ -358,7 +346,6 @@ fn send_file_validation_table() {
         let v = unsafe { send_file_core(&mut st, &path, offset, length, true) };
         assert!(matches!(v, Verb::FileNotSendable(_)), "{name}");
     }
-    // raised before anything is written: the unit stays open
     assert_eq!(st.stage, Stage::Open);
 
     let (mut st, mut rx) = state();
@@ -385,7 +372,6 @@ fn send_file_validation_table() {
     ));
     assert_eq!(st.stage, Stage::Finalized);
 
-    // a symlink whose target stays inside the root is allowed
     let link_in = dir.join(format!("rapira-sf-in-{}", std::process::id()));
     std::fs::remove_file(&link_in).ok();
     std::os::unix::fs::symlink(&path, &link_in).unwrap();
@@ -399,8 +385,7 @@ fn send_file_validation_table() {
     std::fs::remove_file(&path).ok();
 }
 
-/// Trailers end the response through the End frame; repeat calls land on
-/// Finalized, and a headless call is HeadNotWritten.
+/// Trailers end the response on the End frame: a headless call is HeadNotWritten, a repeat call Finalized.
 #[test]
 fn trailers_finalize_with_a_committed_head() {
     use crate::types::Frame;
@@ -436,8 +421,7 @@ fn trailers_finalize_with_a_committed_head() {
     assert_eq!(v, Verb::Finalized);
 }
 
-/// The forbidden set covers every RFC 9110 §6.5.1 category; unknown
-/// extension fields pass.
+/// The forbidden set covers every RFC 9110 §6.5.1 category; unknown extension fields pass.
 #[test]
 fn trailer_denylist_matches_the_categories() {
     for name in [
@@ -455,8 +439,7 @@ fn trailer_denylist_matches_the_categories() {
     assert!(!forbidden_trailer("server-timing"));
 }
 
-/// Sealing unlinks the spool files (the contract's "gone when the exchange
-/// finalizes"); the Drop net stays idempotent afterwards.
+/// Sealing unlinks the spool files, so uploads are gone once the exchange finalizes.
 #[test]
 fn seal_unlinks_the_spool_files() {
     let (mut st, mut _rx) = state();

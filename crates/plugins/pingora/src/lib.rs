@@ -1,9 +1,3 @@
-//! Rapira HTTP front: a Pingora server that terminates HTTP and streams each request
-//! through PHP via the extension `Php` bridge.
-//!
-//! The extension runtime does not enable IO, so the server runs on its own
-//! IO-enabled runtime on a dedicated thread; `shutdown` flips a watch channel to drain it.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
@@ -21,67 +15,43 @@ use pingora::modules::http::{HttpModule, HttpModuleBuilder, HttpModules, Module}
 use pingora::proxy::{ProxyHttp, Session, http_proxy_service};
 use pingora::server::configuration::ServerConf;
 use pingora::server::{Fds, ListenFds};
-use pingora::services::Service as _; // brings start_service() into scope
+use pingora::services::Service as _;
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorType, Result as PingoraResult};
 use tokio::runtime::{self, Builder};
 use tokio::sync::{oneshot, watch};
 
-/// Where the HTTP front binds. Structurally mirrors rapira's config-side listen type,
-/// but owned here so this extension crate never depends on core's config crate.
 #[derive(Clone, Debug)]
 pub enum Listen {
     Tcp(std::net::SocketAddr),
     Unix(std::path::PathBuf),
 }
 
-/// Configuration supplied by rapira (rapira.toml / CLI) via [`Extension::init`].
 #[derive(Clone)]
 pub struct Config {
-    /// Address to bind: TCP socket or unix domain socket.
     pub listen: Listen,
-    /// `SERVER_NAME` reported to PHP.
     pub server_name: String,
-    /// `SERVER_PORT` reported to PHP.
     pub server_port: u16,
-    /// Maximum request body size in bytes; larger bodies are rejected with 413.
-    /// Default mirrors PHP's own `post_max_size` default (8M).
     pub max_body_size: usize,
-    /// What to do with a request field whose name is not [`is_safe_field_name`].
     pub unsafe_field_names: UnsafeFieldNames,
-    /// The pool serves superglobals ($_SERVER) - classic/worker mode. The Drop
-    /// policy protects that mapping only, so it is inert without it; Reject is
-    /// an explicit opt-in and applies regardless.
+    /// Drop protects the $_SERVER mapping only, so it is inert without a pool serving superglobals; Reject applies regardless.
     pub superglobals: bool,
-    /// Per-write bound on the response path: body writes via pingora's
-    /// write_timeout, head/terminator writes via explicit timeouts.
+    /// Per-write bound on the response path, not a whole-response deadline.
     pub write_timeout: Duration,
-    /// How long in-flight requests get to finish after the accept loop stops.
-    /// `start_service` joins the accept loops only, never the per-connection
-    /// tasks, and dropping the runtime aborts those mid-response. Must expire
-    /// before the host escalates its stop, or the drain is cut short anyway.
+    /// Must expire before the host escalates its stop, or the drain is cut short anyway.
     pub drain_grace: Duration,
 }
 
-/// What to do with a request field name that maps onto a CGI variable another name
-/// already owns. Structurally mirrors rapira's config-side type, but owned here so this
-/// extension crate never depends on core's config crate.
-///
-/// There is deliberately no "allow" arm: a boolean off-switch re-opens the
-/// aliasing collision (CVE-2026-52845 is that bug shipped). An allowlist of
-/// specific expected names could be safe; a boolean cannot.
+/// No "allow" arm: a boolean off-switch re-opens the CGI aliasing collision (CVE-2026-52845); an allowlist of expected names could be safe, a boolean cannot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsafeFieldNames {
-    /// Remove the field before anything downstream sees it.
     Drop,
-    /// Answer 400 and serve nothing.
     Reject,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            // Standalone fallback only - rapira always passes a fully populated Config.
             listen: Listen::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], 8000))),
             server_name: "localhost".to_owned(),
             server_port: 8000,
@@ -94,24 +64,14 @@ impl Default for Config {
     }
 }
 
-/// Whether a request field name reaches a CGI variable no other name can.
-///
-/// The CGI name is the field name uppercased with `-` rewritten to `_`, and PHP rewrites
-/// `.` and space to `_` again when it registers the variable. A name carrying `_` or `.`
-/// therefore lands on the variable a `-` name owns, letting a client fold a value into a
-/// field the front set. (Space cannot reach here - it is not a tchar, so the parser rejects
-/// it first.) This is an allowlist rather than a denylist of those two bytes, so it stays
-/// correct if either mapper widens.
+/// A name carrying `_` or `.` lands on the CGI variable a `-` name owns, so this allowlists instead of denying those bytes.
 fn is_safe_field_name(name: &str) -> bool {
     name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// Applies [`UnsafeFieldNames`] to the downstream request. Serves as both the
-/// builder and the per-request module: `init` copies two plain fields.
+/// Serves as both the module builder and the per-request module: `init` copies two plain fields.
 struct FieldNameFilter {
     policy: UnsafeFieldNames,
-    /// Drop protects the $_SERVER mapping only; without one, deleting
-    /// tchar-valid names would contradict the contract's "names as received".
     superglobals: bool,
 }
 
@@ -121,8 +81,6 @@ impl HttpModule for FieldNameFilter {
         if self.policy == UnsafeFieldNames::Drop && !self.superglobals {
             return Ok(());
         }
-        // Collected first: `remove_header` needs the map mutably, and it drops every value
-        // under the name along with its case-preserving entry.
         let unsafe_names: Vec<String> = req
             .headers
             .keys()
@@ -133,9 +91,6 @@ impl HttpModule for FieldNameFilter {
             return Ok(());
         }
         if self.policy == UnsafeFieldNames::Reject {
-            // Only the count and one example: pingora logs this at error level (the default
-            // filter's only visible level), so joining every name lets one request with a
-            // few hundred junk fields write a few hundred KB of log.
             return Err(Error::explain(
                 ErrorType::HTTPStatus(400),
                 format!(
@@ -147,8 +102,6 @@ impl HttpModule for FieldNameFilter {
         }
         for name in &unsafe_names {
             req.remove_header(name.as_str());
-            // warn, not debug: the default filter prints errors only, so a debug line here
-            // makes a dropped client field indistinguishable from one never sent.
             tracing::warn!(
                 target: "http",
                 "dropped request header {name}: name aliases a CGI variable \
@@ -176,19 +129,15 @@ impl HttpModuleBuilder for FieldNameFilter {
     }
 }
 
-/// The HTTP front extension: holds the running server thread and its shutdown signal.
 pub struct HttpServer {
     config: Config,
-    /// Master-bound listener from `prepare`; rides inside `self` across the
-    /// fork, consumed by `run` in the worker. None → self-bind (tests,
-    /// single-process boots without a prepare phase).
+    /// Master-bound listener carried across the fork; None means self-bind (no prepare phase).
     prepared: Option<PreparedListener>,
     shutdown: Option<watch::Sender<bool>>,
     thread: Option<JoinHandle<Result<()>>>,
 }
 
 impl Extension for HttpServer {
-    /// Built by rapira from its validated TOML/CLI config.
     type Config = Config;
 
     fn init(config: Config) -> Self {
@@ -216,7 +165,6 @@ impl Extension for HttpServer {
 
     async fn run(&mut self, php: Php) -> Result<()> {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        // Wakes `run` (on the host runtime) once the server thread finishes.
         let (done_tx, done_rx) = oneshot::channel();
         let config = self.config.clone();
         let prepared = self.prepared.take();
@@ -231,15 +179,13 @@ impl Extension for HttpServer {
                     .build()
                     .expect("build http runtime");
                 let result = rt.block_on(serve(php, config, prepared, shutdown_rx));
-                let _ = done_tx.send(()); // ignore if `run` was already cancelled
+                let _ = done_tx.send(());
                 result
             })?;
 
         self.shutdown = Some(shutdown_tx);
         self.thread = Some(thread);
 
-        // Park until the server stops on its own (bind error / clean exit). If the host
-        // cancels `run`, this future is dropped and `shutdown` drains the thread instead.
         let _ = done_rx.await;
 
         match self.thread.take() {
@@ -250,10 +196,9 @@ impl Extension for HttpServer {
 
     async fn shutdown(&mut self) -> Result<()> {
         if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(true); // stop the accept loop, drain in-flight conns
+            let _ = shutdown.send(true);
         }
         if let Some(thread) = self.thread.take() {
-            // Join off the async runtime so a slow drain never blocks a worker thread.
             tokio::task::spawn_blocking(move || join_thread(thread))
                 .await
                 .map_err(|e| anyhow!("http join task failed: {e}"))??;
@@ -273,8 +218,7 @@ fn join_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
     })?
 }
 
-/// Build the Pingora proxy service and drive its accept loop until `shutdown` flips true,
-/// then wait (bounded) for in-flight requests before the caller drops the runtime.
+/// The endpoint string and the Fds key must be one and the same string: pingora adopts an inherited fd only on an exact match, and a mismatch silently rebinds (for unix sockets it unlinks and steals the master's socket).
 async fn serve(
     php: Php,
     config: Config,
@@ -286,17 +230,13 @@ async fn serve(
     let listen = config.listen.clone();
     let drain_grace = config.drain_grace;
 
-    // ONE string feeds BOTH the endpoint and the Fds key: pingora adopts only on
-    // an exact match (a mismatch silently rebinds - for unix sockets it would
-    // unlink and steal the master's socket). The listener carries the resolved
-    // address, so port 0 configs adopt correctly too.
     let (addr, fds): (ListenAddr, Option<ListenFds>) = match prepared {
         Some(p) => {
             use std::os::fd::IntoRawFd;
             let addr = p.addr().clone();
             let key = p.addr_string()?;
             let mut table = Fds::new();
-            table.add(key, p.into_raw_fd()); // ownership → pingora; closed at teardown
+            table.add(key, p.into_raw_fd());
             (addr, Some(Arc::new(tokio::sync::Mutex::new(table))))
         }
         None => (
@@ -312,7 +252,6 @@ async fn serve(
         PhpProxy {
             php,
             config,
-            // the resolved bind: the $server fallback and the peer-arm kind
             listen: addr.clone(),
             inflight: inflight.clone(),
         },
@@ -324,27 +263,18 @@ async fn serve(
             tracing::info!(target: "http", "listening on http://{s}");
         }
         ListenAddr::Unix(path) => {
-            // Reject rather than bind a lossy-converted (corrupted) path.
             let s = path
                 .to_str()
                 .ok_or_else(|| anyhow!("unix socket path must be valid UTF-8"))?;
-            // None → pingora default perms (0o666): the same local accessibility as a
-            // loopback TCP bind, and a proxy running as another user can connect.
             service.add_uds(s, None);
             tracing::info!(target: "http", "listening on unix:{s}");
         }
     }
-    // (fds, shutdown, listeners_per_fd). Runs on this runtime via Handle::current().
     service.start_service(fds, shutdown, 1).await;
-    // start_service only joined the accept loops; connection tasks are detached and die
-    // with the runtime. Wait for the requests still in flight so their responses go out.
     let deadline = tokio::time::Instant::now() + drain_grace;
     while inflight.load(Ordering::Acquire) > 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    // Falling out of the loop on the deadline means the caller is about to drop the runtime
-    // out from under requests that are still running, cutting their responses mid-flight.
-    // Reporting Ok here would surface that as a clean stop with exit code 0.
     let stranded = inflight.load(Ordering::Acquire);
     if stranded > 0 {
         return Err(anyhow!(
@@ -356,18 +286,14 @@ async fn serve(
     Ok(())
 }
 
-/// Terminates HTTP and answers every request from PHP; never proxies upstream.
 struct PhpProxy {
     php: Php,
     config: Config,
-    /// The resolved bind address (port-0 resolved): the `$server` fallback and
-    /// the kind key for a peerless connection.
     listen: ListenAddr,
-    /// Requests between `new_ctx` and `logging` - `serve` drains this on shutdown.
+    /// Incremented in `new_ctx`, decremented in `logging`; `serve` drains it on shutdown.
     inflight: Arc<AtomicUsize>,
 }
 
-/// Per-request state; created after the head is parsed, before any body byte.
 pub struct ReqCtx {
     /// Unix seconds when this host accepted the request.
     received_at: f64,
@@ -377,7 +303,6 @@ pub struct ReqCtx {
 impl ProxyHttp for PhpProxy {
     type CTX = ReqCtx;
 
-    // Every request runs new_ctx → phases → logging, so the inflight pair cannot underflow.
     fn new_ctx(&self) -> Self::CTX {
         self.inflight.fetch_add(1, Ordering::AcqRel);
         ReqCtx {
@@ -388,12 +313,8 @@ impl ProxyHttp for PhpProxy {
         }
     }
 
-    /// Registered once when the service is built. The module's `request_header_filter` then
-    /// runs per request ahead of `request_filter`, so the field-name policy is applied while
-    /// the request is still a header map and every later phase sees a screened one.
+    /// An override replaces the trait default's whole body, so compression is re-added here; the field-name module then runs ahead of `request_filter`.
     fn init_downstream_modules(&self, modules: &mut HttpModules) {
-        // The trait default supplies this and an override replaces the whole body, so it
-        // has to be re-added or downstream compression loses its (disabled) module.
         modules.add_module(ResponseCompressionBuilder::enable(0));
         modules.add_module(Box::new(FieldNameFilter {
             policy: self.config.unsafe_field_names,
@@ -405,18 +326,18 @@ impl ProxyHttp for PhpProxy {
         self.inflight.fetch_sub(1, Ordering::AcqRel);
     }
 
+    /// Keepalive is flipped off before the head write: pingora renders the Connection header from `will_keepalive()`.
     async fn request_filter(
         &self,
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> PingoraResult<bool> {
         let Some(request) = build_request(session, &self.config, &self.listen, ctx).await? else {
-            return Ok(true); // rejected here; the response is already written
+            return Ok(true);
         };
 
         let mut reply = match self.php.exec(request).await {
             Ok(reply) => reply,
-            // host-rejected before dispatch: answer in this protocol
             Err(e) if e.downcast_ref::<extension_api::Rejected>().is_some() => {
                 let r = e.downcast_ref::<extension_api::Rejected>().unwrap();
                 tracing::warn!(target: "http", "rejected before dispatch: {r}");
@@ -429,7 +350,6 @@ impl ProxyHttp for PhpProxy {
                 return Ok(true);
             }
             Err(e) => {
-                // a spool io failure is a host fault, not a bad gateway
                 let status = if e.chain().any(|c| c.is::<std::io::Error>()) {
                     500
                 } else {
@@ -442,18 +362,12 @@ impl ProxyHttp for PhpProxy {
             }
         };
 
-        // The event loop writes the stream as it arrives. A one-shot response
-        // is still a Head+Chunk+End trio carrying its computed Content-Length,
-        // so keepalive is preserved on the buffered path; a stream without a
-        // length is chunked (never close-delimited, which kills keepalive).
         session.set_write_timeout(Some(self.config.write_timeout));
         let wt = self.config.write_timeout;
         let mut head_seen = false;
         let mut no_body = false;
         let mut declared_cl: Option<u64> = None;
-        // our own counter: pingora adds header bytes into body_bytes_sent()
         let mut body_sent: u64 = 0;
-        // disarmed once the client pipelines: the probe ate a byte, reuse is off
         let mut watch_idle = true;
 
         let truncated = loop {
@@ -463,8 +377,6 @@ impl ProxyHttp for PhpProxy {
                 res = session.read_body_or_idle(true), if watch_idle => {
                     match res {
                         Err(e) if matches!(e.etype(), ErrorType::ConnectionClosed) => {
-                            // client gone: dropping the reply is what raises
-                            // WorkDiscardedException at the worker's next write
                             drop(reply);
                             session.set_keepalive(None);
                             return Err(Error::explain(
@@ -473,8 +385,6 @@ impl ProxyHttp for PhpProxy {
                             )
                             .into_down());
                         }
-                        // pipelined bytes (or a stray read): the 1-byte probe
-                        // consumed data, so reuse is unsafe; keep serving
                         _ => {
                             watch_idle = false;
                             session.set_keepalive(None);
@@ -494,9 +404,7 @@ impl ProxyHttp for PhpProxy {
             };
             match ev {
                 ReplyEvent::Interim { status, headers } => {
-                    // HTTP/1.0 defines no 1xx class (contract: interim heads
-                    // are advisory and drop where the protocol has no room;
-                    // RFC 8297 §3 counsels the same caution).
+                    // HTTP/1.0 defines no 1xx class; interim heads are advisory and drop where the protocol has no room (RFC 8297 §3).
                     // https://www.rfc-editor.org/rfc/rfc8297#section-3
                     if session.req_header().version == Version::HTTP_10 || head_seen {
                         tracing::debug!(target: "http", "dropped interim {status}");
@@ -512,8 +420,6 @@ impl ProxyHttp for PhpProxy {
                     bodiless,
                     ..
                 } => {
-                    // A final 1xx can't be forwarded over h1 (no upgrade
-                    // machinery). Loud, or the rewrite is invisible.
                     let status = if status < 200 {
                         tracing::error!(
                             target: "http",
@@ -529,9 +435,6 @@ impl ProxyHttp for PhpProxy {
                     let http11 = session.req_header().version == Version::HTTP_11;
                     let chunked = !no_body && content_length.is_none() && http11;
                     if !no_body && content_length.is_none() && !http11 {
-                        // close-delimited: pingora renders the Connection
-                        // header from will_keepalive() before its own
-                        // too-late disable, so flip it ahead of the write
                         session.set_keepalive(None);
                     }
                     declared_cl = content_length.filter(|_| !no_body);
@@ -545,7 +448,6 @@ impl ProxyHttp for PhpProxy {
                         continue;
                     }
                     body_sent += b.len() as u64;
-                    // bounded natively by set_write_timeout
                     session.write_response_body(Some(b), false).await?;
                 }
                 ReplyEvent::File { file, offset, len } => {
@@ -561,8 +463,6 @@ impl ProxyHttp for PhpProxy {
                     ));
                 }
                 ReplyEvent::End { truncated, .. } => {
-                    // a declared-length under-run must not poison keepalive:
-                    // the truncated close is the only honest framing
                     break truncated || declared_cl.is_some_and(|cl| body_sent < cl);
                 }
             }
@@ -570,21 +470,14 @@ impl ProxyHttp for PhpProxy {
 
         if truncated {
             session.set_keepalive(None);
-            // Ok(true) would let the proxy's finish() write a clean chunked
-            // terminator and erase the truncation; a downstream-sourced error
-            // writes nothing and drops the socket mid-message.
             return Err(
                 Error::explain(ErrorType::ConnectionClosed, "php response truncated").into_down(),
             );
         }
-        // terminate inside the inflight window (the proxy's finish() runs
-        // after logging()); write_timeout does not cover this write natively
         timed(wt, session.write_response_body(None, true)).await?;
-        Ok(true) // response already sent; proxy runs logging + finish, never reaches upstream
+        Ok(true)
     }
 
-    /// Truncated streams and client aborts exit through downstream-sourced
-    /// errors; they are normal operation, not error-log material.
     fn suppress_error_log(&self, _session: &Session, _ctx: &Self::CTX, error: &Error) -> bool {
         matches!(
             error.etype(),
@@ -597,7 +490,6 @@ impl ProxyHttp for PhpProxy {
         _session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> PingoraResult<Box<HttpPeer>> {
-        // Never reached: request_filter always answers and returns Ok(true).
         Err(Error::explain(
             ErrorType::InternalError,
             "rapira-pingora serves all requests locally; no upstream",
@@ -605,10 +497,7 @@ impl ProxyHttp for PhpProxy {
     }
 }
 
-/// Assemble the response head: PHP's fields minus the ones this front owns, then our
-/// own framing. A field no front can represent is dropped with a log rather than
-/// failing the call - the head carries the whole response, so one bad field must not
-/// cost the body.
+/// The Connection-named removals run before our own framing goes in, so a `Connection: content-length` cannot strip it.
 fn build_response_header(
     status: u16,
     headers: FieldLines,
@@ -617,52 +506,38 @@ fn build_response_header(
     no_body: bool,
 ) -> PingoraResult<ResponseHeader> {
     let mut header = ResponseHeader::build(status, Some(headers.len() + 1))?;
-    // Extra hop-by-hop fields named by a Connection value (RFC 9110 §7.6.1,
-    // https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1). PHP almost never
-    // sends Connection, so this stays empty and allocates nothing.
+    // Extra hop-by-hop fields named by a Connection value (RFC 9110 §7.6.1).
+    // https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1
     let mut conn_named: Vec<String> = Vec::new();
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("connection") {
             connection_named_headers(&value, &mut conn_named);
-            continue; // Connection is itself hop-by-hop
+            continue;
         }
-        // Framing and connection management are ours, never PHP's
-        // (hop-by-hop, RFC 9110 §7.6.1).
+        // Framing and connection management are ours, never PHP's (hop-by-hop, RFC 9110 §7.6.1).
         if skip_response_header(&name) {
             continue;
         }
-        // append: PHP may legally repeat headers (Set-Cookie, Vary, Link). value is
-        // Vec<u8>, so it stays binary-safe.
-        // Cloned for the log because append_header takes the name by value and pingora has
-        // no IntoCaseHeaderName impl for a non-'static &str - it cannot be borrowed.
         let logged = name.clone();
         if let Err(e) = header.append_header(name, value) {
             tracing::debug!(target: "http", "dropped response header {logged}: {e}");
         }
     }
-    // Rare path only: drop the fields a Connection value named, before our own
-    // framing goes in below so a `Connection: content-length` can't strip it.
     for tok in &conn_named {
         header.remove_header(tok.as_str());
     }
-    // A bodiless response (204/304/HEAD/1xx) carries neither field: RFC 9110
-    // §8.6 and RFC 9112 §6.1 forbid them on 204/1xx, and the current HEAD
-    // behavior (no synthesized length) stays.
+    // A bodiless response (204/304/HEAD/1xx) carries neither framing field: RFC 9110 §8.6 and RFC 9112 §6.1.
     // https://www.rfc-editor.org/rfc/rfc9112#section-6.1
     if !no_body {
         if let Some(n) = content_length {
             header.insert_header("Content-Length", n.to_string())?;
         } else if chunked {
-            // pingora selects the body mode from this header; it is never
-            // taken from PHP (skip_response_header strips PHP's)
             header.insert_header("Transfer-Encoding", "chunked")?;
         }
     }
     Ok(header)
 }
 
-/// An interim head: PHP's fields (already stripped of framing by the exchange
-/// layer; the skip list is defence-in-depth), no framing of ours.
 fn build_interim_header(status: u16, headers: FieldLines) -> PingoraResult<ResponseHeader> {
     let mut header = ResponseHeader::build(status, Some(headers.len()))?;
     for (name, value) in headers {
@@ -677,8 +552,7 @@ fn build_interim_header(status: u16, headers: FieldLines) -> PingoraResult<Respo
     Ok(header)
 }
 
-/// `set_write_timeout` bounds body writes only; head writes and the terminator
-/// need this explicit bound.
+/// `set_write_timeout` bounds body writes only; head writes and the terminator need this explicit bound.
 async fn timed<T>(
     wt: Duration,
     fut: impl std::future::Future<Output = PingoraResult<T>>,
@@ -691,9 +565,7 @@ async fn timed<T>(
     }
 }
 
-/// Stream a validated file slice: 64 KiB reads off the blocking pool (the fd
-/// moves in and out of each read), one bounded body write per read. Returns
-/// the bytes written (short when the file shrank).
+/// Returns the bytes written, short when the file shrank under the validated slice.
 async fn pump_file(
     session: &mut Session,
     file: std::fs::File,
@@ -729,9 +601,7 @@ async fn pump_file(
     Ok(done)
 }
 
-/// Parse a `Connection` header value into the lower-cased field names it lists,
-/// appending them to `out` (RFC 9110 §7.6.1). Values are binary-safe, so a lossy
-/// UTF-8 decode is used only to tokenize; empty tokens are skipped.
+/// Parse a `Connection` value into the lower-cased field names it lists (RFC 9110 §7.6.1).
 pub fn connection_named_headers(value: &[u8], out: &mut Vec<String>) {
     for tok in value.split(|&b| b == b',') {
         let tok = String::from_utf8_lossy(tok).trim().to_ascii_lowercase();
@@ -741,8 +611,7 @@ pub fn connection_named_headers(value: &[u8], out: &mut Vec<String>) {
     }
 }
 
-/// Headers this front owns instead of PHP: framing comes from the buffered body and
-/// connection management belongs to the server (hop-by-hop, RFC 9110 §7.6.1).
+/// Headers this front owns instead of PHP (hop-by-hop, RFC 9110 §7.6.1).
 pub fn skip_response_header(name: &str) -> bool {
     [
         "content-length",
@@ -758,9 +627,7 @@ pub fn skip_response_header(name: &str) -> bool {
     .any(|h| name.eq_ignore_ascii_case(h))
 }
 
-/// One entry per field line, wire order per name. `case_header_iter` yields
-/// nothing without a case map (h2's `From<ReqParts>` sets none), so fall back
-/// to the lowercase map - which is what h2/h3 put on the wire anyway.
+/// `case_header_iter` yields nothing without a case map (h2's `From<ReqParts>` sets none), hence the lowercase fallback.
 fn collect_headers(header: &RequestHeader) -> Vec<(String, Vec<u8>)> {
     if header.has_case() {
         header
@@ -781,12 +648,7 @@ fn collect_headers(header: &RequestHeader) -> Vec<(String, Vec<u8>)> {
     }
 }
 
-/// `$authority` from the Host field lines. RFC 9112 §3.2 makes a repeated,
-/// missing or empty Host on HTTP/1.1 a 400; without a usable Host the target
-/// URI reconstructs with an empty authority (RFC 9112 §3.3), named None here.
-/// h2/h3 carry the authority as `:authority` in the URI, not a Host line -
-/// unreachable on today's plaintext-h1 listeners, to be read from
-/// `header.uri.authority()` when a TLS/h2 front lands.
+/// A repeated, missing or empty Host on HTTP/1.1 is a 400 (RFC 9112 §3.2); None means the target URI reconstructs with an empty authority (RFC 9112 §3.3).
 /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 /// https://www.rfc-editor.org/rfc/rfc9112#section-3.3
 fn authority(headers: &[(String, Vec<u8>)], http11: bool) -> Result<Option<Vec<u8>>, &'static str> {
@@ -822,8 +684,7 @@ fn listen_addr(listen: &ListenAddr) -> extension_api::Addr {
     }
 }
 
-/// Map a Pingora downstream request into a rapira `Request`. `None` means the request
-/// was rejected here (the response is already written).
+/// `None` means the request was rejected here and the response is already written.
 async fn build_request(
     session: &mut Session,
     config: &Config,
@@ -832,13 +693,8 @@ async fn build_request(
 ) -> PingoraResult<Option<Request>> {
     let header: &RequestHeader = session.req_header();
     let method: String = header.method.as_str().to_owned();
-    // byte-exact request-target (raw_path keeps non-UTF-8 bytes); uri stays the
-    // lossy string for REQUEST_URI
     let target: Vec<u8> = header.raw_path().to_vec();
     let uri: String = header.uri.to_string();
-    // → SERVER_PROTOCOL, e.g. "HTTP/1.1". The framework-type → CGI-string mapping
-    // lives here, not in core; static strings for the common versions (the Debug
-    // formatter shows up in per-request profiles).
     let v = header.version;
     let protocol: String = match v {
         pingora::http::Version::HTTP_11 => "HTTP/1.1".to_owned(),
@@ -856,10 +712,8 @@ async fn build_request(
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
-    // Send the interim 100 only for HTTP/1.1. Per RFC 9110 §10.1.1
-    // (https://www.rfc-editor.org/rfc/rfc9110#section-10.1.1) a server MUST ignore an
-    // HTTP/1.0 request's 100-continue expectation; h2/h3 handle interim responses over
-    // their own framing and aren't driven from this path.
+    // The interim 100 goes out only for HTTP/1.1: a server ignores an HTTP/1.0 request's 100-continue expectation (RFC 9110 §10.1.1).
+    // https://www.rfc-editor.org/rfc/rfc9110#section-10.1.1
     let expects_continue = header.version == pingora::http::Version::HTTP_11
         && header
             .headers
@@ -870,16 +724,12 @@ async fn build_request(
         reject_payload_too_large(session).await?;
         return Ok(None);
     }
-    // The client holds the body back until the interim response acknowledges Expect.
     if expects_continue {
         session.write_continue_response().await?;
     }
 
     let remote = match session.client_addr() {
         Some(a) => peer_addr(a),
-        // None: an unnamed UDS peer (the normal case there), or a TCP session
-        // whose digest is gone - the contract union has no unknown arm, so the
-        // latter is answered, not fabricated
         None => match listen {
             ListenAddr::Unix(_) => extension_api::Addr::Unix(None),
             ListenAddr::Tcp(_) => {
@@ -890,17 +740,13 @@ async fn build_request(
             }
         },
     };
-    // real getsockname: the concrete local address on a wildcard bind
     let server = match session.server_addr() {
         Some(a) => peer_addr(a),
         None => listen_addr(listen),
     };
 
-    // Pre-size to the validated Content-Length (already ≤ max_body_size); chunked
-    // bodies with no declared length keep growth-by-doubling.
     let mut body: Vec<u8> = Vec::with_capacity(declared_len.unwrap_or(0));
     while let Some(chunk) = session.read_request_body().await? {
-        // Counting covers chunked bodies that declared no length up front.
         if body.len() + chunk.len() > config.max_body_size {
             reject_payload_too_large(session).await?;
             return Ok(None);
@@ -913,20 +759,20 @@ async fn build_request(
         uri,
         target: Some(target),
         authority,
-        https: false, // plaintext for now; set from TLS once terminated here
+        https: false,
         protocol,
         remote,
         server,
         server_name: config.server_name.clone(),
         server_port: config.server_port,
-        tls: None, // plumb-only until a TLS backend lands
+        tls: None,
         received_at: Some(ctx.received_at),
         headers,
         body,
     }))
 }
 
-/// 413 + close: the unread body is still on the wire, so the connection can't be reused.
+/// Closes the connection: the unread body is still on the wire, so it cannot be reused.
 async fn reject_payload_too_large(session: &mut Session) -> PingoraResult<()> {
     let mut header = ResponseHeader::build(413, Some(1))?;
     header.insert_header("Content-Length", "0")?;
@@ -948,8 +794,7 @@ mod tests {
             .collect()
     }
 
-    /// The Connection-named removals must run before our own Content-Length goes in,
-    /// or PHP could strip the framing out from under the body.
+    /// The Connection-named removals must run before our own Content-Length goes in, or PHP could strip the framing out from under the body.
     #[test]
     fn connection_value_cannot_strip_framing() {
         let head = build_response_header(
@@ -973,7 +818,6 @@ mod tests {
     #[test]
     fn bodyless_statuses_get_no_content_length() {
         for status in [204u16, 304] {
-            // even a declared length stays off a bodiless head
             let head =
                 build_response_header(status, hdrs(&[("X-A", "1")]), Some(0), false, true).unwrap();
             assert!(head.headers.get("content-length").is_none(), "{status}");
@@ -981,8 +825,7 @@ mod tests {
         }
     }
 
-    /// A space is not a tchar, so no front can put this name on the wire. Dropping the
-    /// field must not cost the rest of the response.
+    /// A space is not a tchar, so no front can put this name on the wire; dropping the field must not cost the rest of the response.
     #[test]
     fn unrepresentable_header_is_dropped_not_fatal() {
         let head = build_response_header(
@@ -1011,8 +854,7 @@ mod tests {
         assert!(head.headers.get("transfer-encoding").is_none());
     }
 
-    /// The plugin is the sole author of chunked framing, and a Connection
-    /// value cannot strip it (same slot the Content-Length protection uses).
+    /// The plugin is the sole author of chunked framing and a Connection value cannot strip it.
     #[test]
     fn chunked_is_authored_here_and_protected() {
         let head = build_response_header(
@@ -1084,8 +926,7 @@ mod tests {
         assert_eq!(value_of(&headers, "accept"), Some(&b"text/*"[..]));
     }
 
-    /// Without a case map (h2's From<ReqParts> path) the fallback still yields
-    /// every line, lowercase.
+    /// Without a case map (h2's From<ReqParts> path) the fallback still yields every line, lowercase.
     #[test]
     fn no_case_requests_still_yield_headers() {
         let mut header = RequestHeader::build_no_case("GET", b"/", None).unwrap();
@@ -1096,8 +937,7 @@ mod tests {
         assert_eq!(foos.len(), 2);
     }
 
-    /// RFC 9112 §3.2: repeated/missing/empty Host on 1.1 → 400; a bare 1.0
-    /// request named no authority.
+    /// RFC 9112 §3.2: repeated/missing/empty Host on 1.1 is a 400; a bare 1.0 request named no authority.
     #[test]
     fn authority_follows_the_host_rules() {
         let one = |v: &str| vec![("Host".to_owned(), v.as_bytes().to_vec())];
@@ -1138,8 +978,7 @@ mod tests {
             .collect())
     }
 
-    /// Drop protects the $_SERVER mapping; a dispatcher pool has none, so the
-    /// contract's "names as received" wins there.
+    /// Drop protects the $_SERVER mapping; a dispatcher pool has none, so "names as received" wins there.
     #[test]
     fn drop_is_inert_without_superglobals() {
         let mut header = request_with(&[("X_Forwarded_For", "1.2.3.4")]);
@@ -1156,10 +995,8 @@ mod tests {
     fn only_alphanumerics_and_dash_are_safe_field_names() {
         assert!(is_safe_field_name("x-forwarded-for"));
         assert!(is_safe_field_name("Sec-Ch-Ua-Mobile"));
-        // Aliases today: `-` becomes `_`, and PHP rewrites `.` to `_` as well.
         assert!(!is_safe_field_name("x_forwarded_for"));
         assert!(!is_safe_field_name("x.forwarded.for"));
-        // Legal tchars that do not alias today; the allowlist covers them anyway.
         assert!(!is_safe_field_name("x~foo"));
         assert!(!is_safe_field_name("x$foo"));
     }

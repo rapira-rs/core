@@ -1,7 +1,6 @@
 <?php
 
-// Monolog testFormat: objects keep their class name as a wrapper key, an object
-// with __toString normalizes to that string, and a resource renders as a marker.
+// Monolog testFormat: class name becomes a wrapper key, __toString normalizes to that string, a resource renders as a marker.
 class PlainNorm
 {
     public $foo = 'fooValue';
@@ -15,8 +14,7 @@ class StringableNorm
     }
 }
 
-// Monolog testFormatToStringExceptionHandle: a throwing __toString must not
-// escape the logger.
+// Monolog testFormatToStringExceptionHandle: a throwing __toString must not escape the logger.
 class ToStringError
 {
     public function __toString(): string

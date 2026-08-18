@@ -6,4 +6,4 @@
     unnecessary_transmutes,
     clippy::all
 )]
-include!(concat!(env!("OUT_DIR"), "/bindings.rs")); // bindgen types/fns/consts
+include!(concat!(env!("OUT_DIR"), "/bindings.rs"));

@@ -1,5 +1,4 @@
 <?php
-// Resident worker: each request raises an E_USER_WARNING carrying a marker.
 
 use Rapira\Exception\ClosedException;
 

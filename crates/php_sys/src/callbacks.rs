@@ -12,27 +12,20 @@ use std::ptr::null_mut;
 
 pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
-        // the payload already went to stderr via the panic hook; this line puts
-        // the substitution in the structured log
         tracing::error!(target: "rapira", "panic caught at the FFI boundary; default substituted");
         default
     })
 }
 
-/// Hard cap on response bytes buffered in Rust (outside PHP's memory_limit).
-/// Classic `ub_write` applies it to the whole body (aborts + recycles);
-/// Exchange `writeBody` per chunk (seals the unit truncated) - streamed
-/// responses are otherwise bounded by the frame channel.
-pub(crate) const MAX_BUFFERED_BODY: usize = 1 << 30; // 1 GiB
+pub(crate) const MAX_BUFFERED_BODY: usize = 1 << 30;
 
 struct SapiHeaders(*mut sapi_headers_struct);
 
 impl SapiHeaders {
+    /// http_response_code is an app-controlled c_int; clamping keeps the u16 cast from wrapping.
     fn status(&self) -> u16 {
         let h = unsafe { &*self.0 };
         if h.http_response_code != 0 {
-            // http_response_code is an app-controlled c_int; clamp to a valid HTTP status so the
-            // u16 cast can't wrap (e.g. 70000 -> 4464).
             h.http_response_code.clamp(100, 599) as u16
         } else {
             200
@@ -70,22 +63,16 @@ impl SapiHeader {
     }
 }
 
-/// `tchar`, the only bytes a field name may contain (RFC 9110 §5.6.2,
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2; `field-name = token`, §5.1).
 pub(crate) fn is_tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
-/// A byte a field value may carry: visible ASCII, obs-text (`0x80..=0xff`), SP or HTAB
-/// (RFC 9110 §5.5, https://www.rfc-editor.org/rfc/rfc9110#section-5.5). SP/HTAB are legal
-/// between vchars; the caller already trimmed the ends.
+/// (RFC 9110 §5.5, https://www.rfc-editor.org/rfc/rfc9110#section-5.5)
 pub(crate) fn is_field_value_byte(b: u8) -> bool {
     (b >= 0x20 && b != 0x7f) || b == b'\t'
 }
 
-/// Split one emitted header line into name and value, rejecting anything not
-/// representable on the wire. `sapi_header_op` screens only CR, LF and NUL, so
-/// names with spaces and values with C0 controls still reach us.
 fn split_header_line(line: &[u8]) -> Option<(String, Vec<u8>)> {
     let i: usize = line.iter().position(|&b| b == b':')?;
     let name: &[u8] = line[..i].trim_ascii();
@@ -96,16 +83,10 @@ fn split_header_line(line: &[u8]) -> Option<(String, Vec<u8>)> {
     if !value.iter().all(|&b| is_field_value_byte(b)) {
         return None;
     }
-    // tchar is ASCII, so the name is UTF-8 by construction.
     Some((std::str::from_utf8(name).ok()?.to_owned(), value.to_vec()))
 }
 
-/// CGI meta-variable name for a request field: `HTTP_` + the name uppercased, `-` -> `_`
-/// (RFC 3875 §4.1.18, https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18). The spare
-/// capacity byte is the NUL `CString::new` appends.
-///
-/// `php_register_variable_ex` mangles again on the way in (` `/`.` -> `_`, `[` opens
-/// array syntax), so this is not necessarily the final `$_SERVER` key.
+/// (RFC 3875 §4.1.18, https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18)
 fn cgi_header_name(field: &str) -> CString {
     let mut name: Vec<u8> = Vec::with_capacity(b"HTTP_".len() + field.len() + 1);
     name.extend_from_slice(b"HTTP_");
@@ -119,12 +100,6 @@ fn cgi_header_name(field: &str) -> CString {
     CString::new(name).unwrap_or_default()
 }
 
-/// The owned `$_SERVER` batch: `CONTENT_LENGTH`, one variable per request field, then
-/// extra server vars. Split from [`register_server_variables`] so all allocation
-/// happens before the first register call (see the bailout note there).
-///
-/// Returned as `ManuallyDrop` so no drop glue is pending if a register call bails;
-/// reclaim with `ManuallyDrop::into_inner` on the success path.
 fn cgi_header_vars<'a>(
     headers: &'a [(String, Vec<u8>)],
     content_length: i64,
@@ -152,7 +127,6 @@ fn cgi_header_vars<'a>(
 }
 
 pub(crate) unsafe extern "C" fn sapi_startup_cb(sapi_module: *mut sapi_module_struct) -> c_int {
-    // https://doc.rust-lang.org/reference/expressions/operator-expr.html#raw-borrow-operators
     unsafe { php_module_startup(sapi_module, &raw mut rapira_module_entry) }
 }
 pub(crate) unsafe extern "C" fn sapi_shutdown_cb(_sapi_module: *mut sapi_module_struct) -> c_int {
@@ -165,15 +139,8 @@ pub(crate) unsafe extern "C" fn sapi_deactivate_cb() -> c_int {
     SUCCESS
 }
 
-/// SAPI output callback, invoked through the C shim `rapira_ub_write` (module.c).
-/// On a client disconnect it sets `*aborted = true`; the shim then raises
-/// `php_handle_aborted_connection()` AFTER this frame returns, so the abort's
-/// longjmp never crosses this `catch_unwind` frame.
-///
 /// # Safety
-/// `buf` must point at `len` readable bytes and `aborted` at a writable `bool`,
-/// both valid for the call (PHP guarantees this when firing `ub_write`). Must run
-/// on a worker thread whose `Context` is bound in `SG(server_context)`.
+/// `buf` must point at `len` readable bytes and `aborted` at a writable `bool`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_ub_write(
     buf: *const c_char,
@@ -199,9 +166,6 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
 
             if let Some(tx) = &ctx.sender {
                 if tx.is_closed() {
-                    // receiver dropped = client disconnected: stop buffering. PHP
-                    // ignores ub_write's return, so signal the shim to raise the
-                    // abort after this frame unwinds.
                     ctx.finish(false);
                     unsafe { *aborted = true };
                     return 0;
@@ -212,16 +176,12 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
                         "response body exceeds the host buffer cap ({} + {len} > {MAX_BUFFERED_BODY} bytes); aborting the request",
                         ctx.body.len()
                     );
-                    // over the buffer cap: seal the buffered body as truncated and abort the
-                    // request through the same path as a client disconnect
                     ctx.finish(true);
                     unsafe { *aborted = true };
                     return 0;
                 }
                 let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
                 ctx.body.extend_from_slice(buf);
-                // Body output began *during the handler* (the teardown flush sets
-                // `tearing_down` first): a later error now truncates the body.
                 if !ctx.tearing_down {
                     ctx.stream = StreamState::BodyStreamed;
                 }
@@ -233,8 +193,6 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
         n
     });
     if !completed {
-        // a caught panic dropped this chunk: abort the request rather than serve
-        // a 200 with a hole in the body
         unsafe { *aborted = true };
     }
     written
@@ -242,17 +200,10 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
 
 /// # Safety
 /// A SAPI callback invoked by PHP. `h` must be a valid `*mut sapi_headers_struct`
-/// for the duration of the call (PHP guarantees this when firing the `send_headers`
-/// hook). Must run on a worker thread inside an active request whose `Context` is
-/// bound in `SG(server_context)`.
 pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
     guard(SAPI_HEADER_SEND_FAILED as c_int, || {
         let ctx = unsafe {
             let Some(ctx) = ctx() else {
-                // php_output_op() forwards to ub_write only when this hook returns
-                // SAPI_HEADER_SENT_SUCCESSFULLY (php-src main/output.c:1131-1138).
-                // Bootstrap runs with no bound Context; return success so its
-                // output still reaches ub_write.
                 return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
             };
 
@@ -273,17 +224,11 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
     })
 }
 
-pub(crate) unsafe extern "C" fn flush(_sc: *mut c_void) {
-    // nothing to do on the classic path: the body buffers into the event trio
-    // delivered at finish
-}
+pub(crate) unsafe extern "C" fn flush(_sc: *mut c_void) {}
+
 pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usize {
-    // A short read (fewer than `count` bytes) signals end-of-body: the engine
-    // sets SG(post_read)=1 and stops calling this (php-src main/SAPI.c:232-252).
     with_ctx(0, |ctx| {
         let crate::types::Body::Raw(reader) = &mut ctx.req.body else {
-            // the host parses multipart only for Exchange-style delivery, which
-            // never binds a server context - reaching this arm is a host bug
             tracing::debug!(target: "rapira", "read_post on a host-parsed multipart body");
             return 0;
         };
@@ -302,7 +247,6 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
 }
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
     with_ctx(null_mut(), |ctx| {
-        // the Cookie buffer is request-owned; NULL = no Cookie header (the SAPI convention)
         ctx.c
             .as_ref()
             .and_then(|c| c.cookie.as_ref())
@@ -311,14 +255,7 @@ pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
 }
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
     with_ctx((), |ctx| {
-        // CGI-only callback; the dispatcher path builds no ReqC and never binds a
-        // server context, so a missing one here is a no-op, not an error.
         let Some(reqc) = ctx.c.as_ref() else { return };
-        // php_register_variable_safe emallocs; under OOM it zend_bailout()s, and
-        // a longjmp over a Rust frame with pending drops is UB. This frame holds
-        // no owned Rust values: fixed vars register from borrows into ReqC,
-        // owned batches go through a ManuallyDrop - a bail leaks one batch
-        // instead of corrupting the unwind.
         let put_bytes = |name: &CStr, val: &[u8]| unsafe {
             php_register_variable_safe(
                 name.as_ptr(),
@@ -328,7 +265,6 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             );
         };
         let put = |name: &CStr, val: &str| put_bytes(name, val.as_bytes());
-        // mapping trust policy: https://www.php.net/manual/en/reserved.variables.server.php
         put(c"PHP_SELF", &ctx.req.script_name);
         let doc_uri = ctx
             .req
@@ -350,7 +286,6 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put(c"REQUEST_METHOD", &ctx.req.method);
         put(c"REQUEST_URI", &ctx.req.uri);
         put(c"QUERY_STRING", &ctx.req.query);
-        // borrow the request-lived CString (a lossy conversion would allocate here)
         put_bytes(c"SCRIPT_FILENAME", reqc.script.to_bytes());
         put(c"SCRIPT_NAME", &ctx.req.script_name);
         put(c"SERVER_PROTOCOL", &ctx.req.protocol);
@@ -361,7 +296,6 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put(c"GATEWAY_INTERFACE", "CGI/1.1");
         put(c"HTTPS", if ctx.req.https { "on" } else { "" });
 
-        // borrow the raw token: no owned value on this frame; binary-safe
         let auth_type: &[u8] = ctx
             .req
             .headers
@@ -373,7 +307,6 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
 
         let auth_user = unsafe { (*rapira_sg()).request_info.auth_user };
         if !auth_user.is_null() {
-            // borrows the SAPI-owned buffer, no owned copy
             let user: &CStr = unsafe { CStr::from_ptr(auth_user as *const c_char) };
             put_bytes(c"REMOTE_USER", user.to_bytes());
         }
@@ -382,9 +315,6 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             put_bytes(c"CONTENT_TYPE", ct);
         }
 
-        // Order is load-bearing: registration is last-write-wins, so server vars
-        // override derived HTTP_*/CONTENT_LENGTH. The folded table (one value
-        // per name) keeps that deterministic for repeated field lines.
         let pairs = cgi_header_vars(
             &reqc.folded_headers,
             ctx.req.content_length,
@@ -393,7 +323,6 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         for (name, val) in pairs.iter() {
             put_bytes(name, &val[..]);
         }
-        // success path: reclaim the batch (a bail above longjmps past this, leaking it)
         drop(ManuallyDrop::into_inner(pairs));
     })
 }
@@ -427,12 +356,10 @@ pub(crate) fn send_error_head(c: &mut Context, status: u16) {
     c.commit_head(status, vec![]);
 }
 
-/// Shared response bookkeeping: compute the truncation flag and, if the request
-/// errored before any head was committed, synthesize a head-only 500.
 pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
     let truncated = c.is_truncated(errored);
     if errored {
-        send_error_head(c, 500); // no-op unless nothing committed a head yet
+        send_error_head(c, 500);
     }
     truncated
 }
@@ -483,12 +410,10 @@ mod tests {
             split_header_line(b"X-Bin: \xff\xfe").unwrap().1,
             b"\xff\xfe"
         );
-        // `_` is a tchar, so a response field may carry one.
         assert_eq!(split_header_line(b"X_Custom: 1").unwrap().0, "X_Custom");
     }
 
-    /// The front screens field names against `[A-Za-z0-9-]`; that screen is complete
-    /// only while this mapper rewrites nothing but `-`.
+    /// The front screens field names against `[A-Za-z0-9-]`; that screen is complete only while this mapper rewrites nothing but `-`.
     #[test]
     fn cgi_header_name_rewrites_only_dash() {
         assert_eq!(cgi_header_name("x-foo").to_bytes(), b"HTTP_X_FOO");
@@ -497,13 +422,11 @@ mod tests {
         assert_eq!(cgi_header_name("x~foo").to_bytes(), b"HTTP_X~FOO");
     }
 
-    /// php_register_variable_safe is last-write-wins, so batch order *is* the precedence
-    /// rule: CONTENT_LENGTH, then HTTP_*, then host-supplied server vars.
+    /// php_register_variable_safe is last-write-wins, so batch order is the precedence rule: CONTENT_LENGTH, then HTTP_*, then host-supplied server vars.
     #[test]
     fn registration_order_gives_server_vars_precedence() {
         let headers = hdrs(&[("accept", "text/*")]);
         let server_vars = [("HTTP_ACCEPT".to_owned(), "override".to_owned())];
-        // no bailout to survive outside the callback: reclaim the batch normally
         let pairs = ManuallyDrop::into_inner(cgi_header_vars(&headers, 12, &server_vars));
         assert_eq!(
             names(&pairs),

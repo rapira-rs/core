@@ -37,8 +37,7 @@ void rapira_release_temporary_streams(void);
 int rapira_request_activate(void);
 int rapira_request_shutdown(void);
 size_t rapira_ub_write(const char *str, size_t len);
-// array_init_size and smart_str_free are macro/inline-only; shims for the
-// Rust builders
+// array_init_size and smart_str_free are macro/inline-only; shims for Rust
 void rapira_array_init(zval *zv, uint32_t size);
 void rapira_smart_str_free(smart_str *s);
 
@@ -57,15 +56,7 @@ enum {
     RAPIRA_HANDLE_RECYCLE = 2,
 };
 
-// Object layouts with embedded C data, declared here so bindgen generates them
-// and Rust reads named fields instead of a hardcoded offset.
-// https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
-// +---------------------+  <- true allocation start
-// | void *job           |     invisible to PHP
-// | zval request        |
-// +---------------------+  <- +RAPIRA_STD_OFFSET(rapira_exchange_obj)
-// | zend_object std     |  <- THE pointer everyone else holds
-// +---------------------+
+// C data sits before zend_object std; declared here so bindgen gives Rust named fields instead of a hardcoded offset: https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
 typedef struct {
     void *job; // Box<ExchangeState> -> owned by Rust, NULLing when released
     zval request; // cached Rapira\Http\Request; IS_UNDEF until getRequest()
@@ -78,18 +69,14 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
-// Class entries, MINIT-written (rapira_register_classes). Rust binds them as
-// static muts; all are assigned before any object of these classes can exist.
-// rapira.stub.php
+// Class entries for rapira.stub.php, bound in Rust as static muts; rapira_register_classes assigns them in MINIT, before any object of these classes can exist.
 extern zend_class_entry *rapira_ce_log_level;
-// exceptions
 extern zend_class_entry *rapira_ce_closed_exception;
 extern zend_class_entry *rapira_ce_timeout_exception;
 extern zend_class_entry *rapira_ce_work_discarded_exception;
 extern zend_class_entry *rapira_ce_not_in_dispatcher_mode_error;
 extern zend_class_entry *rapira_ce_not_in_worker_mode_error;
 extern zend_class_entry *rapira_ce_already_finalized_error;
-// http
 extern zend_class_entry *rapira_ce_http_tls;
 extern zend_class_entry *rapira_ce_http_multipart;
 extern zend_class_entry *rapira_ce_internal_http_dispatcher;
@@ -105,10 +92,7 @@ extern zend_class_entry *rapira_ce_http_form_field;
 extern zend_class_entry *rapira_ce_http_uploaded_file;
 extern zend_class_entry *rapira_ce_http_request;
 
-// PHP_VERSION_ID as it was in the headers this binary compiled against. The
-// linked libphp reports its own through php_version_id(), so comparing the two
-// detects a swapped-out library. Both are compile-time constants, readable
-// before any startup has run.
+// PHP_VERSION_ID from the headers this binary compiled against; differs from the linked libphp's php_version_id() when the library was swapped out.
 unsigned int rapira_headers_php_version_id(void);
 
 void rapira_receive_untimed(void);

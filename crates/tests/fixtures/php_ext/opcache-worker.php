@@ -4,8 +4,7 @@ $handler = static function (): void {
 		echo 'skip';
 		return;
 	}
-	// opcache_get_status() is registered whether or not accel_startup() succeeded,
-	// and returns false when it did not - so this distinguishes the two states.
+	// opcache_get_status() is registered even when accel_startup() failed, and returns false in that case
 	$status = opcache_get_status(false);
 	echo is_array($status) && ($status['opcache_enabled'] ?? false)
 		? 'opcache:enabled'

@@ -1,26 +1,17 @@
-//! Master-death backstop. One pipe whose write end the master holds forever and
-//! never writes; each worker keeps the read end and closes its inherited write
-//! end. When the master dies every write end is gone, so the worker's read end
-//! sees EOF and drains. Linux additionally arms `PR_SET_PDEATHSIG` for
-//! promptness (reliable because the master is single-threaded).
-
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 #[cfg(not(target_os = "linux"))]
 use crate::signals::set_cloexec;
 
-/// Both ends of the lifeline pipe, master-owned. `wr` is the token whose
-/// disappearance signals master death to every worker's `rd`.
+/// `wr` is never written: its disappearance is what signals master death to every worker's `rd`.
 pub struct Lifeline {
     pub rd: OwnedFd,
     pub wr: OwnedFd,
 }
 
 impl Lifeline {
-    /// Create the pipe with both ends `CLOEXEC` (fork inherits fds regardless of
-    /// CLOEXEC; the flag only keeps them out of exec'd processes). Linux uses
-    /// `pipe2` in a single syscall; other platforms fall back to `pipe` + `fcntl`.
+    /// Both ends are `CLOEXEC`: fork still inherits them, the flag only keeps them out of exec'd processes.
     pub fn create() -> anyhow::Result<Lifeline> {
         let mut fds = [0 as RawFd; 2];
         #[cfg(target_os = "linux")]
@@ -44,19 +35,12 @@ impl Lifeline {
         })
     }
 
-    /// Duplicate the read end for a worker. The worker owns this copy; the
-    /// master keeps its originals. The dup carries no state the child shares.
     pub fn dup_read_end(&self) -> io::Result<OwnedFd> {
         self.rd.try_clone()
     }
 }
 
-/// Worker side of the pipe: spawn a thread that raises SIGQUIT (pending on the
-/// blocked set → picked up by the worker's signal watcher as a graceful drain)
-/// when the master dies, because the inherited read end returns EOF once every
-/// master-held write end is gone.
-///
-/// Logs under `rapira`, the worker-lifecycle target, not this crate's `master`.
+/// On lifeline EOF the SIGQUIT must be process-directed (`kill`, not `raise`): a thread-directed blocked signal stays in this thread's pending set where the worker's `sigwait` thread never sees it.
 pub fn spawn_lifeline_watch(lifeline: OwnedFd) {
     std::thread::Builder::new()
         .name("rapira-lifeline".into())
@@ -67,11 +51,6 @@ pub fn spawn_lifeline_watch(lifeline: OwnedFd) {
                 let n = unsafe { libc::read(lifeline.as_raw_fd(), (&raw mut byte).cast(), 1) };
                 if n == 0 {
                     tracing::warn!(target: "rapira", "master died (lifeline EOF); draining");
-                    // Process-directed (kill self), not raise(): raise is
-                    // thread-directed, so a blocked SIGQUIT would sit in this
-                    // thread's private pending set where the worker's sigwait
-                    // (on another thread) never sees it. kill() targets the
-                    // process, landing in the shared pending set it drains.
                     unsafe { libc::kill(libc::getpid(), libc::SIGQUIT) };
                     return;
                 }
@@ -80,7 +59,7 @@ pub fn spawn_lifeline_watch(lifeline: OwnedFd) {
                 {
                     continue;
                 }
-                return; // master never writes; anything else is fd teardown
+                return;
             }
         })
         .expect("spawn lifeline thread");

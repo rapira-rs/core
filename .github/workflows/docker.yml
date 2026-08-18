@@ -11,16 +11,12 @@ concurrency:
     group: docker-${{ github.ref }}
     cancel-in-progress: false
 
-# Every tag names its PHP minor. There is deliberately no `latest` and no
-# unsuffixed version tag: the payload only works against the minor it was built
-# for (rapira refuses to boot otherwise), and a tag that hides which one it
-# carries is a tag nobody can use safely.
+# Every tag names its PHP minor: the payload only boots against the minor it was built for, so there is no `latest` and no unsuffixed version tag.
 env:
     IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
     build:
-        # Tags only. Every tag is derived from GITHUB_REF_NAME
         if: startsWith(github.ref, 'refs/tags/')
         runs-on: ${{ matrix.runner }}
         timeout-minutes: 45

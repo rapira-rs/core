@@ -1,8 +1,3 @@
-//! Shared-memory scoreboard: one cache-line slot per worker process, created by
-//! the master via anonymous shared mmap before any fork and inherited by every
-//! worker. Workers write their own slot; the master reads all slots for pool
-//! scaling decisions and writes only STARTING (at fork) and FREE (after reap).
-
 use std::sync::atomic::{
     AtomicU32, AtomicU64,
     Ordering::{Relaxed, Release},
@@ -10,14 +5,13 @@ use std::sync::atomic::{
 
 pub const SB_MAX_SLOTS: usize = 4096;
 
-pub const SLOT_FREE: u32 = 0; // no worker bound (master clears after reap)
-pub const SLOT_STARTING: u32 = 1; // master forked; worker has not reported in yet
-pub const SLOT_IDLE: u32 = 2; // parked waiting for a job - spare capacity
-pub const SLOT_ACTIVE: u32 = 3; // executing a request
-pub const SLOT_DRAINING: u32 = 4; // self-initiated exit pending (quota / unhealthy)
+pub const SLOT_FREE: u32 = 0;
+pub const SLOT_STARTING: u32 = 1;
+pub const SLOT_IDLE: u32 = 2;
+pub const SLOT_ACTIVE: u32 = 3;
+pub const SLOT_DRAINING: u32 = 4; // worker-initiated exit pending
 
-/// The live view over one mapped slot. Single-writer (its worker); the master
-/// only reads it, except for the STARTING/FREE ownership transitions.
+/// Single-writer slot: only its worker mutates it, the master writes just the STARTING/FREE transitions.
 #[repr(C, align(64))]
 pub struct SharedSlot {
     pub state: AtomicU32,
@@ -34,8 +28,7 @@ pub struct SharedSlot {
 
 const _: () = assert!(size_of::<SharedSlot>() == 64 && align_of::<SharedSlot>() == 64);
 
-/// Copy view over the mapping; the addresses are identical in every forked
-/// child because the mmap happens once, pre-fork.
+/// Copy view over the mapping; addresses are identical in every forked child because the mmap happens once, pre-fork.
 #[derive(Clone, Copy)]
 pub struct Scoreboard {
     slots: &'static [SharedSlot],
@@ -54,8 +47,7 @@ pub struct SlotSnapshot {
     pub last_activity_ms: u64,
 }
 
-/// Milliseconds on `CLOCK_MONOTONIC`: cross-process comparable within one boot
-/// and immune to wall-clock steps that would fake request/idle ages.
+/// Milliseconds on `CLOCK_MONOTONIC`: cross-process comparable within one boot and immune to wall-clock steps.
 pub fn now_millis() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -67,21 +59,15 @@ pub fn now_millis() -> u64 {
 }
 
 impl Scoreboard {
-    /// Create the shared mapping. Master-side, pre-fork; also the in-process
-    /// path with `nslots = 1` (tests, fused single-process boot).
+    /// Master-side, pre-fork: the mapping must exist before any fork inherits it.
     pub fn create(nslots: usize) -> anyhow::Result<Scoreboard> {
         anyhow::ensure!(
             (1..=SB_MAX_SLOTS).contains(&nslots),
             "scoreboard slots out of range: {nslots}"
         );
         let bytes = nslots * size_of::<SharedSlot>();
-        // SAFETY: the single mmap->&'static cast in the codebase.
-        //  * MAP_SHARED|MAP_ANONYMOUS is page-aligned (>= 64) and zero-filled; zero
-        //    is a valid bit pattern for every field (atomic ints and u8 arrays).
-        //  * No implicit padding (field sizes sum to 64; const assert above).
-        //  * The mapping is never munmap'd -> lives for the process and every
-        //    fork -> 'static.
-        //  * All post-publication mutation goes through atomics.
+        // SAFETY:
+        // MAP_SHARED|MAP_ANONYMOUS is page-aligned and zero-filled (a valid bit pattern for every field), and the mapping is never munmap'd, so the slice is 'static.
         unsafe {
             let ptr = libc::mmap(
                 std::ptr::null_mut(),
@@ -113,18 +99,15 @@ impl Scoreboard {
         self.slots
     }
 
-    /// Master-side, at fork time: reserve the slot so ondemand suppression
-    /// and spare-capacity math see the in-flight fork.
+    /// Master-side at fork time: reserves the slot so scaling math sees the in-flight fork.
     pub fn set_starting(&self, i: usize) {
         if let Some(s) = self.slots.get(i) {
-            // timestamp before state, matching the worker-side store order
             s.last_activity_ms.store(now_millis(), Relaxed);
             s.state.store(SLOT_STARTING, Release);
         }
     }
 
-    /// Master-side, after reaping the slot's worker; the slot may be handed to
-    /// a new fork afterwards.
+    /// Master-side, after reaping the slot's worker; the slot may be handed to a new fork afterwards.
     pub fn clear(&self, i: usize) {
         if let Some(s) = self.slots.get(i) {
             s.pid.store(0, Relaxed);
@@ -153,7 +136,7 @@ impl Scoreboard {
 }
 
 impl SharedSlot {
-    /// Claim + reset. Exactly once per worker process, before requests flow.
+    /// Worker-side claim + reset, exactly once per process before requests flow.
     pub fn bind(&'static self, pid: u32) {
         self.handled.store(0, Relaxed);
         self.errors.store(0, Relaxed);

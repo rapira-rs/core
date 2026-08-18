@@ -21,8 +21,7 @@ pub fn php_lock() -> sync::MutexGuard<'static, ()> {
 }
 
 pub fn set_phprc(_php: &sync::MutexGuard<'static, ()>, ini: &Path) {
-    // SAFETY: PHP_LOCK is held for as long as `_php` lives, so nothing reads the environment
-    // concurrently.
+    // SAFETY: PHP_LOCK is held while `_php` lives, so nothing reads the environment concurrently.
     unsafe { set_var("PHPRC", ini) };
 }
 
@@ -73,8 +72,7 @@ pub struct Resp {
     pub truncated: bool,
     /// An `End` frame arrived; false = the producer died first.
     pub ended: bool,
-    /// Head frames seen; `head` keeps only the last, so a duplicate would
-    /// otherwise be invisible.
+    /// Head frames seen; `head` keeps only the last, so a duplicate would otherwise be invisible.
     pub heads: u32,
 }
 
@@ -146,9 +144,7 @@ fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Ve
     Ok(out)
 }
 
-/// Poll until a first frame arrives (or `deadline` passes), then collect the
-/// stream. None = nothing arrived in time. A producer that died with no
-/// frames yields `Resp::default()` (no head, not ended).
+/// Poll for a first frame until `deadline`: None = nothing arrived in time, a producer that died with no frames yields `Resp::default()`.
 pub fn drain_resp_deadline(
     rx: &mut mpsc::Receiver<Frame>,
     deadline: std::time::Instant,
@@ -177,7 +173,6 @@ pub fn drain_resp_deadline(
     }
 }
 
-/// Collect a whole response stream.
 pub fn drain_resp(mut rx: mpsc::Receiver<Frame>) -> Resp {
     let mut resp = Resp::default();
     while let Some(frame) = rx.blocking_recv() {
@@ -188,20 +183,17 @@ pub fn drain_resp(mut rx: mpsc::Receiver<Frame>) -> Resp {
     resp
 }
 
-/// Drain a response to `(status, body)`. Status is 0 if no head was produced
-/// (or the worker died before sealing one).
+/// Drain to `(status, body)`; status is 0 when no head was produced.
 pub fn drain(rx: mpsc::Receiver<Frame>) -> (u16, String) {
     let r = drain_resp(rx);
     (r.status(), r.body_string())
 }
 
-/// Async sibling of `php_lock` for `#[tokio::test]`.
 pub async fn php_lock_async() -> tokio::sync::MutexGuard<'static, ()> {
     init_php_env();
     PHP_LOCK_ASYNC.lock().await
 }
 
-/// Async sibling of `drain_resp`.
 pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
     let mut resp = Resp::default();
     while let Some(frame) = rx.recv().await {
@@ -212,20 +204,17 @@ pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
     resp
 }
 
-/// Async sibling of `drain`.
 pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> (u16, String) {
     let r = drain_resp_async(rx).await;
     (r.status(), r.body_string())
 }
 
+/// Sets PHPRC once, before any `Rapira::start`: https://www.php.net/manual/en/configuration.file.php
 fn init_php_env() {
     PHP_ENV.call_once(|| {
-        // SAFETY: the Once runs this exactly once, before any Rapira::start /
-        // php_module_startup; mirrors the existing `unsafe { set_var }` usage in the
-        // test bodies (e.g. getenv_classic, basic_tests.rs).
+        // SAFETY: the Once runs this exactly once, before any Rapira::start / php_module_startup.
         unsafe {
             set_var(
-                // https://www.php.net/manual/en/configuration.file.php
                 "PHPRC",
                 concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/ini/shared/php.ini"),
             );
@@ -239,22 +228,18 @@ pub struct Captured {
     pub level: tracing::Level,
     pub target: String,
     pub message: String,
-    /// The `context` field, empty when the record carries none. Rapira\log()
-    /// puts its JSON-encoded context array here.
+    /// The `context` field, empty when the record carries none; Rapira\log() puts its JSON-encoded context array here.
     pub context: String,
 }
 
 static LOG_CAPTURE: Mutex<Vec<Captured>> = Mutex::new(Vec::new());
 
-/// The captured records. A failing assertion holds this guard while it panics, so the lock is
-/// recovered rather than unwrapped: otherwise one real failure poisons the buffer and every
-/// later test in the binary dies on `PoisonError` instead of its own assertion.
+/// The captured records; the lock is poison-recovered so one failing assertion cannot make every later test in the binary die on `PoisonError`.
 pub fn captured() -> sync::MutexGuard<'static, Vec<Captured>> {
     LOG_CAPTURE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Collects the `message` and `context` fields; any `log.*` metadata fields from
-/// still-bridged records are ignored.
+/// Collects the `message` and `context` fields; `log.*` metadata fields from still-bridged records are ignored.
 #[derive(Default)]
 struct Msg {
     message: String,
@@ -277,8 +262,7 @@ impl tracing::field::Visit for Msg {
             *slot = v.to_owned();
         }
     }
-    // A `%value` field arrives here: tracing records Display through record_debug,
-    // wrapped in a format_args! whose Debug forwards to Display.
+    // A `%value` field lands here: tracing wraps Display in a format_args! whose Debug forwards to it.
     fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
         if let Some(slot) = self.slot(f.name()) {
             *slot = format!("{v:?}");
@@ -306,13 +290,11 @@ impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLaye
 /// One `app`-target record left by `\Rapira\log()`: level, message, context JSON.
 pub type AppRecord = (tracing::Level, String, String);
 
-/// Run `script` in classic mode and return the `app`-target records it left, in
-/// emission order. The fixture must echo `logged` as its last act, so a script
-/// that died half way cannot masquerade as one that logged nothing.
+/// Runs `script` in classic mode and returns its `app`-target records; the fixture must echo `logged` last, so a script that died half way cannot masquerade as one that logged nothing.
 pub fn app_records(script: &str) -> Vec<AppRecord> {
     let _guard = php_lock();
     init_log_capture();
-    captured().clear(); // drop anything captured by earlier tests
+    captured().clear();
 
     let r = Rapira::start(Mode::Classic).expect("classic boot");
     let h = r.handle();
@@ -330,9 +312,7 @@ pub fn app_records(script: &str) -> Vec<AppRecord> {
         .collect()
 }
 
-/// The one `app` record `script` was expected to leave. Asserting the count
-/// rather than taking the first means a stray extra record fails the test
-/// instead of going unnoticed.
+/// The one `app` record `script` must leave; asserting the count fails the test on a stray extra record instead of ignoring it.
 pub fn app_record(script: &str) -> AppRecord {
     let records = app_records(script);
     assert_eq!(
@@ -343,14 +323,12 @@ pub fn app_record(script: &str) -> AppRecord {
     records.into_iter().next().expect("checked above")
 }
 
-/// Install the capturing subscriber once (records all `tracing` output - plus
-/// anything still on the `log` facade - into `LOG_CAPTURE`).
+/// Installs the capturing subscriber once, unfiltered, so even trace-level records from `tracing` and the `log` facade reach `LOG_CAPTURE`.
 pub fn init_log_capture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        // No filter: every record is captured, down to trace-level masked diagnostics.
         let _ = tracing_subscriber::registry().with(CaptureLayer).try_init();
     });
 }

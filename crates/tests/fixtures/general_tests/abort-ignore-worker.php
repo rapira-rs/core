@@ -10,11 +10,10 @@ $handler = static function (): void {
 		return;
 	}
 	ignore_user_abort(true);
-	// The test waits for the 'held' record, then drops the receiver; the
-	// sleep guarantees the drop has landed before the write observes it.
+	// the test drops the receiver after 'held'; the sleep lets the drop land before the write
 	\Rapira\log('held');
 	usleep(300000);
-	echo "payload\n"; // aborted write: the raised abort must NOT bail
+	echo "payload\n"; // aborted write: the raised abort must not bail
 	TrackIgnore::$reached++; // ignore_user_abort=1: the handler keeps running
 };
 while (\Rapira\handle_request($handler)) {

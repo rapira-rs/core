@@ -1,13 +1,7 @@
-//! Worker mode (`\Rapira\handle_request`) smoke set - per-job superglobals,
-//! the draining-false contract, the wrong-mode gates, one test per
-//! cycle-terminal state - plus the per-job hygiene pins ($_ENV survival,
-//! proto_num). The bulk of worker-mode coverage lives in the ported suites.
-
 use php_sys::{Mode, Rapira};
 use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
-/// Superglobals are rebuilt per job over the resident loop; the response is
-/// the buffered classic-parity trio.
+/// Superglobals are rebuilt per job over the resident loop: query state must not leak.
 #[test]
 fn worker_serves_with_per_job_superglobals() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -17,7 +11,6 @@ fn worker_serves_with_per_job_superglobals() -> anyhow::Result<()> {
     let resp = drain_resp(h.handle_blocking(req("/?q=zap", "worker/hello-worker.php"))?);
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body_string(), "hello:GET:zap");
-    // php appends default_charset to a bare text/* content-type
     assert_eq!(
         resp.header("content-type").as_deref(),
         Some("text/plain;charset=UTF-8"),
@@ -36,8 +29,7 @@ fn worker_serves_with_per_job_superglobals() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Closing the intake makes handle_request() return false; the script runs to
-/// completion after the loop and the worker stops cleanly (Cycle::Stop).
+/// Closing the intake makes handle_request() return false: the post-loop code runs exactly once.
 #[test]
 fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -51,7 +43,7 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
         assert_eq!(resp.body_string(), want, "resident state must accumulate");
     }
     drop(h);
-    r.shutdown(); // joins the worker: false reached the loop, the script wound down
+    r.shutdown();
 
     let exited = captured()
         .iter()
@@ -61,8 +53,7 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// classic mode: the gate throws `NotInWorkerModeError` before any intake is
-/// touched, and ZPP rejects a non-callable ahead of the gate.
+/// Classic mode: the gate throws `NotInWorkerModeError`, and ZPP rejects a non-callable ahead of it.
 #[test]
 fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -84,8 +75,7 @@ fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// dispatcher mode: the gate refuses before the shared intake is touched - an
-/// ungated call would steal the unit and serve it with no context bound.
+/// Dispatcher mode: the gate refuses before the shared intake is touched, so no unit is stolen.
 #[test]
 fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -123,8 +113,7 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// exit() inside a handler finishes that response and keeps the resident loop
-/// alive with its state: EXIT is not a recycle.
+/// exit() inside a handler ships that response and leaves the resident loop and its state alive.
 #[test]
 fn exit_in_a_handler_survives_the_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -142,8 +131,7 @@ fn exit_in_a_handler_survives_the_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A script that ends its own loop with the channel open classifies Recycle:
-/// the next job re-bootstraps and is served by the fresh cycle.
+/// A self-stopping loop classifies Recycle: the next job re-bootstraps and is still served.
 #[test]
 fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -160,7 +148,6 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
     drop(h);
     r.shutdown();
 
-    // two served cycles + the final drained bootstrap that saw closure
     let turns = captured()
         .iter()
         .filter(|c| c.target == "app" && c.message == "one-turn-done")
@@ -169,14 +156,12 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A bootstrap that never calls handle_request() is a boot failure: the shed
-/// path answers 503, never a hang or an empty 200.
+/// A bootstrap that never calls handle_request() sheds 503 instead of hanging or answering 200.
 #[test]
 fn never_looping_script_sheds_503() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/never-loop-worker.php")))?;
     let h = r.handle();
-    // deadline-bounded: the no-hang claim must fail as a test, not block the suite
     let mut rx = h.handle_blocking(req("/", "worker/never-loop-worker.php"))?;
     let resp = tests::drain_resp_deadline(
         &mut rx,
@@ -189,9 +174,7 @@ fn never_looping_script_sheds_503() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Bootstrap-populated $_ENV entries survive a later-compiled file that
-/// mentions $_ENV: php_auto_globals_create_env dtors the array before checking
-/// variables_order, so a re-armed _ENV would wipe them mid-cycle.
+/// Bootstrap $_ENV survives late compilation: php_auto_globals_create_env dtors the array before checking variables_order.
 #[test]
 fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -206,9 +189,7 @@ fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `Location:` on a POST answers 303 on HTTP/1.1 (sapi_header_op's proto_num
-/// arm). sapi_activate resets proto_num to 1000, so without the post-activate
-/// re-apply every redirect degrades to 302.
+/// `Location:` on a POST answers 303: sapi_activate resets proto_num, so a missing re-apply degrades it to 302.
 #[test]
 fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -220,7 +201,6 @@ fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
     assert_eq!(resp.status(), 303);
     assert_eq!(resp.header("location").as_deref(), Some("/elsewhere"));
 
-    // GET keeps 302 - the arm is method-conditional
     let resp = drain_resp(h.handle_blocking(req("/", "worker/location-worker.php"))?);
     assert_eq!(resp.status(), 302);
     drop(h);
@@ -228,8 +208,7 @@ fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Classic mode has the same populate-before-activate defect; the shared
-/// re-apply covers it too.
+/// Classic mode hits the same populate-before-activate defect and must also answer 303.
 #[test]
 fn post_location_redirects_303_in_classic_mode() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -244,9 +223,7 @@ fn post_location_redirects_303_in_classic_mode() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A client that vanishes while its job is still queued is discarded by the
-/// pre-handout probe: without it the handler runs, its write aborts, and the
-/// whole worker recycles for a request nobody is waiting on.
+/// A client that vanishes while queued is discarded before handout: the handler must not run and recycle the worker.
 #[test]
 fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -255,7 +232,6 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("worker/held-worker.php")))?;
     let h = r.handle();
 
-    // occupy the worker, then queue a job and abandon it while it waits
     let rx_a = h.handle_blocking(req("/", "worker/held-worker.php"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !captured()
@@ -265,26 +241,23 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
         assert!(std::time::Instant::now() < deadline, "fixture never held");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    drop(h.handle_blocking(req("/", "worker/held-worker.php"))?); // abandoned while queued
+    drop(h.handle_blocking(req("/", "worker/held-worker.php"))?);
     let resp_a = drain_resp(rx_a);
     assert_eq!(resp_a.body_string(), "done");
 
     let resp = drain_resp(h.handle_blocking(req("/?probe=count", "worker/held-worker.php"))?);
-    // probe-discarded: 1 run, not 2 (ran + aborted) and not 0 (recycled)
     assert_eq!(resp.body_string(), "runs=1");
     drop(h);
     r.shutdown();
     Ok(())
 }
 
-/// handle_request() from inside its own handler is refused by the re-entrancy
-/// guard; the outer job still completes.
+/// handle_request() from inside its own handler is refused: no deadlock, and the outer job completes.
 #[test]
 fn nested_handle_request_is_refused() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("worker/nested-worker.php")))?;
     let h = r.handle();
-    // deadline-bounded: a guard regression that deadlocks must fail, not hang
     let mut rx = h.handle_blocking(req("/", "worker/nested-worker.php"))?;
     let resp = tests::drain_resp_deadline(
         &mut rx,

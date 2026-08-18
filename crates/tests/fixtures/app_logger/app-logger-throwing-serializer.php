@@ -1,7 +1,6 @@
 <?php
 
-// A logger is called from catch blocks: an exception thrown inside a context
-// value's jsonSerialize() must not escape log() or kill the script.
+// An exception thrown inside a context value's jsonSerialize() must not escape log() or kill the script.
 final class Bomb implements \JsonSerializable
 {
 	public function jsonSerialize(): mixed

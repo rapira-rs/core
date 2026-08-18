@@ -1,19 +1,12 @@
-//! Master self-pipe: an async-signal-safe handler translates signals into
-//! bytes on a nonblocking `AF_UNIX` socketpair that the poll loop drains, with
-//! a `sigfillset` mask on the handler, unblock-all after install, and a
-//! `getpid` last-resort guard.
-
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use libc::c_int;
 
-/// Write end of the self-pipe, read by the async-signal-safe handler. `-1`
-/// until install. Set once, before handlers are armed.
+/// Write end of the self-pipe; `-1` until install, set once before handlers are armed.
 static SELF_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
-/// Master pid captured at install; the handler refuses to write from any other
-/// process (a child that took a signal inside the fork window).
+/// Master pid captured at install; the handler refuses to write from any other process.
 static MASTER_PID: AtomicI32 = AtomicI32::new(0);
 
 /// Control bytes emitted by the handler, consumed by the poll loop.
@@ -36,15 +29,13 @@ pub(crate) const MASTER_SIGNALS: [c_int; 7] = [
     libc::SIGHUP,
 ];
 
-/// Owned ends of the self-pipe socketpair.
 pub(crate) struct SelfPipe {
     pub rd: OwnedFd,
     pub wr: OwnedFd,
 }
 
 impl Drop for SelfPipe {
-    /// Disarm the handler before the fds close: a signal after `run` returns
-    /// must not write into whatever reused the write end's fd number.
+    /// Disarm the handler before the fds close: a later signal must not write into a reused fd number.
     fn drop(&mut self) {
         SELF_PIPE_WR.store(-1, Ordering::Relaxed);
     }
@@ -71,10 +62,8 @@ fn errno_set(v: c_int) {
     unsafe { *errno_location() = v }
 }
 
-/// Async-signal-safe: `getpid`, `write`, and errno save/restore only.
+/// Async-signal-safe (`getpid`, `write`, errno save/restore); the pid guard keeps a child that took a signal inside the fork window out of the master's pipe.
 extern "C" fn master_sig_handler(signo: c_int) {
-    // A child that caught a signal between fork() and its disposition reset
-    // must never write into the master's pipe.
     // SAFETY: getpid is async-signal-safe.
     if unsafe { libc::getpid() } != MASTER_PID.load(Ordering::Relaxed) {
         return;
@@ -92,11 +81,6 @@ extern "C" fn master_sig_handler(signo: c_int) {
     let saved = errno_get();
     let fd = SELF_PIPE_WR.load(Ordering::Relaxed);
     if fd >= 0 {
-        // Nonblocking stream socket: EAGAIN on a full buffer drops the byte.
-        // The loop drains fully on every wake, so the buffer can only fill
-        // under a mass-exit storm of 'C' bytes; 'C' loss is harmless (any
-        // surviving byte drives a full reap), and a control byte dropped in
-        // that window is accepted as lost.
         // SAFETY: write to a valid fd from a 1-byte stack buffer.
         unsafe { libc::write(fd, (&raw const byte).cast(), 1) };
     }
@@ -129,7 +113,6 @@ pub(crate) fn set_cloexec(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-/// Build a sigset from an explicit list (no ambient state).
 pub(crate) fn sigset(sigs: &[c_int]) -> libc::sigset_t {
     // SAFETY: zeroed sigset_t is initialized in full by sigemptyset below.
     let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -148,22 +131,7 @@ fn sigprocmask(how: c_int, set: &libc::sigset_t) {
     unsafe { libc::sigprocmask(how, set, std::ptr::null_mut()) };
 }
 
-/// Block {USR1, USR2, CHLD, HUP} very early - before any handlers exist - so a
-/// stray USR1/USR2/HUP (default disposition: terminate) cannot kill the process
-/// during boot.
-///
-/// As pid 1 the stop signals join them. A pid-namespace init is
-/// SIGNAL_UNKILLABLE: the kernel drops a signal whose disposition is still
-/// SIG_DFL rather than applying the default action, so a stop arriving before
-/// [`install_master_signals`] would be lost outright - `docker stop` during
-/// boot would do nothing until the kill timer fired. Blocked, it stays pending
-/// and the master acts on it the moment it unblocks. Everywhere else SIG_DFL
-/// still terminates, which is what keeps a slow or wedged boot interruptible
-/// from a terminal.
-/// https://man7.org/linux/man-pages/man7/signal.7.html
-///
-/// Workers are unaffected either way: the fork bracket replaces the whole mask
-/// with SIG_SETMASK.
+/// Blocks the terminate-by-default signals before any handler exists; as pid 1 the stop trio joins them because a SIGNAL_UNKILLABLE init drops signals still on SIG_DFL instead of applying the default action. https://man7.org/linux/man-pages/man7/signal.7.html
 pub fn block_early_signals() {
     sigprocmask(
         libc::SIG_BLOCK,
@@ -178,13 +146,9 @@ pub fn block_early_signals() {
     }
 }
 
-/// Install the master sigaction set on a fresh self-pipe, then unblock all
-/// signals. Must run in the master after PHP MINIT: handlers exist only after
-/// the engine is up, and Zend never touches them since the master never calls
-/// `php_request_startup`.
+/// Must run in the master after PHP MINIT; Zend leaves these dispositions alone because the master never calls `php_request_startup`.
 pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
     let mut sp = [0 as RawFd; 2];
-    // AF_UNIX SOCK_STREAM self-pipe, both ends O_NONBLOCK + FD_CLOEXEC.
     // SAFETY: sp is a 2-element array the syscall fills with valid fds.
     anyhow::ensure!(
         unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sp.as_mut_ptr()) } == 0,
@@ -200,12 +164,10 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
     MASTER_PID.store(unsafe { libc::getpid() }, Ordering::Relaxed);
     SELF_PIPE_WR.store(sp[1], Ordering::Relaxed);
 
-    // SAFETY: standard sigaction install; act is fully initialized, mask is a
-    // live sigset_t, null old-action pointer discards the previous handler.
+    // SAFETY: act is fully initialized, mask is a live sigset_t, null old-action pointer discards the previous handler.
     unsafe {
         let mut act: libc::sigaction = std::mem::zeroed();
         act.sa_sigaction = master_sig_handler as *const () as usize;
-        // Handler runs with all signals blocked, so it is never re-entered.
         libc::sigfillset(&mut act.sa_mask);
         act.sa_flags = 0;
         for sig in MASTER_SIGNALS {
@@ -217,7 +179,6 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
         }
     }
 
-    // Undo the early-boot block: from here signals land in the handler.
     let mut all: libc::sigset_t = sigset(&[]);
     // SAFETY: all is a live sigset_t.
     unsafe { libc::sigfillset(&mut all) };
@@ -230,8 +191,6 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
     })
 }
 
-/// Master pid recorded at install; children compare `getppid` against it
-/// inside the Linux-only PDEATHSIG window check.
 #[cfg(target_os = "linux")]
 pub(crate) fn master_pid() -> c_int {
     MASTER_PID.load(Ordering::Relaxed)
@@ -255,8 +214,6 @@ mod tests {
                 "signal {sig} is not blocked during boot"
             );
         }
-        // The stop trio is pid-1-only, and a test runner is pid 1 whenever the
-        // suite runs as a container's entrypoint.
         // SAFETY: getpid is always safe.
         let want_stop = c_int::from(unsafe { libc::getpid() } == 1);
         for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGQUIT] {

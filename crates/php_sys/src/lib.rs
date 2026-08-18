@@ -28,18 +28,14 @@ pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira};
 pub use types::{Frame, Mode, Request, ResponseHead};
 
-// Zend SUCCESS/FAILURE differ across php-src versions, so they are hardcoded here rather
-// than bound from the headers.
+// Zend SUCCESS/FAILURE differ across php-src versions, so they are hardcoded rather than bound from the headers.
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
 
-// HASH_KEY_IS_STRING is a #define on PHP 8.4 and an enum constant on 8.5, so the
-// bindgen name and zend_hash_get_current_key_ex's return type differ per version;
-// hardcoded like SUCCESS/FAILURE and compared through i64::from at the call sites.
+// HASH_KEY_IS_STRING is a #define on 8.4 and an enum constant on 8.5, so it is hardcoded and compared through i64::from at the call sites.
 pub const HASH_KEY_IS_STRING: i64 = 1;
 
-// The Outcome-typed shims return a C `int`; the discriminant is validated at the call sites via
-// `Outcome::from_c` (unexpected values fall back to `Bailout`) rather than transmuted here.
+// The Outcome-typed shims return a C `int`; call sites decode it via `Outcome::from_c` (unexpected values fall back to `Bailout`).
 unsafe extern "C" {
     pub fn rapira_sg() -> *mut sapi_globals_struct;
     pub fn rapira_eg() -> *mut zend_executor_globals;
@@ -54,18 +50,13 @@ unsafe extern "C" {
     pub fn rapira_release_temporary_streams();
     pub fn rapira_request_activate() -> c_int;
     pub fn rapira_request_shutdown() -> c_int;
-    // Receive-loop wall-timer discipline (module.c): disarm while parked in
-    // receive(), re-arm the captured per-cycle budget on unit handout. Plain
-    // zend timer calls - no bailout path, safe to call from Rust.
+    // Wall timer is disarmed while parked in receive() and re-armed with the captured per-cycle budget on unit handout (module.c).
     pub fn rapira_receive_untimed();
     pub fn rapira_receive_timed();
-    // C shim (module.c) over rapira_rs_ub_write; raises the client-abort bailout from
-    // C so the longjmp doesn't cross the Rust catch_unwind frame.
-    // https://man7.org/linux/man-pages/man3/setjmp.3.html
-    // https://doc.rust-lang.org/std/panic/fn.catch_unwind.html
+    // C shim (module.c) over rapira_rs_ub_write: raises the client-abort bailout from C so the longjmp does not cross the Rust catch_unwind frame.
     pub fn rapira_ub_write(str_: *const std::os::raw::c_char, len: usize) -> usize;
 
     pub fn rapira_run_handler(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> c_int;
 
-    pub static mut rapira_module_entry: zend_module_entry; // from module.c
+    pub static mut rapira_module_entry: zend_module_entry;
 }

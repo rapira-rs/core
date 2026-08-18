@@ -6,7 +6,7 @@ function helper(string $big): void
 $handler = static function (): void {
 	set_error_handler(static fn(): bool => true); // consume -> execution continues, helper's frame unwinds
 	if (($_GET['step'] ?? '') === 'boom') {
-		helper(str_repeat('x', 20 * 1024 * 1024)); // after helper returns, 20MB pinned ONLY by the backtrace
+		helper(str_repeat('x', 20 * 1024 * 1024)); // after helper returns, 20MB pinned only by the backtrace
 		echo 'boomed';
 		return;
 	}

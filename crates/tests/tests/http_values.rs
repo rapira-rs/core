@@ -1,11 +1,7 @@
-//! The `Rapira\Http` value objects: constructors, readonly, type refusals.
-
 use php_sys::{Mode, Rapira};
 use tests::{drain, php_lock, req};
 
-/// Builds the full object graph up through an 11-argument Request, reads every
-/// tier back, then probes the three refusals: readonly reassignment, wrong
-/// arity (which is what proves the constructors exist), and the address union.
+/// Pins that Http value objects construct and refuse readonly reassignment, wrong arity, and a bad address union.
 #[test]
 fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
     let _guard = php_lock();

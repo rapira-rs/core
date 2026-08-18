@@ -1,8 +1,6 @@
 <?php
 
-// Probes an EMPTY channel deterministically: the test never creates a handle,
-// so no job can precede the probes. Results travel through the app log, like
-// worker-singleton.php.
+// Probes an empty channel: the test never creates a handle, so no job can precede the probes.
 
 use Rapira\Exception\TimeoutException;
 

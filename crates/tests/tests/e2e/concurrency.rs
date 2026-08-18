@@ -1,12 +1,8 @@
-//! Concurrent producers against the dispatcher: every request is unique and
-//! its response predictable, so any cross-unit mixing is a wrong body.
-
 use std::time::Duration;
 
 use crate::harness::{http_get, spawn_with_config, wait_workers};
 
-/// 8 producer threads × 50 unique requests over a 4-worker dispatcher pool;
-/// the fixture answers `n` with `n+1` from inside a per-unit fiber.
+/// Concurrent producers over a worker pool must never get another request's body.
 #[test]
 fn concurrent_unique_requests_never_mix() {
     let srv = spawn_with_config("lifecycle/fiber-worker.php", 4, "");

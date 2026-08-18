@@ -1,6 +1,6 @@
 <?php
 // Booted once per worker; the handler runs for every request.
-$booted = date(DATE_ATOM); // resident: computed once, survives across requests
+$booted = date(DATE_ATOM);
 
 $handler = static function () use ($booted): void {
     header('content-type: text/plain');

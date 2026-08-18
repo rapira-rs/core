@@ -1,11 +1,6 @@
-//! The `Rapira\Http\Request` graph: builders from the owned unit state.
-
 use super::*;
 
-/// A `Grouped` into the `array<non-empty-string, list<string>>` shape.
-/// Symtable key normalization (an all-digit name lands as an integer key, or
-/// the array disagrees with every userland lookup of it) is add_assoc_zval_ex's
-/// own zend_symtable_str_update.
+/// add_assoc_zval_ex moves the list ref in: the hash-update family never addrefs.
 unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
     unsafe {
         rapira_array_init(dst, g.0.len() as u32);
@@ -15,7 +10,6 @@ unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
             for v in values {
                 zend::list_push_stringl(&mut list, v);
             }
-            // moved out: the hash-update family never addrefs
             add_assoc_zval_ex(dst, name.as_ptr(), name.count_bytes(), &mut list);
         }
     }
@@ -97,14 +91,11 @@ unsafe fn build_file(dst: *mut zval, p: &FilePart) {
         zend::prop_zval(ce, o, c"headers", &mut headers);
         zval_ptr_dtor(&mut headers);
         zend::prop_stringl(ce, o, c"tmpPath", &p.path);
-        // a 64-bit zend_long is assumed (NTS targets are LP64)
         zend::prop_long(ce, o, c"size", p.upload.size as i64);
     }
 }
 
-/// Multipart{fields, files} into `dst`. A throw at any hand-off stops the
-/// loops - property writes with a pending exception are what the checkpoints
-/// exist to prevent; a partial graph is released and never cached.
+/// Returns false on a pending exception: property writes must not run with a throw in flight, so the partial graph is released.
 unsafe fn build_multipart(
     dst: *mut zval,
     field_parts: &[FieldPart],
@@ -133,7 +124,7 @@ unsafe fn build_multipart(
                 zval_ptr_dtor(&mut files);
                 return false;
             }
-            let _ = add_next_index_object(&mut fields, o); // the ref moves in
+            let _ = add_next_index_object(&mut fields, o);
         }
 
         for p in file_parts {
@@ -145,7 +136,7 @@ unsafe fn build_multipart(
                 zval_ptr_dtor(&mut files);
                 return false;
             }
-            let _ = add_next_index_object(&mut files, part.value.obj); // the ref moves in
+            let _ = add_next_index_object(&mut files, part.value.obj);
         }
 
         let ce = rapira_ce_http_multipart;
@@ -163,13 +154,9 @@ unsafe fn build_multipart(
     }
 }
 
-/// Builds `Rapira\Http\Request` into `return_value`, memoizing on the
-/// exchange. Contract with the C shell: false means a throw is pending - a
-/// caught panic returns false without one and the shell backstops with its
-/// own zend_throw_error.
+/// False means a throw is pending; a caught panic returns false without one and the C shell throws instead.
 /// # Safety
-/// `ex` a live exchange with a non-null job (the shell checks); `return_value`
-/// writable. Frame rules: zend.rs.
+/// `ex` is a live exchange with a non-null job; `return_value` is writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_build_request(
     ex: *mut rapira_exchange_obj,
@@ -178,6 +165,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_build_request(
     guard(false, || unsafe { build_request_impl(ex, return_value) })
 }
 
+/// A throw during the property writes leaves readonly slots uninitialized: the partial object is released and the memo left unset.
 unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zval) -> bool {
     unsafe {
         if !zend::is_undef(&(*ex).request) {
@@ -195,8 +183,6 @@ unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zv
         build_address(&mut remote, &st.remote);
         let mut server: zval = std::mem::zeroed();
         build_address(&mut server, &st.server);
-        // stays IS_UNDEF when absent; every cleanup dtors it unconditionally
-        // (a no-op on undef)
         let mut tls: zval = std::mem::zeroed();
         if let Some(t) = req.tls.as_ref() {
             build_tls(&mut tls, t);
@@ -211,7 +197,6 @@ unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zv
             zval_ptr_dtor(&mut tls);
             return false;
         }
-        // never assemble on top of a throw
         if zend::exception_pending() {
             zval_ptr_dtor(&mut headers);
             zval_ptr_dtor(&mut remote);
@@ -231,7 +216,6 @@ unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zv
         zend::prop_stringl(ce, o, c"protocol", st.protocol_php.as_bytes());
         zend::prop_zval(ce, o, c"headers", &mut headers);
         zval_ptr_dtor(&mut headers);
-        // the union slot takes either arm through the same handler
         match &st.body {
             BodyState::Raw(v) => zend::prop_stringl(ce, o, c"body", v),
             BodyState::Multipart { .. } => {
@@ -251,16 +235,13 @@ unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zv
         zval_ptr_dtor(&mut tls);
         zend::prop_double(ce, o, c"receivedAt", req.received_at.unwrap_or(0.0));
 
-        // a throw during the writes leaves uninitialized readonly slots:
-        // release the partial graph and leave the memo unset, or every later
-        // getRequest() would hand back the poisoned object
         if zend::exception_pending() {
             zval_ptr_dtor(&mut reqz);
             return false;
         }
-        (*ex).request = reqz; // the memo takes the ref
+        (*ex).request = reqz;
         *return_value = reqz;
-        zval_add_ref(return_value); // the caller's ref
+        zval_add_ref(return_value);
         true
     }
 }

@@ -1,14 +1,7 @@
-//! How individual context values normalize, adopted from Monolog's
-//! `NormalizerFormatterTest::testFormat` and friends.
-//!
-//! The `#[ignore]`d tests assert Monolog's guarantees for values that lose
-//! their type or vanish without a normalizer.
-
 use tests::app_record;
 use tracing::Level;
 
-/// Monolog testFormat: INF, -INF and NAN normalize to the strings "INF", "-INF"
-/// and "NaN". Today all three encode as `0`.
+/// Non-finite floats must normalize to "INF"/"-INF"/"NaN" instead of encoding as `0`.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn special_floats_keep_their_meaning() {
@@ -22,8 +15,7 @@ fn special_floats_keep_their_meaning() {
     }
 }
 
-/// Monolog testIgnoresInvalidEncoding: undecodable bytes are replaced, the value
-/// survives. Today the whole value becomes `null`.
+/// Undecodable bytes degrade to U+FFFD instead of nulling the whole value.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn invalid_utf8_is_substituted_not_dropped() {
@@ -35,9 +27,7 @@ fn invalid_utf8_is_substituted_not_dropped() {
     );
 }
 
-/// Monolog testFormat: an object is wrapped in its class name -
-/// `{"Monolog\\Formatter\\TestFooNorm":{"foo":"fooValue"}}`. We emit the bare
-/// property bag, so nothing in the record says what type it was.
+/// An object is wrapped in its class name rather than logged as a bare property bag.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn objects_keep_their_class_name() {
@@ -49,8 +39,7 @@ fn objects_keep_their_class_name() {
     );
 }
 
-/// Monolog testFormat: `TestBarNorm` has only __toString, and normalizes to
-/// `'bar'`. We never call it, so such an object logs as an empty property bag.
+/// An object with only __toString normalizes to that string, not to an empty property bag.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn stringable_objects_use_their_string_form() {
@@ -62,8 +51,7 @@ fn stringable_objects_use_their_string_form() {
     );
 }
 
-/// Monolog testFormat: a stream renders as `[resource(stream)]`. We emit `null`,
-/// which is indistinguishable from a value that really was null.
+/// A resource renders as `[resource(stream)]` so it stays distinguishable from null.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn resources_render_as_a_type_marker() {
@@ -75,9 +63,7 @@ fn resources_render_as_a_type_marker() {
     );
 }
 
-/// Monolog testFormatToStringExceptionHandle: an object whose __toString throws
-/// degrades to an empty value and the record is still produced. Passes because
-/// __toString is never called; it must keep passing once it is.
+/// A throwing __toString must not drop sibling keys or leak the exception into the record.
 #[test]
 fn a_throwing_tostring_cannot_break_logging() {
     let (level, msg, ctx) = app_record("app_logger/types-objects.php");

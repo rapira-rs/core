@@ -1,7 +1,6 @@
 <?php
 
-// Monolog testFormat: INF => "INF", -INF => "-INF", NAN => "NaN".
-// Monolog testIgnoresInvalidEncoding: bad bytes become U+FFFD, the value survives.
+// Monolog testFormat: INF => "INF", -INF => "-INF", NAN => "NaN"; testIgnoresInvalidEncoding: bad bytes become U+FFFD and the value survives.
 \Rapira\log('scalars', \Rapira\LogLevel::Error, [
     'inf' => INF,
     'ninf' => -INF,

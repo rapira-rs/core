@@ -1,8 +1,3 @@
-//! The Rust half of `Rapira\Internal\Http\Exchange`: owns the `Job` while PHP
-//! holds the unit, builds the `Rapira\Http\Request` graph, and runs the
-//! response verbs as a frame stream (Interim/Head/Chunk/File/End) over the
-//! job's sender. The graph builders follow the zend.rs frame rules.
-
 pub(crate) use std::{
     cell::Cell,
     ffi::{CStr, CString, c_char, c_int, c_void},
@@ -46,32 +41,20 @@ mod tests;
 
 pub use sendfile::set_sendfile_root;
 
-/// The unit machine. Both live variants carry the Box pointer: free_obj
-/// normally reclaims it, and tracking it here covers the paths where free_obj
-/// cannot run (a bailed php_request_shutdown, a bailout between Box::into_raw
-/// and the C-side store) - a leaked unfinalized unit would hang its client
-/// forever.
+/// Live variants carry the Box pointer so paths where free_obj never runs (bailout) can still reclaim the unit.
 #[derive(Clone, Copy)]
 enum Unit {
-    /// No live unit.
     Idle,
-    /// An unfinalized unit is out with PHP; receive verbs return BUSY.
     Handling(*mut ExchangeState),
-    /// Sealed, but the PHP object still owns the Box; free_obj reclaims it.
     Sealed(*mut ExchangeState),
 }
 
-/// Dispatcher state for the current cycle: the unit machine plus two sticky
-/// latches feeding run_cycle's exit decision.
 #[derive(Clone, Copy)]
 struct CycleState {
     unit: Unit,
-    /// receive() observed channel closure this cycle.
     closed_seen: bool,
-    /// A unit was finalized this cycle.
     served: bool,
-    /// A unit was handed out this cycle; a fatal after that is an app failure,
-    /// not a boot failure.
+    /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
     received: bool,
 }
 
@@ -101,10 +84,8 @@ pub(crate) fn cycle_reset() {
 pub(crate) fn reclaim_current() {
     if let Unit::Handling(ptr) | Unit::Sealed(ptr) = CYCLE.get().unit {
         update(|c| c.unit = Unit::Idle);
-        // SAFETY: the machine only holds pointers from Box::into_raw in
-        // finish_pull, and exchange_drop untracks before reclaiming there.
+        // SAFETY: the pointer came from Box::into_raw in finish_pull, and exchange_drop untracks before reclaiming.
         let st = unsafe { Box::from_raw(ptr) };
-        // an unfinalized reclaim is a failed unit: count it like exchange_drop
         if st.stage != Stage::Finalized {
             sb_update(Event::Handled(true));
         }
@@ -116,9 +97,6 @@ pub(crate) fn closed_seen() -> bool {
     CYCLE.get().closed_seen
 }
 
-// Worker-mode latch writers: the worker pull/serve path feeds the same
-// per-cycle state the dispatcher verbs write, so run_cycle's classifier
-// covers both resident modes.
 pub(crate) fn note_closed() {
     update(|c| c.closed_seen = true);
 }
@@ -139,10 +117,7 @@ pub(crate) fn received_any() -> bool {
     CYCLE.get().received
 }
 
-/// Response progress. The head locks on the first head OR body write (per the
-/// contract, a body chunk commits an implicit 200 first). Finalized is set by
-/// seal() (worker finished) or discard_unit() (host got there first; the
-/// `discarded` latch tells them apart).
+/// The head locks on the first head or body write: a body chunk commits an implicit 200 first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Open,
@@ -150,19 +125,16 @@ enum Stage {
     Finalized,
 }
 
-/// A committed final head, not yet on the wire - committing is not sending;
-/// the bytes leave with the first body-touching verb.
+/// A committed head, not yet on the wire: the bytes leave with the first body-touching verb.
 struct PendingHead {
     status: u16,
     headers: FieldLines,
     body_coded: bool,
 }
 
-/// Request body as the unit holds it. Multipart parts carry their own derived
-/// data, so nothing is index-aligned across parallel vectors.
 enum BodyState {
     Raw(Vec<u8>),
-    /// Host-parsed; spool files unlink at seal(), Drop is the abnormal-path net.
+    /// Spool files unlink at seal(); Drop is the abnormal-path net.
     Multipart {
         fields: Vec<FieldPart>,
         files: Vec<FilePart>,
@@ -176,13 +148,11 @@ struct FieldPart {
 
 struct FilePart {
     upload: UploadedFile,
-    /// Rendered once: PathBuf bytes are not directly borrowable portably.
     path: Vec<u8>,
     headers: Grouped,
 }
 
-/// One endpoint, rendered at construction so the builder frame holds no owned
-/// allocations of its own (zend.rs frame rule).
+/// Rendered at construction so the builder frame holds no owned allocations (zend.rs frame rule).
 enum AddrOwned {
     Inet {
         ip: String,
@@ -204,19 +174,12 @@ impl AddrOwned {
                 ip: sa.ip().to_string(),
                 port: sa.port(),
             },
-            // an empty path is not a name: normalize to the unnamed endpoint
             Addr::Unix(p) => Self::Unix(p.as_deref().map(path_bytes).filter(|b| !b.is_empty())),
         }
     }
 }
 
-/// Field lines grouped name -> values, wire order, byte-exact names
-/// (case-insensitive lookup is the consumer's job). Computed at construction
-/// so builder frames only borrow (zend.rs frame rule). Keys are CStrings: the
-/// symtable prefilter compiled into add_assoc_zval_ex reads one byte past a
-/// leading `-`, which the terminator covers. An empty name (the contract key
-/// type is non-empty-string) or one with an interior NUL (not a tchar) is
-/// skipped.
+/// Keys are CStrings: the symtable prefilter in add_assoc_zval_ex reads one byte past a leading `-`, which the terminator covers.
 struct Grouped(Vec<(CString, Vec<Vec<u8>>)>);
 
 impl Grouped {
@@ -240,39 +203,27 @@ impl Grouped {
 }
 
 pub struct ExchangeState {
-    // body above job: fields drop in declaration order, so an abandoned unit
-    // unlinks its spool files (BodyState -> SpooledFile::drop) before the
-    // frame sender closes - the file is gone before the stream ends, the same
-    // order seal() guarantees.
+    // body above job: declaration drop order unlinks the spool files before the frame sender closes
     body: BodyState,
     job: Box<Job>,
-    /// `Request::$headers`, pre-grouped.
     headers: Grouped,
-    /// Absolute-form URI synthesized for `Request::$uri`.
     uri_abs: String,
-    /// `Request::$target` bytes: the raw request-target, falling back to `uri`.
     target: Vec<u8>,
-    /// `Request::$authority` bytes, byte-for-byte; None = named none.
     authority: Option<Vec<u8>>,
-    /// Contract spelling for `Request::$protocol` (HTTP/2, not the CGI
-    /// HTTP/2.0); everything unmapped passes through verbatim.
+    /// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
     protocol_php: String,
     remote: AddrOwned,
     server: AddrOwned,
     stage: Stage,
-    /// The Head frame left for the channel.
     head_sent: bool,
     pending: Option<PendingHead>,
-    /// A head-declared content-length, honoured then enforced.
     declared_cl: Option<u64>,
-    /// Bytes accepted toward `declared_cl` - bodiless units count too (a HEAD
-    /// handler shares the GET code path, errors included).
+    /// Bytes accepted toward `declared_cl`: bodiless units count too, so a HEAD handler hits the same errors.
     sent_body: u64,
-    /// The host closed the exchange first; sticky, selects the exception class.
     discarded: bool,
-    /// 204 | 304 | a HEAD request | 101: chunks are accepted and dropped here.
+    /// 204, 304, 101, or a HEAD request: chunks are accepted and dropped.
     bodiless: bool,
-    /// Last wall-timer arm; the park guard re-arms the remaining budget.
+    /// Last wall-timer arm: the park guard re-arms the remaining budget.
     armed_at: Instant,
 }
 
@@ -317,7 +268,6 @@ impl ExchangeState {
 
         let req = &job.ctx.req;
         let headers = Grouped::new(&req.headers);
-        // the producer normalized empty to None (runtime to_request)
         let authority = req.authority.clone();
         let target = req
             .target
@@ -332,9 +282,6 @@ impl ExchangeState {
         let server = AddrOwned::new(&req.server);
 
         let scheme = if req.https { "https" } else { "http" };
-        // $uri's authority: what the client named, else the listener address
-        // (SocketAddr's Display brackets IPv6), else the configured name for a
-        // unix listener, which has no host:port form of its own.
         let host = match &authority {
             Some(a) => String::from_utf8_lossy(a).into_owned(),
             None => match &req.server {
@@ -342,8 +289,6 @@ impl ExchangeState {
                 Addr::Unix(_) => format!("{}:{}", req.server_name, req.server_port),
             },
         };
-        // Asterisk-form (`OPTIONS *`) and CONNECT authority-form targets are not
-        // paths; the contract has $uri fall back to the authority root there.
         let path = if req.uri.starts_with('/') {
             req.uri.as_str()
         } else {
@@ -374,8 +319,6 @@ impl ExchangeState {
         })
     }
 
-    /// The host is gone (client, deadline, drain) and the worker has not
-    /// finalized: the pre-write probe of gate 2.
     fn host_closed(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
@@ -383,11 +326,7 @@ impl ExchangeState {
     }
 }
 
-// ---- the Request graph builder (zend.rs frame rules: zvals and raw pointers
-// only, all bytes borrowed from ExchangeState)
-
-/// The enclosing C layout from the engine's zend_object pointer (the C fields
-/// sit before `std`; see the wrapper.h diagram).
+/// Recovers the enclosing C struct: the C fields sit before `std` (wrapper.h layout).
 unsafe fn exchange_from(obj: *mut zend_object) -> *mut rapira_exchange_obj {
     unsafe {
         obj.byte_sub(std::mem::offset_of!(rapira_exchange_obj, std))

@@ -1,7 +1,5 @@
 <?php
-// Asynchronous dispatcher: a fiber per request. While requests are in flight
-// the loop polls tryReceive() between resumes, so it never blocks them; once
-// none are left it parks in a blocking receive() - no sleep, no idle spin.
+// Asynchronous dispatcher: a fiber per request; tryReceive() polls while fibers are in flight, and a blocking receive() parks the loop once none are left.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\RapiraThrowable;
@@ -10,7 +8,6 @@ use Rapira\Http\Request;
 
 final class PageNotFound extends \RuntimeException {}
 
-/** Routes a request to a response body */
 function handle(Request $req): Generator|string
 {
     return match ($req->target) {
@@ -65,7 +62,6 @@ $serve = static function (Exchange $ex): void {
 
 $d = \Rapira\get_dispatcher();
 
-/** @var array<int, Fiber> $fibers */
 $fibers = [];
 $max = 100;
 

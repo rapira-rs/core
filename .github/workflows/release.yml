@@ -28,7 +28,7 @@ env:
     CARGO_TERM_COLOR: always
 
 jobs:
-    # Fail fast (before 6 expensive builds) if the tag disagrees with Cargo.toml.
+    # Separate job so a tag that disagrees with Cargo.toml fails before the six expensive builds.
     guard:
         runs-on: ubuntu-latest
         outputs:
@@ -51,10 +51,7 @@ jobs:
     build:
         needs: guard
         runs-on: ${{ matrix.runner }}
-        # Linux legs build inside rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the
-        # binaries and packages serve RHEL 9 as well as Ubuntu 22.04+/Debian 12.
-        # The image is pinned to its multi-arch manifest-list digest (amd64+arm64).
-        # Non-linux legs leave `container` unset (empty expression = no container).
+        # Linux legs build inside rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the artifacts serve RHEL 9 as well as Ubuntu 22.04+/Debian 12, pinned to the multi-arch manifest-list digest; non-Linux legs leave `container` unset (empty expression = no container).
         container: ${{ matrix.container }}
         permissions:
             contents: read
@@ -126,8 +123,7 @@ jobs:
             - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
               with: { persist-credentials: false }
 
-            # Runs before the resolve step: the rocky container needs python3/curl.
-            # oniguruma-devel lives in the CRB repo.
+            # Runs before the resolve step because the rocky container has no python3/curl; oniguruma-devel only exists in the CRB repo.
             - name: Install build deps (Linux container)
               if: matrix.provision == 'source-unix' && runner.os == 'Linux'
               run: |
@@ -322,8 +318,7 @@ jobs:
                   ( cd dist && sha256sum rapira-* > "rapira-v${VERSION}-SHA256SUMS.txt" )
                   ls -l dist
 
-            # Install every amd64 package in a real container: catches wrong dependency
-            # names and broken RUNPATH before anything is published. (arm64 skipped: no qemu.)
+            # Installing every amd64 package in a real container catches wrong dependency names and broken RUNPATH before anything is published; arm64 is skipped (no qemu).
             - name: Validate packages (amd64)
               shell: bash
               run: |

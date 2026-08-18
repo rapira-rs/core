@@ -55,7 +55,7 @@ fn header_value(r: &Resp, name: &str) -> Option<String> {
         .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
 }
 
-// POST form body parses into $_POST while the query string populates $_GET.
+/// POST form body parses into $_POST while the query string populates $_GET.
 #[test]
 fn post_superglobals_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -86,7 +86,7 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-// $_GET/$_POST must be rebuilt per worker request - no stale values.
+/// $_GET/$_POST must be rebuilt per worker request - no stale values.
 #[test]
 fn post_superglobals_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -126,7 +126,7 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// $_REQUEST merges GET + POST under the default variables_order/request_order.
+/// $_REQUEST merges GET + POST under the default variables_order/request_order.
 #[test]
 fn request_merge_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -177,8 +177,7 @@ fn request_merge_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A jit autoglobal first touched only in a LATER request must still build fresh:
-// req1 builds $_REQUEST, req2 never touches it, req3 must not see stale data.
+/// A jit autoglobal first touched only in a later request must still build fresh, not stale.
 #[test]
 fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -217,7 +216,7 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// The Cookie header feeds $_COOKIE fresh on every worker request.
+/// The Cookie header feeds $_COOKIE fresh on every worker request.
 #[test]
 fn cookies_refresh_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -240,9 +239,7 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// PHP's cookie parser mangles malformed names (spaces/dots -> underscores),
-// drops separator-only segments, keeps trailing spaces in values, and keeps
-// the FIRST occurrence of a duplicate name.
+/// PHP's cookie parser rewrites bad name chars to underscores, drops separator-only segments, keeps trailing value spaces, and keeps the first duplicate.
 #[test]
 fn malformed_cookies_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -325,7 +322,7 @@ fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
     )
 }
 
-// A userland save handler registered DURING request 1 must still serve request 2.
+/// A userland save handler registered during request 1 must still serve request 2.
 #[test]
 fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -361,7 +358,7 @@ fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A save handler registered BEFORE the worker loop stays installed for all requests.
+/// A save handler registered before the worker loop stays installed for all requests.
 #[test]
 fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -400,9 +397,7 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// header() edge cases: no-space colon is trimmed, a colon-less line never
-// becomes a response header, the status set via http_response_code sticks,
-// and the header set rebuilds per worker request.
+/// header() edges: no-space colon trims, a colon-less line never becomes a header, http_response_code sticks, and the set rebuilds per worker request.
 #[test]
 fn response_header_edges_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -441,7 +436,6 @@ fn response_header_edges_worker() -> anyhow::Result<()> {
 
 fn assert_headers_list_response(resp: &Resp, i: u16) {
     assert_eq!(resp.status, 200 + i);
-    // the raw llist (headers_list dump in the body) keeps the colon-less line...
     for expected in ["X-Powered-By: PHP/", "Foo: bar", "Foo2: bar2", "Invalid"] {
         assert!(
             resp.body.contains(expected),
@@ -454,7 +448,6 @@ fn assert_headers_list_response(resp: &Resp, i: u16) {
         "got: {:?}",
         resp.body
     );
-    // ...while the head frame drops it and carries the parsed pairs
     assert_eq!(header_value(resp, "Foo").as_deref(), Some("bar"));
     assert!(
         header_value(resp, "X-Powered-By").is_some_and(|v| v.starts_with("PHP/")),
@@ -479,8 +472,7 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-// fail-first: worker requests must also carry the expose_php X-Powered-By
-// header that a full per-request startup would add.
+/// Worker requests must also carry the expose_php X-Powered-By header a full per-request startup adds.
 #[test]
 fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -500,8 +492,7 @@ fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Unbuffered output written across several ub_writes (with an explicit flush()
-// between them) arrives whole and in order in the single sealed frame.
+/// Unbuffered writes split by an explicit flush() arrive whole and in order in one sealed frame.
 #[test]
 fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -527,8 +518,7 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A raw status line - header('HTTP/1.1 204 No Content', true, 204) - drives the
-// head status; the SAPI itself never suppresses the body for a 204.
+/// A raw status line drives the head status, and the SAPI never suppresses the body for a 204.
 #[test]
 fn raw_status_line_204_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -554,8 +544,7 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A 6MB body with no content type travels intact through php://input, and the
-// next request's input is unaffected.
+/// A 6MB body with no content type travels intact through php://input, leaving the next request unaffected.
 #[test]
 fn large_post_body_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -649,14 +638,12 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// $_FILES has no self-healing create callback, so without a per-request dtor of TRACK_VARS_FILES a no-upload request re-exposes the previous upload.
 #[test]
 fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/upload-worker.php")))?;
     let h = r.handle();
-    // $_FILES is the one superglobal whose create callback does not self-heal, so
-    // rapira_reset_super_global dtors TRACK_VARS_FILES each request; without it a
-    // no-upload request would re-expose the previous request's upload.
     let (s1, b1) = drain(h.handle_blocking(post(
         "ported_tests/upload-worker.php",
         "",
@@ -681,8 +668,7 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
     Ok(())
 }
 
-// Output already sent, then an uncaught throw: exactly one head, status 200
-// (committed by the echo), the fatal text follows in the body, worker survives.
+/// An uncaught throw after output keeps the single head and echo-committed 200, appends the fatal text, and the worker survives.
 #[test]
 fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -708,8 +694,7 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// The per-job teardown must not run destructors on bootstrap-resident objects
-// and must keep object-store handles reusable across jobs.
+/// Per-job teardown must not destruct bootstrap-resident objects and must keep object-store handles reusable across jobs.
 #[test]
 fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -743,8 +728,7 @@ fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A destructor that throws while the job's shutdown-function table is freed
-// must not leak a pending exception into the resident loop.
+/// A destructor that throws while the job's shutdown-function table is freed must not leak a pending exception into the resident loop.
 #[test]
 fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -772,8 +756,7 @@ fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> 
     Ok(())
 }
 
-// A truncated response must not carry a synthesized Content-Length equal to
-// the retained prefix - the absent length is what lets clients detect the cut.
+/// A truncated response must not carry a synthesized Content-Length: its absence is what lets clients detect the cut.
 #[test]
 fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -791,7 +774,7 @@ fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-// exit() ends a classic script cleanly: complete response, not an error.
+/// exit() ends a classic script cleanly: complete response, not an error.
 #[test]
 fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -811,7 +794,7 @@ fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-// An uncaught throw mid-stream in classic mode stays truncated, with no length.
+/// An uncaught throw mid-stream in classic mode stays truncated, with no length.
 #[test]
 fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -830,8 +813,7 @@ fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Streams opened before the worker loop keep their identity and read position
-// across requests - between-request cleanup must not touch live resources.
+/// Streams opened before the worker loop keep identity and read position: between-request cleanup must not touch live resources.
 #[test]
 fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -877,12 +859,12 @@ fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A pre-joined single Cookie line passes through the fold unchanged.
 #[test]
 fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    // a pre-joined single Cookie line passes through the fold unchanged
     let mut request = req("/multi-cookie.php", "ported_tests/multi-cookie.php");
     request.headers.push(("Cookie".into(), "a=1; b=2".into()));
     let (status, body) = drain(h.handle_blocking(request)?);
@@ -892,9 +874,7 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The `$_SERVER` fold end to end: per-line repeats arrive from the front, and
-/// ReqC::build joins list fields on their separators (Cookie on `; `,
-/// X-Forwarded-For on `, `) while a singleton field keeps its first line.
+/// ReqC::build folds per-line repeats into `$_SERVER`: list fields join on their separators (Cookie on `; `, X-Forwarded-For on `, `), a singleton field keeps its first line.
 #[test]
 fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -965,9 +945,7 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A boundary is opaque octets and obs-text is legal in a field value, so Content-Type
-/// must reach php-src byte for byte - decoding it lossily leaves rfc1867 hunting for a
-/// boundary the body never contains, and the upload silently vanishes.
+/// Content-Type must reach php-src byte for byte: a lossily decoded boundary leaves rfc1867 hunting for one the body never contains and the upload vanishes.
 #[test]
 fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -990,9 +968,7 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// sapi_header_op screens only CR, LF and NUL, so a name with a space and a value with
-/// a C0 control both reach the SAPI. Dropping those two fields must not cost the status,
-/// the other headers, or the body.
+/// sapi_header_op screens only CR, LF and NUL, so dropping the headers it lets through must not cost the status, the other headers, or the body.
 #[test]
 fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();

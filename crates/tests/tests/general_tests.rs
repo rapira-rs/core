@@ -3,8 +3,7 @@ use std::io::Read;
 use php_sys::{Mode, Rapira, Request};
 use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
-/// Block until the fixture's app record lands (the held-sync pattern: the
-/// handler must provably be executing before the client walks away).
+/// Blocks until the fixture logs `message`, so the handler is provably executing before the client drops the receiver.
 fn wait_app_record(message: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
@@ -19,8 +18,7 @@ fn wait_app_record(message: &str) {
     panic!("no app record {message:?} within 10s");
 }
 
-/// Body source returning at most one byte per read() call - legal `Read`
-/// behavior that streaming bodies (pipes, chunked decoders) exhibit.
+/// Body source returning at most one byte per read() call, legal `Read` behavior for streaming bodies.
 struct Trickle(std::io::Cursor<Vec<u8>>);
 
 impl Read for Trickle {
@@ -39,16 +37,14 @@ fn post(fixture_name: &str, body: Box<dyn Read + Send>, len: i64) -> Request {
     r
 }
 
-// php-src treats any short read_post() return as end-of-body
-// (SG(post_read)=1, main/SAPI.c) - the callback must fill the buffer until
-// real EOF or partial reads truncate the POST body.
+// php-src treats any short read_post() return as end-of-body (SG(post_read)=1, main/SAPI.c), so a callback that does not fill the buffer truncates the POST body.
 #[test]
 fn post_body_survives_partial_reads() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("general_tests/input-worker.php")))?;
     let h = r.handle();
 
-    let payload = b"hello rapira post".to_vec(); // 17 bytes
+    let payload = b"hello rapira post".to_vec();
     let len = payload.len() as i64;
     let request = post(
         "general_tests/input-worker.php",
@@ -67,11 +63,7 @@ fn post_body_survives_partial_reads() -> anyhow::Result<()> {
     Ok(())
 }
 
-// dropping the response receiver = client disconnect. PHP core ignores
-// ub_write's return value, so the SAPI must raise
-// php_handle_aborted_connection() itself: the handler's remaining work is cut
-// short (default ignore_user_abort=0), and the ABORTED status must not leak
-// into the next request.
+// PHP core ignores ub_write's return value, so the SAPI must raise php_handle_aborted_connection() itself, and the aborted status must not leak into the next request.
 #[test]
 fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -80,11 +72,9 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("general_tests/abort-worker.php")))?;
     let h = r.handle();
 
-    // Drop the receiver only once the handler is provably executing -
-    // dropping earlier hits the pre-handout probe and the handler never runs.
     let rx = h.handle_blocking(req("/", "general_tests/abort-worker.php"))?;
     wait_app_record("held");
-    drop(rx); // client disconnects mid-handler
+    drop(rx);
 
     let (s2, b2) = drain(h.handle_blocking(req("/?probe=1", "general_tests/abort-worker.php"))?);
     drop(h);
@@ -102,9 +92,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     Ok(())
 }
 
-// sapi_deactivate_module() only NULLs SG(request_info).request_body; in a
-// resident worker request nothing reclaims the temp stream resource, so every
-// POST grows EG(regular_list) until a sweep is in place.
+// sapi_deactivate_module() only NULLs SG(request_info).request_body, so without a sweep every POST in a resident worker grows EG(regular_list) by one temp stream.
 #[test]
 fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -161,9 +149,7 @@ fn https_server_vars() -> anyhow::Result<()> {
     Ok(())
 }
 
-// classic mode runs userland set_exception_handler for uncaught
-// throwables (zend_execute_scripts); the worker path must do the same. A
-// handled exception is not an error: no 500, no scoreboard error.
+// The worker path must run userland set_exception_handler like zend_execute_scripts does, and a handled exception must not raise a 500 or a scoreboard error.
 #[test]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -193,9 +179,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     Ok(())
 }
 
-// exactly one head per response. With display_errors=0 an uncaught throw
-// produces no output before the error path, so the rust-side 500 head and the
-// teardown header flush must not fight over it (first write wins).
+// With display_errors=0 an uncaught throw emits nothing before the error path, so the rust-side 500 head and the teardown header flush must not both head the response.
 #[test]
 fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -221,10 +205,7 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     Ok(())
 }
 
-// RSHUTDOWN wraps php_session_flush alone in zend_try so a
-// bailing save handler cannot skip the rest of the reset. Without the inner
-// guard the bailed flush leaves the session active and the next request
-// reuses the previous session id.
+// RSHUTDOWN wraps php_session_flush in its own zend_try; without that guard a bailing save handler skips the rest of the reset and the next request reuses the session id.
 #[test]
 fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -272,16 +253,13 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
     Ok(())
 }
 
+// Smoke coverage, not a strict guard for module.c's PG(in_user_include)=0: the req1 bailout forces a recycle whose php_request_startup already re-zeroes the flag.
 #[test]
 fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("general_tests/stuck-flag-worker.php")))?;
     let h = r.handle();
-    // req1: fatal inside the include-wrapper -> bailout strands in_user_include (returning proves no hang)
     let _ = drain(h.handle_blocking(req("/?step=boom", "general_tests/stuck-flag-worker.php"))?);
-    // Smoke coverage, not a strict guard for module.c's PG(in_user_include)=0: the
-    // req1 bailout forces a recycle whose php_request_startup already re-zeroes the
-    // flag, so req2 would pass even if that reset were reverted.
     let (_, b2) = drain(h.handle_blocking(req("/", "general_tests/stuck-flag-worker.php"))?);
     assert!(
         b2.contains("PROBE_OK"),
@@ -310,7 +288,6 @@ fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
         "general_tests/fatal-backtrace-worker.php",
     ))?)
     .1);
-    // consumed fatal: execution continues, frame unwinds, backtrace is the sole ref to the 20MB
     let (_, boom) = drain(h.handle_blocking(req(
         "/?step=boom",
         "general_tests/fatal-backtrace-worker.php",
@@ -360,11 +337,9 @@ fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
         "general_tests/abort-ignore-worker.php",
     )))?;
     let h = r.handle();
-    // Drop the receiver only once the handler is provably executing -
-    // dropping earlier hits the pre-handout probe and the handler never runs.
     let rx = h.handle_blocking(req("/", "general_tests/abort-ignore-worker.php"))?;
     wait_app_record("held");
-    drop(rx); // client disconnects mid-handler
+    drop(rx);
     let (s2, b2) =
         drain(h.handle_blocking(req("/?probe=1", "general_tests/abort-ignore-worker.php"))?);
     drop(h);

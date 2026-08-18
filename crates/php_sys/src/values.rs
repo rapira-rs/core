@@ -1,8 +1,3 @@
-//! Constructor bodies for the `Rapira\Http` value objects. The C shells own
-//! the fast-ZPP macro layer and hand the parsed arguments here; every property
-//! write goes through zend.rs. False reports a pending throw (the shells
-//! backstop a caught panic).
-
 use std::ffi::c_double;
 
 use crate::{
@@ -10,8 +5,7 @@ use crate::{
     rapira_ce_unix_address, zend, zend_object, zend_string, zend_zval_value_name, zval,
 };
 
-/// The `Rapira\InetAddress|Rapira\UnixAddress` union check the arginfo cannot
-/// enforce (internal arg types are debug-only).
+/// Checks the `Rapira\InetAddress|Rapira\UnixAddress` union that arginfo cannot enforce (internal arg types are debug-only).
 unsafe fn address_arg(zv: *mut zval, num: u32) -> bool {
     unsafe {
         if zend::zval_type(zv) == IS_OBJECT {
@@ -32,8 +26,7 @@ unsafe fn address_arg(zv: *mut zval, num: u32) -> bool {
 }
 
 /// # Safety
-/// `obj` the object under construction; strings/zvals are ZPP-owned for the
-/// call. All ctors below share this contract.
+/// `obj` is under construction; strings/zvals are ZPP-owned for the call, and all ctors below share this contract.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_ctor_inet_address(
     obj: *mut zend_object,
@@ -62,8 +55,7 @@ pub unsafe extern "C" fn rapira_rs_ctor_unix_address(
 }
 
 /// # Safety
-/// As `rapira_rs_ctor_inet_address`; the five cert/negotiation strings are
-/// nullable.
+/// As `rapira_rs_ctor_inet_address`; the five cert/negotiation strings are nullable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_ctor_tls(
     obj: *mut zend_object,
@@ -98,7 +90,6 @@ pub unsafe extern "C" fn rapira_rs_ctor_form_field(
     headers: *mut zval,
 ) -> bool {
     guard(false, || unsafe {
-        // dynamic scope: these classes are open to userland extension
         let ce = (*obj).ce;
         zend::prop_zstr(ce, obj, c"name", name);
         zend::prop_zstr(ce, obj, c"value", value);
@@ -148,9 +139,7 @@ pub unsafe extern "C" fn rapira_rs_ctor_multipart(
 }
 
 /// # Safety
-/// As `rapira_rs_ctor_form_field`. `body` is the C-shell-built union zval
-/// (Multipart object or string); `authority`/`tls` nullable; `remote`/`server`
-/// are validated here against the address union (args 8 and 9).
+/// As `rapira_rs_ctor_form_field`; `body` is a union zval (Multipart object or string), `authority`/`tls` nullable, `remote`/`server` validated here against the address union.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn rapira_rs_ctor_request(

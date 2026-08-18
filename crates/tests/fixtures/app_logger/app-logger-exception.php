@@ -1,7 +1,6 @@
 <?php
 
-// The PSR-3 convention: `['exception' => $e]`. Chained so the record has to carry
-// more than the outermost frame to be useful.
+// PSR-3 `['exception' => $e]`, chained so the record has to carry more than the outermost frame.
 try {
     try {
         throw new \RuntimeException('inner cause', 7);

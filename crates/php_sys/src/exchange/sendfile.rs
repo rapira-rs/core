@@ -1,16 +1,11 @@
-//! sendFile(): the configured root, path validation, and the file frames.
-
 use super::respond::{Verb, discard_unit, emit_head, seal, send_frame, throw_verb};
 use super::*;
 
-/// The root `sendFile()` paths must stay inside; canonicalized at set. None =
-/// deny (the binary sets it at boot; tests set what they need).
+/// Canonicalized root `sendFile()` paths must stay inside; None denies every path.
 static SENDFILE_ROOT: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 
 pub fn set_sendfile_root(root: std::path::PathBuf) {
     let canonical = std::fs::canonicalize(&root).unwrap_or_else(|e| {
-        // fail closed but not silently: a raw root never matches the
-        // canonicalized candidate, so every sendFile() will be rejected
         tracing::warn!(
             target: "rapira",
             "sendfile root {} cannot be canonicalized ({e}); sendFile() will reject every path",
@@ -30,10 +25,7 @@ fn sendfile_root() -> Option<std::path::PathBuf> {
         .clone()
 }
 
-/// The path the kernel holds for the open descriptor. None = no readback
-/// (or the file was unlinked meanwhile); callers fail closed.
-/// Gate 4b: open and validate the file on this thread, so the throw precedes
-/// any write. Returns the opened file and the slice length.
+/// Opens and validates on the calling thread, so a throw precedes any write.
 fn open_send_file(
     path: &[u8],
     offset: u64,
@@ -41,7 +33,6 @@ fn open_send_file(
 ) -> Result<(std::fs::File, u64), &'static CStr> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
-    // canonicalize resolves symlinks, so a link out of the root is an escape
     let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
     let Some(root) = sendfile_root() else {
         return Err(c"no sendfile root is configured");
@@ -95,7 +86,6 @@ pub(super) unsafe fn send_file_core(
     if let Some(cl) = st.declared_cl
         && st.sent_body + len > cl
     {
-        // the prefix rule, sendFile flavour: the fitting sub-slice is sent
         let fit = cl - st.sent_body;
         if unsafe { emit_head(st, Some(cl)) }.is_ok() && fit > 0 && !st.bodiless {
             let _ = unsafe {
@@ -115,8 +105,6 @@ pub(super) unsafe fn send_file_core(
         };
         return Verb::ContentLengthExceeded;
     }
-    // the host knows the length up front: an eos sendFile with nothing
-    // streamed before carries a real content-length without buffering
     let finalizing = (eos && st.sent_body == 0).then_some(len);
     if unsafe { emit_head(st, finalizing) }.is_err() {
         discard_unit(st);
@@ -139,8 +127,7 @@ pub(super) unsafe fn send_file_core(
 }
 
 /// # Safety
-/// `job` from receive; `path` points at `path_len` readable bytes (ZPP-owned);
-/// engine active on this thread.
+/// `job` from receive; `path` points at `path_len` readable bytes (ZPP-owned); engine active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_send_file(
     job: *mut c_void,

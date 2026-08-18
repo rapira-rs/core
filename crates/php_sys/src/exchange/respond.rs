@@ -1,28 +1,18 @@
-//! The response verbs: frame transport, head/body/trailer cores, seal,
-//! lifecycle probes, and the free_obj reclaim.
-
 use super::headers::{forbidden_trailer, split_framing, strip_framing, walk_head_table};
 use super::*;
 
-/// Verb outcomes; only the non-Ok arms surface to PHP, as throws. The cores
-/// return these instead of throwing so no owned state is live when
-/// `zend_throw_*` (which can bailout) runs.
+/// Cores return these instead of throwing: no owned state may be live when `zend_throw_*` bailouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Verb {
     Ok,
-    /// Advisory 1xx head, emitted; nothing thrown.
     Interim,
     Finalized,
     HeadWritten,
     Overflow,
-    /// The host closed the exchange first (gate 2, or a failed send).
     Discarded,
     ContentLengthExceeded,
-    /// An argument `\ValueError` discovered past the shell's table walk.
     BadField(&'static CStr),
-    /// `sendFile` gate 4b: raised before anything is written, catchable.
     FileNotSendable(&'static CStr),
-    /// Trailers may only end a response with a committed final head.
     HeadNotWritten,
 }
 
@@ -40,7 +30,6 @@ pub(super) unsafe fn throw_verb(v: Verb) {
                 rapira_ce_http_head_already_written_error,
                 c"the final head has already been written",
             ),
-            // the unit was sealed as truncated; the worker is not wedged
             Verb::Overflow => zend::throw_error(c"response chunk exceeds the host buffer cap"),
             Verb::Discarded => zend::throw_exception(
                 rapira_ce_work_discarded_exception,
@@ -64,11 +53,7 @@ pub(super) unsafe fn throw_verb(v: Verb) {
 
 pub(super) struct Closed;
 
-/// Push a frame; on a full channel, park with the wall timer disarmed. A
-/// parked thread never reaches an opcode boundary, so a fired timeout could
-/// not longjmp anyway - and on NTS its second expiry would `_exit(124)` the
-/// process. The re-arm grants the remaining budget (floor 1s), so
-/// max_execution_time keeps bounding compute while park time is excluded.
+/// On a full channel, park with the wall timer disarmed: a parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`; the re-arm grants the remaining budget (floor 1s).
 /// # Safety
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
@@ -81,7 +66,6 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
             Ok(()) => (Ok(()), false),
             Err(TrySendError::Closed(_)) => (Err(Closed), false),
             Err(TrySendError::Full(frame)) => unsafe {
-                // set_time_limit(0) means nothing is armed: skip the guard
                 let saved = (*rapira_eg()).timeout_seconds;
                 if saved > 0 {
                     zend_unset_timeout();
@@ -89,8 +73,6 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
                 let r = park_send(tx, frame);
                 if saved > 0 {
                     let remaining = (saved as u64).saturating_sub(consumed.as_secs()).max(1);
-                    // the park loop is pure Rust - nothing between disarm and
-                    // here can bailout or panic past the guard
                     zend_set_timeout(remaining as crate::zend_long, false);
                 }
                 (r, saved > 0)
@@ -103,9 +85,7 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
     result
 }
 
-/// The park: spin briefly, then 100µs naps. Only `Closed` ends it - a slow
-/// consumer is backpressure, not cancellation; the front's write timeout is
-/// what turns a dead-slow client into `Closed`.
+/// Only `Closed` ends the park: a slow consumer is backpressure, not cancellation.
 pub(super) fn park_send(tx: &Sender<Frame>, mut frame: Frame) -> Result<(), Closed> {
     let mut spins = 0u32;
     loop {
@@ -125,11 +105,7 @@ pub(super) fn park_send(tx: &Sender<Frame>, mut frame: Frame) -> Result<(), Clos
     }
 }
 
-/// Emit the committed head (implicit `200` with no fields when none), once.
-/// `finalizing_len` is the whole body length when this call also ends the
-/// response and nothing streamed before - the computed one-shot framing; a
-/// declared content-length always wins, and a bodiless response never gets a
-/// synthesized one.
+/// `finalizing_len` is the one-shot body length used only when nothing streamed before: a declared content-length wins, and a bodiless response gets none.
 /// # Safety
 /// As `send_frame`.
 pub(super) unsafe fn emit_head(
@@ -165,10 +141,7 @@ pub(super) unsafe fn emit_head(
     }
 }
 
-/// The host got there first: conclude the unit exactly once. Setting
-/// `Stage::Finalized` here is what keeps `exchange_drop`/`reclaim_current`
-/// from counting the unit a second time; `discarded` selects the exception
-/// class at gate 2.
+/// Setting `Stage::Finalized` here keeps `exchange_drop`/`reclaim_current` from counting the unit a second time.
 pub(super) fn discard_unit(st: &mut ExchangeState) {
     if st.stage == Stage::Finalized {
         return;
@@ -186,7 +159,6 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
         }
     });
     sb_update(Event::Handled(true));
-    // best effort - the channel is usually already closed
     if let Some(tx) = st.job.ctx.sender.take() {
         let _ = tx.try_send(Frame::End {
             trailers: Vec::new(),
@@ -205,19 +177,13 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: Field
     if st.stage == Stage::Finalized {
         return Verb::Finalized;
     }
-    // Nothing here commits a head: trailers may only end a response whose
-    // final head is already committed (flush/sendFile/writeBody all commit).
     if st.stage == Stage::Open {
         return Verb::HeadNotWritten;
     }
-    // Trailers-only: the head is committed but unsent, and nothing streamed,
-    // so the framing stays a real content-length instead of empty chunked.
     if unsafe { emit_head(st, Some(st.sent_body)) }.is_err() {
         discard_unit(st);
         return Verb::Discarded;
     }
-    // a bodiless response has no trailer section either, by the body's rule;
-    // validation already ran, protocol-independent
     let trailers = if st.bodiless { Vec::new() } else { trailers };
     unsafe {
         seal(st, /*truncated=*/ false, trailers)
@@ -233,7 +199,6 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
     trailers: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
-        // gate 1, input-only: shape + wire bytes + the forbidden categories
         let flat = match walk_head_table(trailers) {
             Ok(flat) => flat,
             Err(_) => {
@@ -272,13 +237,9 @@ pub(super) unsafe fn write_head_core(
         discard_unit(st);
         return Verb::Discarded;
     }
-    // Finalized implies a committed head, so one gate covers both - writeHead's
-    // documented class for any post-commit call is HeadAlreadyWrittenError.
     if st.stage != Stage::Open {
         return Verb::HeadWritten;
     }
-    // 101 ends the HTTP conversation and counts as a final head; the other
-    // 1xx are interim: on the wire at once, repeatable, no framing fields.
     if status != 101 && (100..200).contains(&status) {
         let head = ResponseHead {
             status,
@@ -302,8 +263,7 @@ pub(super) unsafe fn write_head_core(
         headers: split.headers,
         body_coded: split.body_coded,
     });
-    // 1xx carries no body either (RFC 9112 §6.3), so a committed 101 drops
-    // chunks like 204/304; the front rewrites a final 1xx to 502.
+    // 1xx carries no body either (RFC 9112 §6.3), so a committed 101 drops chunks like 204/304.
     if matches!(status, 204 | 304 | 101) {
         st.bodiless = true;
     }
@@ -346,8 +306,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
 }
 
 /// # Safety
-/// `st` valid; `p` points at `len` readable bytes (checked against the cap
-/// before the slice is formed). Engine active (`send_frame`).
+/// `st` valid; `p` points at `len` readable bytes; engine active.
 pub(super) unsafe fn write_body_core(
     st: &mut ExchangeState,
     p: *const c_char,
@@ -361,13 +320,9 @@ pub(super) unsafe fn write_body_core(
     if st.stage == Stage::Finalized {
         return Verb::Finalized;
     }
-    // Contract: an empty chunk without eos does nothing - it is how a
-    // chunked body terminates, never a head commit.
     if len == 0 && !eos {
         return Verb::Ok;
     }
-    // Per-chunk cap: a single write the host will not hold in flight. Seal
-    // truncated so the unit concludes instead of wedging the next receive().
     if len > MAX_BUFFERED_BODY {
         tracing::error!(
             target: "rapira",
@@ -383,9 +338,6 @@ pub(super) unsafe fn write_body_core(
     if let Some(cl) = st.declared_cl
         && st.sent_body + len64 > cl
     {
-        // The prefix rule: send the bytes that fit the declaration, complete
-        // the response per it, reject this write. Later writes land on
-        // Finalized. The surplus never reaches the wire.
         let fit = usize::try_from(cl - st.sent_body).unwrap_or(usize::MAX);
         if unsafe { emit_head(st, Some(cl)) }.is_ok() && fit > 0 && !st.bodiless {
             let bytes =
@@ -398,8 +350,6 @@ pub(super) unsafe fn write_body_core(
         };
         return Verb::ContentLengthExceeded;
     }
-    // The head leaves with the first body write; a one-shot carries its
-    // computed length, a stream leaves the framing to the front.
     let finalizing = (eos && st.sent_body == 0).then_some(len64);
     if unsafe { emit_head(st, finalizing) }.is_err() {
         discard_unit(st);
@@ -443,13 +393,9 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
     })
 }
 
-/// The worker finished: unlink spools, count once, emit `End`, close the
-/// stream. A gone client here is not an error - the worker finalized first.
 /// # Safety
 /// As `send_frame`.
 pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: FieldLines) {
-    // Contract: spool files are gone when the exchange finalizes. unlink takes
-    // the path, so the Drop net stays a no-op afterwards.
     if let BodyState::Multipart { files, .. } = &mut st.body {
         for p in files {
             p.upload.file.unlink();
@@ -472,7 +418,6 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Fie
             },
         )
     };
-    // deterministic close: a consumer reading to None never waits on free_obj
     st.job.ctx.sender = None;
 }
 
@@ -488,8 +433,6 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(job: *mut c_void) -> bool {
         } else if st.stage == Stage::Finalized {
             Verb::Finalized
         } else {
-            // commits an implicit 200 when no head was written; with per-write
-            // flushing nothing else is pending, so a repeat flush is a no-op
             match emit_head(st, None) {
                 Ok(()) => Verb::Ok,
                 Err(Closed) => {
@@ -512,12 +455,8 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(job: *mut c_void) -> bool {
 /// `job` from receive.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_is_finalized(job: *const c_void) -> bool {
-    // false on a caught panic: claiming "ended" on an open unit would steer a
-    // conforming worker into dropping it.
     guard(false, || unsafe {
         let st = &*job.cast::<ExchangeState>();
-        // a host-closed unit reports finalized: the outcome is committed by
-        // the host (read-only probe, no bookkeeping side effect)
         st.stage == Stage::Finalized || st.job.ctx.sender.as_ref().is_some_and(Sender::is_closed)
     })
 }
@@ -526,17 +465,13 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_finalized(job: *const c_void) -> 
 /// `job` from receive.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(job: *const c_void) -> bool {
-    // false on a caught panic: a panic must not steer a conforming worker
-    // into abandoning a healthy unit.
     guard(false, || unsafe {
         let st = &*job.cast::<ExchangeState>();
         st.host_closed()
     })
 }
 
-/// Reclaims the Box when PHP frees the Exchange object (free_obj). A unit
-/// dropped unfinalized is failed by the host: a complete 500 when nothing
-/// reached the wire, a truncated end otherwise - never an implicit response.
+/// Reclaims the Box on free_obj; a unit lost to a bailout (fatal, timeout) skips the failure frames, so the host's deadline reports the worker death instead.
 /// # Safety
 /// `job` is NULL or a pointer produced by `Box::into_raw` in receive.
 #[unsafe(no_mangle)]
@@ -546,30 +481,22 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
             return;
         }
         let ptr: *mut ExchangeState = job.cast();
-        // untrack before the reclaim so a later reclaim_current cannot double-free
         update(|c| {
             if matches!(c.unit, Unit::Handling(p) | Unit::Sealed(p) if p == ptr) {
                 c.unit = Unit::Idle;
             }
         });
         let mut st = unsafe { Box::from_raw(ptr) };
-        // A unit dying with the cycle (bailout: fatal, timeout) is a worker
-        // death, not an abandonment - destructors are skipped on fatals per the
-        // contract, so the loss goes to the host's deadline: the channel dies
-        // unsent and the front reports the worker death.
         let cycle_died = unsafe { (*crate::rapira_cg()).unclean_shutdown };
         if st.stage != Stage::Finalized {
             sb_update(Event::Handled(true));
         }
         if st.stage != Stage::Finalized && !cycle_died {
-            // same order as seal(): spool files are gone before the stream ends
             if let BodyState::Multipart { files, .. } = &mut st.body {
                 for p in files {
                     p.upload.file.unlink();
                 }
             }
-            // best effort like discard_unit: a full or closed channel falls
-            // back to channel-death semantics at the consumer
             if let Some(tx) = st.job.ctx.sender.take() {
                 if st.head_sent {
                     let _ = tx.try_send(Frame::End {

@@ -3,27 +3,21 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tests::{drain, fixture, php_lock, req};
 
-// A worker script that fatals before its receive loop can never read the
-// intake channel from PHP. The Rust boot-failure drain must (a) answer the
-// queued job with 503 and (b) observe channel closure so `Drop for Rapira`
-// returns instead of joining a worker that retries the boot forever.
+// A worker that fatals before its receive loop must 503 the queued job and let Drop return instead of joining a forever-retrying boot.
 #[test]
 fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
     let _guard = php_lock();
     let (done_tx, done_rx) = mpsc::sync_channel::<(u16, String)>(1);
 
-    // Rapira is !Send: build, use, and drop it entirely on one thread. The test
-    // thread only enforces a deadline so a regression fails loudly instead of
-    // hanging the whole suite.
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
         let r = Rapira::start(Mode::Dispatcher(fixture(
             "failboot_worker_tests/failboot-worker.php",
         )))?;
         let h = r.handle();
         let rx = h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php"))?;
-        drop(h); // last non-Rapira intake sender - lets the channel close on drop(r)
+        drop(h);
         let (status, body) = drain(rx);
-        drop(r); // drops the last sender so the worker's boot retry exits
+        drop(r);
         let _ = done_tx.send((status, body));
         Ok(())
     });
@@ -36,10 +30,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
     Ok(())
 }
 
-// UNHEALTHY_AFTER (=5) consecutive boot failures must flag the worker unhealthy.
-// Each failed boot answers one queued job with 503, then retries the boot; the 5th
-// boot sets the scoreboard flag. Deadline-guarded so a regression (no 503 / hung
-// Drop) fails loudly instead of hanging the suite.
+// UNHEALTHY_AFTER (5) consecutive boot failures must set the scoreboard unhealthy flag, each failed boot 503ing its queued job.
 #[test]
 fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
     let _guard = php_lock();

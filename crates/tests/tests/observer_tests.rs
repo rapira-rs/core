@@ -3,11 +3,7 @@ use std::path::Path;
 use php_sys::{Mode, Rapira};
 use tests::{drain, fixture, php_lock_with_ini, req};
 
-// The observer API only registers at module startup, and zend_test's observer writes
-// markers into the response body - so these run in their own process with their own ini,
-// never the shared suite. Requires PHP built with --enable-zend-test; without it the
-// observer API stays disabled and both tests degrade to plain worker runs.
-// https://github.com/php/php-src/pull/5857
+// Observer API registers only at module startup, so these tests run in their own process with their own ini; without --enable-zend-test the observer stays disabled (https://github.com/php/php-src/pull/5857).
 fn observer_lock() -> std::sync::MutexGuard<'static, ()> {
     php_lock_with_ini(Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -26,13 +22,9 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
     if probe.contains("skip") {
         drop(h);
         r.shutdown();
-        return Ok(()); // PHP built without --enable-zend-test
+        return Ok(());
     }
 
-    // outer() -> inner() -> trigger_error(E_USER_ERROR) bails; the closing tags
-    // for both frames open at the bailout must still reach the response body,
-    // properly nested and exactly once - an out-of-order or duplicated close is
-    // precisely the unbalanced-observer-frames regression this test guards.
     let (_, b1) =
         drain(h.handle_blocking(req("/?mode=fatal", "observer_tests/observer-bailout.php"))?);
     let mut pos = 0;
@@ -50,7 +42,6 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
         );
     }
 
-    // worker survives; the next request's frames are balanced too
     let (_, b2) =
         drain(h.handle_blocking(req("/?mode=ok", "observer_tests/observer-bailout.php"))?);
     assert!(

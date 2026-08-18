@@ -8,40 +8,38 @@ function fib(int $n): int
 function nest(int $depth): int
 {
 	if ($depth === 0) {
-		return fib(12);                   // 144
+		return fib(12);
 	}
 	$inner = new Fiber(fn(): int => nest($depth - 1));
-	$inner->start();                      // inner runs to completion (never suspends)
+	$inner->start();                      // inner runs to completion, never suspends
 	return $inner->getReturn();
 }
 
 $handler = static function (): void {
 	$sum = 0;
 
-	// 300 independent fibers, each entering, recursing, and suspending twice.
-	//    Every start/resume crosses the fiber<->worker stack boundary.
+	// 300 independent fibers, each suspending twice: every start/resume crosses the fiber<->worker stack boundary.
 	for ($i = 0; $i < 300; $i++) {
 		$f = new Fiber(function (): int {
-			$a = fib(14);                 // 377 - recursion on the fiber's OWN stack
-			$b = Fiber::suspend($a);      // -> worker stack; resumes with 377
-			$c = Fiber::suspend($b + 1);  // -> worker stack; resumes with 378
-			return $a + $c;               // 755
+			$a = fib(14);                 // recursion runs on the fiber's own stack
+			$b = Fiber::suspend($a);
+			$c = Fiber::suspend($b + 1);
+			return $a + $c;
 		});
-		$r1 = $f->start();                // 377  (first suspend value)
-		$r2 = $f->resume($r1);            // 378  (second suspend value)
-		$f->resume($r2);                  // fiber completes
-		$sum += $f->getReturn();          // 755 each
+		$r1 = $f->start();
+		$r2 = $f->resume($r1);
+		$f->resume($r2);
+		$sum += $f->getReturn();
 	}
 	// sum = 300 * 755 = 226500
 
-	// 25 deeply nested fibers - 25 fiber stacks stacked at once.
-	$sum += nest(25);                     // +144
+	// 25 nested fibers keep 25 fiber stacks live at once; adds 144.
+	$sum += nest(25);
 
 	header('Content-Type: text/plain');
-	echo "fibers ok sum=$sum\n";          // 226644
+	echo "fibers ok sum=$sum\n";
 };
 
-// Resident loop: each iteration handles one request through $handler.
 while (\Rapira\handle_request($handler)) {
 	gc_collect_cycles();
 }

@@ -1,6 +1,7 @@
 <?php
 $handler = static function (): void {
-	file_get_contents('php://input'); // materialize the request body stream
+	// result discarded: the read materializes the stream the next line counts
+	file_get_contents('php://input');
 	header('Content-Type: text/plain');
 	echo "streams=", count(get_resources('stream'));
 };

@@ -5,10 +5,7 @@ use crate::{
 };
 
 /// # Safety
-/// Must be called on a thread with an initialized PHP interpreter (a live
-/// `ts_resource`) inside an active request (between `php_request_startup` and
-/// `php_request_shutdown`). Executes arbitrary PHP via `php_execute_script` and may
-/// `zend_bailout`, so the caller must establish a `zend_try` boundary where required.
+/// Requires a live `ts_resource` inside an active request; may `zend_bailout`, so the caller must establish a `zend_try` boundary.
 pub unsafe fn run_script(script: &Path) -> bool {
     unsafe {
         let c_script: CString =

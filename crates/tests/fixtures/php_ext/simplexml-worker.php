@@ -6,7 +6,6 @@ $handler = static function (): void {
 	}
 	if (($_GET['boom'] ?? '') === '1') {
 		ini_set('display_errors', '0');
-		// keep libxml parse warnings out of the response
 		libxml_use_internal_errors(true);
 		new SimpleXMLElement('not xml at all');
 		return;

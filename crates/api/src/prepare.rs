@@ -1,7 +1,3 @@
-//! Master-side pre-fork resource preparation. Extensions bind their listen
-//! sockets here - synchronously, before any fork and before any runtime
-//! exists - and the bound fds are inherited by every forked worker.
-
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
@@ -10,17 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-/// Listen backlog for every pre-fork bind. Matches pingora-core's
-/// LISTENER_BACKLOG: pingora re-listens with its own value when it adopts the
-/// fd (on Linux a re-listen just updates the backlog), so any other default
-/// would be silently rewritten in-worker.
+/// Matches pingora-core's LISTENER_BACKLOG: pingora re-listens with its own value on adoption, so any other default is silently rewritten in-worker.
 pub const LISTEN_BACKLOG: i32 = 65535;
 
-/// Bind address of a prepared listener. `addr_string()` is the canonical
-/// string for BOTH pingora's endpoint (`add_tcp`/`add_uds`) and its `Fds` key -
-/// pingora adopts only on an exact match, and a mismatch silently rebinds
-/// (for unix sockets: unlinks and steals the master's socket). Derive both
-/// strings from this one method, never by hand.
+/// `addr_string()` must feed both pingora's endpoint and its `Fds` key: adoption needs an exact match, a mismatch silently rebinds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ListenAddr {
     Tcp(SocketAddr),
@@ -39,14 +28,7 @@ impl ListenAddr {
     }
 }
 
-/// A bound, listening socket created in the master and inherited by every
-/// forked worker (fork copies fds regardless of CLOEXEC; the CLOEXEC set here
-/// matters only for a future re-exec reload, which must clear it first).
-///
-/// Ownership: exactly one closer per process. In the MASTER the listener stays
-/// inside its extension for the master's whole life - respawned workers must
-/// inherit it again. In a WORKER, `run` transfers the child's copy to the
-/// adopter via `into_raw_fd` (pingora closes it at teardown).
+/// Exactly one closer per process: the master holds its copy for its whole life so respawned workers keep inheriting it, a worker hands its copy to the adopter.
 #[derive(Debug)]
 pub struct PreparedListener {
     fd: OwnedFd,
@@ -75,8 +57,7 @@ impl IntoRawFd for PreparedListener {
     }
 }
 
-/// Master-side binding context handed to `Extension::prepare`. Sync syscalls
-/// only; one per boot.
+/// Runs before any fork and before a runtime exists: sync syscalls only, one context per boot.
 pub struct PrepareCtx {
     backlog: i32,
     bound: Vec<ListenAddr>,
@@ -98,17 +79,12 @@ impl PrepareCtx {
         }
     }
 
-    /// Raw fds of every listener bound so far, for the master's ondemand poll
-    /// set. Backed by dups owned by this context, so they stay valid for the
-    /// context's lifetime even if an extension drops its `PreparedListener`.
+    /// Backed by dups owned by this context, so the fds stay valid even if an extension drops its `PreparedListener`.
     pub fn listener_fds(&self) -> Vec<RawFd> {
         self.fds.iter().map(|fd| fd.as_raw_fd()).collect()
     }
 
-    /// socket(STREAM|CLOEXEC) → SO_REUSEADDR → bind → listen → O_NONBLOCK.
-    /// The returned listener carries the RESOLVED address (port 0 becomes real).
-    /// Nonblocking is set here because pingora's adoption path hands the fd
-    /// straight to tokio, which requires it.
+    /// Nonblocking is set here because pingora's adoption path hands the fd straight to tokio, which requires it.
     pub fn bind_tcp(&mut self, addr: SocketAddr) -> anyhow::Result<PreparedListener> {
         let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
             .with_context(|| format!("socket for {addr}"))?;
@@ -133,13 +109,8 @@ impl PrepareCtx {
         })
     }
 
-    /// probe → unlink-stale → bind → listen → chmod 0o666 → O_NONBLOCK.
-    /// 0o666 matches pingora's fresh-bind default and its adopt-branch
-    /// re-chmod, so permissions are stable across bind and adoption.
+    /// The connect probe guards against unlinking a live socket: WouldBlock means a full backlog on a live peer, not an absent one. Mode 0o666 matches pingora's fresh-bind default and its adopt-branch re-chmod.
     pub fn bind_unix(&mut self, path: &Path) -> anyhow::Result<PreparedListener> {
-        // Never unlink a live socket: another instance may be serving on it.
-        // A nonblocking connect distinguishes live (success, or WouldBlock on
-        // a full backlog) from stale (ConnectionRefused) or absent (NotFound).
         let probe = Socket::new(Domain::UNIX, Type::STREAM, None)?;
         probe.set_nonblocking(true)?;
         match probe.connect(&SockAddr::unix(path)?) {
@@ -206,13 +177,11 @@ mod tests {
         };
         assert_ne!(resolved.port(), 0);
 
-        // Nonblocking + CLOEXEC flags are set on the fd.
         let flags = unsafe { libc::fcntl(l.as_raw_fd(), libc::F_GETFL) };
         assert!(flags & libc::O_NONBLOCK != 0, "O_NONBLOCK expected");
         let fdflags = unsafe { libc::fcntl(l.as_raw_fd(), libc::F_GETFD) };
         assert!(fdflags & libc::FD_CLOEXEC != 0, "FD_CLOEXEC expected");
 
-        // The queue really accepts: connect, then accept via a blocking clone.
         let mut client = std::net::TcpStream::connect(resolved).unwrap();
         let std_l: std::net::TcpListener = {
             use std::os::fd::{FromRawFd, IntoRawFd};
@@ -233,7 +202,6 @@ mod tests {
         let path = dir.join("t.sock");
 
         for _ in 0..2 {
-            // second pass proves stale-socket reclaim
             let mut ctx = PrepareCtx::new();
             let l = ctx.bind_unix(&path).unwrap();
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();

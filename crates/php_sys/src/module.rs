@@ -5,17 +5,10 @@ use std::{
     ptr::{null, null_mut},
 };
 
-/// SAPI ini defaults, run by php_module_startup before any php.ini is parsed
-/// (main/php_ini.c:420), so an explicit user value still wins. The built-in
-/// defaults (main/main.c: display_errors=1, log_errors=0) fit an interactive
-/// SAPI; a server wants every diagnostic delivered to the log_message callback
-/// and none of them written into the response body.
+/// Runs before php.ini is parsed (main/php_ini.c:420) so an explicit user value still wins; startup-stage interned strings are permanent, so config_zval_dtor's release is a no-op.
 unsafe extern "C" fn ini_defaults(configuration_hash: *mut HashTable) {
     for (name, value) in [(c"display_errors", c"0"), (c"log_errors", c"1")] {
         unsafe {
-            // zend_startup installs the interner before php_init_config runs
-            // (main/main.c:2249 vs 2288). Startup-stage interned strings are
-            // permanent, so config_zval_dtor's zend_string_release is a no-op.
             let intern = zend_string_init_interned.expect("set by zend_startup");
             let mut v: zval = std::mem::zeroed();
             v.value.str_ = intern(value.as_ptr(), value.count_bytes(), true);
@@ -30,13 +23,9 @@ unsafe extern "C" fn ini_defaults(configuration_hash: *mut HashTable) {
     }
 }
 
+/// On 8.4 the SAPI name must be "fastcgi": OPcache <= 8.4 starts only for names on accel_find_sapi()'s allowlist, removed in 8.5 (https://github.com/php/php-src/commit/3088d6406847dd425dd43122f5de57cc97aa4408).
 pub(crate) fn build_sapi_module() -> sapi_module_struct {
     sapi_module_struct {
-        // OPcache <= 8.4 starts only for SAPI names on accel_find_sapi()'s allowlist; an
-        // unlisted name leaves accel_startup_ok false, so the pre-fork MINIT never creates
-        // the SHM. "fastcgi" is on that allowlist and is referenced nowhere else in php-src.
-        // 8.5 removed the allowlist:
-        // https://github.com/php/php-src/commit/3088d6406847dd425dd43122f5de57cc97aa4408
         #[cfg(php84)]
         name: c"fastcgi".as_ptr() as *mut c_char,
         #[cfg(not(php84))]
@@ -64,12 +53,6 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         treat_data: Some(php_default_treat_data),
         executable_location: null_mut(),
         php_ini_ignore: 0,
-        // The working directory is not part of ini discovery. A server's cwd is
-        // wherever the operator launched it - under a container, the mounted
-        // application root - so a php.ini sitting there must not reconfigure the
-        // engine for every worker. php-src's own cli and phpdbg set this for the
-        // same reason. PHPRC and the compiled-in config-file path are unaffected.
-        // https://www.php.net/manual/en/configuration.file.php
         php_ini_ignore_cwd: 1,
         get_fd: None,
         force_http_10: None,

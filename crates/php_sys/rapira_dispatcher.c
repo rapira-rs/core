@@ -16,7 +16,6 @@ extern bool rapira_rs_get_dispatcher(zval *return_value);
 extern int rapira_rs_handle_request(zend_fcall_info *fci,
                                     zend_fcall_info_cache *fcc);
 
-// rapira mode
 int rapira_mode = RAPIRA_MODE_CLASSIC;
 
 ZEND_FUNCTION(Rapira_get_version) {
@@ -35,8 +34,7 @@ ZEND_FUNCTION(Rapira_get_dispatcher) {
     }
 }
 
-// Set while a handler runs: handle_request() from inside its own handler would
-// pull a second job and rebind SG(server_context) over the live one.
+// a nested handle_request() would rebind SG(server_context) over the live job
 static bool rapira_in_handle_request = false;
 
 ZEND_FUNCTION(Rapira_handle_request) {
@@ -61,8 +59,7 @@ ZEND_FUNCTION(Rapira_handle_request) {
     int action = rapira_rs_handle_request(&fci, &fcc);
     rapira_in_handle_request = false;
     if (action == RAPIRA_HANDLE_RECYCLE) {
-        // the bailout was contained in Rust and the response already sealed;
-        // unwind the resident script so no PHP runs over post-longjmp state
+        // response sealed in Rust; unwind so no PHP runs post-longjmp
         zend_bailout();
     }
     RETURN_BOOL(action == RAPIRA_HANDLE_CONTINUE);
@@ -83,11 +80,7 @@ ZEND_FUNCTION(Rapira_log) {
 
     rapira_rs_log_call(message, level ? Z_OBJ_P(level) : NULL, context);
 
-    // log() never throws: clear an exception a context value's jsonSerialize()
-    // or __get raised during serialization. exit()/die() land here as
-    // unwind/graceful-exit "exceptions" and must keep unwinding. The release
-    // can run a userland __destruct that bails out, so the clear must sit
-    // where no Rust frames are live.
+    // log() never throws: drop an exception from a context jsonSerialize()
     if (EG(exception) && !zend_is_unwind_exit(EG(exception)) &&
         !zend_is_graceful_exit(EG(exception))) {
         zend_clear_exception();

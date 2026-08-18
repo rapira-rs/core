@@ -1,7 +1,3 @@
-//! E2E harness: spawn a real `rapira serve` master, drive it over HTTP and
-//! signals, and observe the worker pool through `ps`. Every wait is bounded and
-//! every failure dumps `ps` output plus the server-log tail.
-
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -15,10 +11,8 @@ use std::time::{Duration, Instant};
 /// Connect budget for a freshly spawned master (CI macOS worst case).
 pub const BOOT: Duration = Duration::from_secs(30);
 
-// Frozen master exit codes; OK and FAILBOOT are asserted, FORCED names diagnostics.
 /// Master could not bring up a serviceable gen-0 pool.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
-/// Master graceful stop completed.
 pub const MASTER_EXIT_OK: i32 = 0;
 /// Master forced stop (a second signal arrived while draining).
 pub const MASTER_EXIT_FORCED: i32 = 130;
@@ -35,7 +29,6 @@ impl Server {
         self.child.id()
     }
 
-    /// Poll `try_wait` until the master exits or `timeout` elapses.
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
         let end = Instant::now() + timeout;
         loop {
@@ -51,20 +44,17 @@ impl Server {
         }
     }
 
-    /// Non-blocking exit check.
     pub fn try_status(&mut self) -> Option<ExitStatus> {
         self.child.try_wait().ok().flatten()
     }
 }
 
 impl Drop for Server {
+    /// Signals and snapshots only while the master is unreaped: a reaped pid can be reused.
     fn drop(&mut self) {
-        // Only signal a live master: the pid of a reaped child may be reused.
         if self.child.try_wait().ok().flatten().is_none() {
             signal(self.child.id(), libc::SIGTERM);
             if self.wait_exit(Duration::from_secs(5)).is_none() {
-                // Query workers only now: a snapshot from before the SIGTERM
-                // could name pids that exited (and were reused) meanwhile.
                 let kids = worker_pids(self.child.id());
                 signal(self.child.id(), libc::SIGKILL);
                 for k in kids {
@@ -81,10 +71,7 @@ impl Drop for Server {
     }
 }
 
-/// Path to the built `rapira` binary. The bin is defined by the root package,
-/// so CARGO_BIN_EXE is not set here - locate it beside the test binary
-/// (target/<profile>/deps/<test> -> target/<profile>/rapira). `RAPIRA_BIN`
-/// overrides. The Makefile/CI build the bin before running this suite.
+/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here: locate it beside the test binary, or via `RAPIRA_BIN`.
 fn rapira_bin() -> PathBuf {
     if let Ok(p) = std::env::var("RAPIRA_BIN") {
         return PathBuf::from(p);
@@ -103,43 +90,28 @@ fn rapira_bin() -> PathBuf {
     bin
 }
 
-/// Boot a master with a generated config, retrying the ephemeral port up to 3
-/// times to survive the bind :0 -> spawn TOCTOU race. Panics with the log tail
-/// if the master never accepts a connection.
-///
-/// `extra_toml` is appended inside the `[pool]` table, so bare keys are pool
-/// keys. Any other section (`[supervisor]`, `[log]`) needs its own header and
-/// must come after all bare pool keys - a header closes `[pool]` for everything
-/// that follows. A misplaced key is a boot error that surfaces here as the
-/// generic "never accepted a connection" panic.
+/// `extra_toml` is appended inside `[pool]`, so any other section needs its own header and must come after all bare pool keys.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
     spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), None)
 }
 
-/// [`spawn_with_config`] for keys that belong inside the `[http]` table, which the
-/// trailing `extra_toml` cannot reach without redeclaring the table.
+/// [`spawn_with_config`] for keys inside the `[http]` table, which the trailing `extra_toml` cannot reach.
 pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
     spawn_with_extras(fixture, processes, http_extra, "", Some("info"), None)
 }
 
-/// [`spawn_with_config`] without the pinned `RUST_LOG`, so the `[log]` section
-/// owns the filter - for tests asserting config-driven filtering.
+/// [`spawn_with_config`] without the pinned `RUST_LOG`, so the `[log]` section owns the filter.
 pub fn spawn_without_rust_log(fixture: &str, processes: usize, extra_toml: &str) -> Server {
     spawn_with_extras(fixture, processes, "", extra_toml, None, None)
 }
 
-/// Working-directory php.ini setup. Only the ini tests pass one; every other
-/// spawner leaves the child with the test process's cwd.
+/// A `php.ini` written into the directory the child runs from, optionally also pointed at by PHPRC.
 pub struct CwdIni<'a> {
-    /// Written to `php.ini` in the directory the child runs from.
     pub contents: &'a str,
-    /// Also point PHPRC at that directory, making the file one PHP is expected
-    /// to read - the control for the cwd case.
     pub via_phprc: bool,
 }
 
-/// Spawn with a `php.ini` planted in the child's working directory, to pin down
-/// that the SAPI does not read ini files from the cwd.
+/// Pins that the SAPI does not read ini files from the cwd.
 pub fn spawn_in_cwd(fixture: &str, processes: usize, php_ini: &str) -> Server {
     let ini = CwdIni {
         contents: php_ini,
@@ -148,8 +120,7 @@ pub fn spawn_in_cwd(fixture: &str, processes: usize, php_ini: &str) -> Server {
     spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
 }
 
-/// [`spawn_in_cwd`] with PHPRC pointing at the same directory: the control
-/// showing the very same file does apply through a supported path.
+/// [`spawn_in_cwd`] with PHPRC pointing at the same directory: the control showing that same file does apply.
 pub fn spawn_in_cwd_with_phprc(fixture: &str, processes: usize, php_ini: &str) -> Server {
     let ini = CwdIni {
         contents: php_ini,
@@ -167,8 +138,6 @@ fn spawn_with_extras(
     cwd_ini: Option<CwdIni<'_>>,
 ) -> Server {
     let dir = scratch_dir();
-    // `fixture` is grouped by owning test module (e.g. "lifecycle/echo-worker.php"),
-    // but the scratch dir is flat: copy to the bare name and point the config at that.
     let name = Path::new(fixture)
         .file_name()
         .unwrap_or_else(|| panic!("fixture {fixture} has no file name"));
@@ -198,10 +167,7 @@ fn spawn_with_extras(
             }
         }
         match rust_log {
-            // Pinned by default so worker/scaling activity lands in the failure
-            // diagnostics regardless of the config under test.
             Some(v) => cmd.env("RUST_LOG", v),
-            // Cleared, not just unpinned: the developer's shell may set it.
             None => cmd.env_remove("RUST_LOG"),
         };
         let mut child = cmd
@@ -212,7 +178,6 @@ fn spawn_with_extras(
         if wait_for_port(&addr, &mut child, BOOT) {
             return Server { child, addr, dir };
         }
-        // Bind race or boot failure: reap and retry on a fresh port.
         let _ = child.kill();
         let _ = child.wait();
         last_log = log_tail(&dir);
@@ -235,16 +200,11 @@ fn render_config(
     )
 }
 
-/// Connect-only readiness: the master binds the listen socket before forking, so
-/// a successful connect means "boot far enough to serve". Returns false early if
-/// the child exits first.
+/// Connect-only readiness: the master binds the listen socket before forking, so a successful connect means it booted far enough to serve.
 fn wait_for_port(addr: &SocketAddr, child: &mut Child, timeout: Duration) -> bool {
     let end = Instant::now() + timeout;
     while Instant::now() < end {
         if TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok() {
-            // The connect could have reached a free_port() collision winner, not
-            // our child. Give a bind failure a moment to surface, then require
-            // the child alive; false falls through to the caller's retry loop.
             std::thread::sleep(Duration::from_millis(100));
             return child.try_wait().ok().flatten().is_none();
         }
@@ -256,14 +216,12 @@ fn wait_for_port(addr: &SocketAddr, child: &mut Child, timeout: Duration) -> boo
     false
 }
 
-/// Hand-rolled HTTP/1.1 GET with `Connection: close`; the body is read to EOF
-/// (close-delimited), so no chunked/keep-alive parsing is needed.
+/// HTTP/1.1 GET with `Connection: close`: the body is close-delimited, so no chunked or keep-alive parsing is needed.
 pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
     http_get_with_headers(addr, path, &[], timeout)
 }
 
-/// [`http_get`] plus extra request fields, written in the order given so a repeated
-/// name stays repeated on the wire.
+/// [`http_get`] plus extra request fields, written in the order given so a repeated name stays repeated on the wire.
 pub fn http_get_with_headers(
     addr: SocketAddr,
     path: &str,
@@ -273,8 +231,7 @@ pub fn http_get_with_headers(
     parse_status_and_body(&http_get_raw(addr, path, fields, timeout)?)
 }
 
-/// The whole response, head included - for assertions about which fields actually
-/// reached the client.
+/// The whole response, head included: for assertions about which fields reached the client.
 pub fn http_get_raw(
     addr: SocketAddr,
     path: &str,
@@ -294,8 +251,6 @@ pub fn http_get_raw(
     write!(s, "\r\n")?;
     s.flush()?;
     let mut raw = Vec::new();
-    // a reset with nothing received is a responseless close (the server never
-    // read the request); read_to_end keeps what arrived before the error
     if let Err(e) = s.read_to_end(&mut raw)
         && !(raw.is_empty() && e.kind() == io::ErrorKind::ConnectionReset)
     {
@@ -304,8 +259,7 @@ pub fn http_get_raw(
     Ok(raw)
 }
 
-/// As [`http_raw`], returning the unparsed response bytes - for asserting on
-/// the header block itself.
+/// As [`http_raw`], returning the unparsed response bytes for asserting on the header block itself.
 pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
     let mut s = TcpStream::connect_timeout(&addr, timeout)?;
     s.set_read_timeout(Some(timeout))?;
@@ -317,8 +271,7 @@ pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io
     Ok(raw)
 }
 
-/// A caller-controlled request: no implicit Host or Connection line. For
-/// requests the other helpers cannot express (e.g. a missing Host).
+/// A caller-controlled request: no implicit Host or Connection line.
 pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
     let mut s = TcpStream::connect_timeout(&addr, timeout)?;
     s.set_read_timeout(Some(timeout))?;
@@ -330,8 +283,7 @@ pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Resu
     parse_status_and_body(&raw)
 }
 
-/// Sibling of [`http_get`] with a body. `content_type` is bytes, not text: a multipart
-/// boundary is opaque octets and obs-text is legal in a field value.
+/// Sibling of [`http_get`] with a body; `content_type` is bytes because a multipart boundary is opaque octets and obs-text is legal in a field value.
 pub fn http_post(
     addr: SocketAddr,
     path: &str,
@@ -360,8 +312,6 @@ pub fn http_post(
 
 fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {
     if raw.is_empty() {
-        // distinct from a partial head: zero bytes means the connection closed
-        // responseless, the one failure an idempotent client retries
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "closed before any response byte",
@@ -385,9 +335,7 @@ fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {
     Ok((code, raw[head_end + 4..].to_vec()))
 }
 
-/// Direct, non-zombie children of `master`. `ps -axo pid=,ppid=,state=` is valid
-/// on both procps (Linux) and BSD ps (macOS); a `Z` state would count a
-/// dead-but-unreaped worker during a respawn/reload window, so it is excluded.
+/// Direct children of `master`; the `ps` field syntax is valid on both procps and BSD ps, and `Z` is excluded so a dead-but-unreaped worker is not counted.
 pub fn worker_pids(master: u32) -> Vec<u32> {
     let out = match Command::new("ps")
         .args(["-axo", "pid=,ppid=,state="])
@@ -414,8 +362,7 @@ pub fn worker_pids(master: u32) -> Vec<u32> {
     pids
 }
 
-/// Poll `worker_pids` at 50ms until `pred` holds; panic with diagnostics on
-/// deadline. Returns the matching pid set.
+/// Poll `worker_pids` until `pred` holds; panic with diagnostics on deadline.
 pub fn wait_workers(
     srv: &Server,
     deadline: Duration,
@@ -446,10 +393,7 @@ pub fn signal(pid: u32, sig: i32) {
     }
 }
 
-/// Per-thread request outcome counters. `refused` = connection never accepted
-/// (the listener closed); the reload keeps it open, so it must stay 0.
-/// `truncated` = accepted then reset mid-response, the prefork accept-race when
-/// a recycled worker drops a just-accepted connection; bounded by workers cycled.
+/// Per-thread outcome counters: `refused` means the listener closed (a reload keeps it open, so it must stay 0), `truncated` means accepted then reset mid-response.
 pub struct Tally {
     pub ok: u64,
     pub refused: u64,
@@ -474,8 +418,7 @@ pub struct Storm {
     threads: Vec<JoinHandle<Tally>>,
 }
 
-/// Launch `threads` workers, each looping `GET /` until halted. 200 counts ok,
-/// anything else counts failed and records the last error.
+/// Launch `threads` workers, each looping `GET /` until halted; only 200 counts ok.
 pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
     let stop = Arc::new(AtomicBool::new(false));
     let handles = (0..threads)
@@ -528,7 +471,6 @@ impl Storm {
     }
 }
 
-/// Assert the master exited with `expected`, naming both codes on mismatch.
 pub fn assert_exit_code(status: Option<ExitStatus>, expected: i32, srv: &Server) {
     match status.and_then(|s| s.code()) {
         Some(code) if code == expected => {}
@@ -621,8 +563,7 @@ fn free_port() -> u16 {
     l.local_addr().expect("local_addr").port()
 }
 
-/// An open connection for incremental reads - the streaming assertions the
-/// read-to-EOF helpers cannot express (they would block until the stream ends).
+/// An open connection for incremental reads: the read-to-EOF helpers would block until the stream ends.
 pub struct Conn {
     s: TcpStream,
     buf: Vec<u8>,
@@ -632,7 +573,6 @@ pub struct Conn {
 impl Conn {
     pub fn open(addr: SocketAddr, timeout: Duration) -> io::Result<Self> {
         let s = TcpStream::connect_timeout(&addr, timeout)?;
-        // short per-read timeout: the deadline loops below own the wall bound
         s.set_read_timeout(Some(Duration::from_millis(50)))?;
         s.set_write_timeout(Some(timeout))?;
         Ok(Self {
@@ -647,7 +587,7 @@ impl Conn {
         self.s.flush()
     }
 
-    /// Close the write side and drop the socket - the client walking away.
+    /// The client walking away mid-response.
     pub fn abandon(self) {
         let _ = self.s.shutdown(std::net::Shutdown::Both);
     }
@@ -689,8 +629,7 @@ impl Conn {
         }
     }
 
-    /// Read one head block: `(status, lower-cased field lines)`. Interim heads
-    /// are separate blocks - call again for the next one.
+    /// Read one head block; interim heads are separate blocks, so call again for the next one.
     pub fn read_head(&mut self, deadline: Duration) -> io::Result<(u16, Vec<(String, String)>)> {
         let head_end = self.fill_until(b"\r\n\r\n", deadline)?;
         let head = &self.buf[self.consumed..head_end];
@@ -714,8 +653,7 @@ impl Conn {
         Ok((status, fields))
     }
 
-    /// Block until `pat` appears in the body stream (proof the bytes are on the
-    /// wire while the response is still open); consumes through it.
+    /// Block until `pat` is on the wire while the response is still open; consumes through it.
     pub fn read_body_until(&mut self, pat: &[u8], deadline: Duration) -> io::Result<()> {
         let pos = self.fill_until(pat, deadline)?;
         self.consumed = pos + pat.len();
@@ -726,8 +664,6 @@ impl Conn {
     pub fn read_remaining(&mut self, deadline: Duration) -> io::Result<Vec<u8>> {
         let end = std::time::Instant::now() + deadline;
         loop {
-            // checked on the data path too: a peer that keeps sending must
-            // fail the deadline, not spin past it
             if std::time::Instant::now() >= end {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "no eof in time"));
             }
@@ -747,8 +683,7 @@ impl Conn {
     }
 }
 
-/// Decode a chunked body: `(chunks, trailer-section bytes)`. Errors when the
-/// terminating zero chunk is missing - the truncation signal.
+/// Decode a chunked body into `(chunks, trailer-section bytes)`; a missing terminating zero chunk is the truncation signal.
 pub fn decode_chunked(mut raw: &[u8]) -> io::Result<(Vec<Vec<u8>>, Vec<u8>)> {
     let mut chunks = Vec::new();
     loop {
@@ -765,7 +700,6 @@ pub fn decode_chunked(mut raw: &[u8]) -> io::Result<(Vec<Vec<u8>>, Vec<u8>)> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?;
         raw = &raw[line_end + 2..];
         if size == 0 {
-            // what follows, up to the final CRLF, is the trailer section
             let trailer = raw.strip_suffix(b"\r\n").unwrap_or(raw).to_vec();
             return Ok((chunks, trailer));
         }

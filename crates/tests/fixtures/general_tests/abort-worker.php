@@ -10,8 +10,7 @@ $handler = static function (): void {
 		echo "done=", Track::$done, " aborted=", connection_aborted();
 		return;
 	}
-	// The test waits for the 'held' record, then drops the receiver; the
-	// sleep guarantees the drop has landed before the first write observes it.
+	// the test drops the receiver after 'held'; the sleep lets the drop land before the first write
 	\Rapira\log('held');
 	usleep(300000);
 	echo "payload\n"; // aborted write: the SAPI raises php_handle_aborted_connection

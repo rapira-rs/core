@@ -40,33 +40,21 @@ impl Drop for PhpModule {
 
 pub struct Rapira {
     pub(crate) intake: Option<Intake>,
-    /// The mode serves superglobals per job (classic/worker); the dispatcher
-    /// path skips the whole ReqC materialization.
     pub(crate) superglobals: bool,
-    /// Exchange-style delivery (`Mode::Dispatcher`); the handle carries it so
-    /// the runtime never re-derives the mode.
     pub(crate) dispatcher: bool,
     worker: Option<JoinHandle<()>>,
     board: Option<rapira_scoreboard::Scoreboard>,
     module: Option<PhpModule>,
 }
 
-/// Split a `PHP_VERSION_ID` (major * 10000 + minor * 100 + patch) into its
-/// major and minor. Patch releases keep the ABI, so only these two matter.
-/// https://www.php.net/manual/en/function.phpversion.php
+/// Split a `PHP_VERSION_ID` (major * 10000 + minor * 100 + patch) into major and minor: https://www.php.net/manual/en/function.phpversion.php
 fn php_series(id: u32) -> (u32, u32) {
     (id / 10_000, (id / 100) % 100)
 }
 
-/// Refuse to run against a libphp from a different PHP minor. rapira binds Zend
-/// structures through bindgen at compile time and selects parts of the SAPI
-/// struct with a cfg on the PHP version, so a swapped library is not a load
-/// error - it is `sapi_startup` handed a differently shaped struct. Both sides
-/// report a compile-time constant, so this is readable before any startup: ours
-/// comes from the headers, the library's from `php_version_id`.
+/// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
 fn check_linked_php() -> anyhow::Result<()> {
-    // SAFETY: both are ZEND_ATTRIBUTE_CONST accessors over a compile-time
-    // constant; neither touches engine state, so calling them pre-startup is fine.
+    // SAFETY: both accessors read a compile-time constant and touch no engine state, so this is valid pre-startup.
     let (headers, linked) = unsafe { (rapira_headers_php_version_id(), php_version_id()) };
     let (want, got) = (php_series(headers), php_series(linked));
     anyhow::ensure!(
@@ -126,8 +114,6 @@ impl Rapira {
             pending: pending.clone(),
         };
 
-        // $_SERVER is a per-job build for classic and worker; the dispatcher
-        // path never reads it.
         let superglobals = !matches!(mode, Mode::Dispatcher(_));
         let dispatcher = matches!(mode, Mode::Dispatcher(_));
         // SAFETY: safe, trust me, I'm a developer
@@ -191,7 +177,6 @@ impl Drop for Rapira {
             return;
         };
 
-        // https://www.php.net/manual/en/info.configuration.php#ini.max-execution-time
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !worker.is_finished() {
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -201,24 +186,20 @@ impl Drop for Rapira {
                 target: "rapira",
                 "worker still running after grace; skipping PHP module shutdown to avoid UB on a live thread"
             );
-            // Leak the module teardown; process exit reclaims it.
             std::mem::forget(self.module.take());
             return;
         }
 
         let _ = worker.join();
-        // Module teardown; the worker flavor holds no module and no-ops.
         drop(self.module.take());
     }
 }
 
+/// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
 fn worker_main(mode: Mode, rx: JobRx) {
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
     loop {
         unsafe {
-            // https://github.com/php/php-src/pull/9104
-            // NTS inits module and request on different threads, so the call stack must be
-            // re-initialized here.
             rapira_init_call_stack();
         };
         let exit: WorkerExit = match &mode {
@@ -234,7 +215,6 @@ fn worker_main(mode: Mode, rx: JobRx) {
     }
 }
 
-/// Untimed pull as a plain Option; Closed maps to None.
 pub(crate) fn pull_job() -> Option<Job> {
     match pull_job_wait(None) {
         Pulled::Job(job) => Some(*job),
@@ -250,9 +230,7 @@ pub(crate) enum Pulled {
     Closed,
 }
 
-/// receive(-1) / receive(n): block up to `timeout` (None = forever). Idle
-/// covers only the park; control returns to PHP as Active on every arm, or the
-/// master watchdog would skip a worker spinning after a no-unit return.
+/// Idle covers only the park: control returns to PHP as Active on every arm, or the master watchdog skips a worker spinning after a no-unit return.
 pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
     JOB_RX.with_borrow_mut(|slot| {
         let Some(job_r) = slot.as_mut() else {
@@ -275,9 +253,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
     })
 }
 
-/// tryReceive() / receive(0): never blocks. The Idle/Active pair still runs - a
-/// polling worker must refresh last_activity_ms or the master watchdog
-/// TERMs it as a stuck request (master/src/events.rs:509-517).
+/// The Idle/Active pair still runs: a polling worker must refresh last_activity_ms or the master watchdog TERMs it as a stuck request (master/src/events.rs:509-517).
 pub(crate) fn pull_job_try() -> Pulled {
     JOB_RX.with_borrow_mut(|slot| {
         let Some(job_r) = slot.as_mut() else {
@@ -310,10 +286,8 @@ mod tests {
 
     #[test]
     fn php_series_drops_the_patch() {
-        // PHP_VERSION_ID packs major/minor/patch as M*10000 + m*100 + p.
         assert_eq!(php_series(80_508), (8, 5));
         assert_eq!(php_series(80_426), (8, 4));
-        // patch releases share a series, adjacent minors do not
         assert_eq!(php_series(80_500), php_series(80_599));
         assert_ne!(php_series(80_400), php_series(80_500));
     }

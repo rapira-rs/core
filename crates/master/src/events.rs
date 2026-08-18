@@ -1,9 +1,3 @@
-//! Master event loop: a single `poll(2)` over the self-pipe (and, in ondemand,
-//! the listeners) plus deadline bookkeeping. Drains the self-pipe fully, defers
-//! the batched reap until after the drain so control bytes in the same wake
-//! update pctl state before corpses are classified, then fires due timers. All
-//! policy lives in the pure modules; this file is the executor.
-
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::time::{Duration, Instant};
@@ -18,13 +12,9 @@ use crate::scaling::{DynAction, DynInput, dynamic_start_count, dynamic_tick, ond
 use crate::signals::{SIG_CHLD, SelfPipe, errno_get};
 use crate::{MasterConfig, Scaling, StopReason, WorkerEnv};
 
-/// While an overlap reload waits for a replacement to report IDLE or ACTIVE,
-/// the scoreboard is re-checked on this short cadence. The total wait is bounded
-/// by `process_control_timeout` so a broken replacement cannot stall the reload.
+/// Re-check cadence for the overlap reload gate; the total wait is bounded by `process_control_timeout`.
 const RELOAD_GATE_POLL: Duration = Duration::from_millis(50);
 
-/// Deadline sources merged into one poll timeout: the always-armed 1s tick, the
-/// pctl escalation step, and the earliest per-slot respawn.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Deadlines {
     pub next_tick: Instant,
@@ -41,8 +31,7 @@ impl Deadlines {
         }
     }
 
-    /// Milliseconds until the earliest deadline, rounded UP so a sub-millisecond
-    /// remainder never busy-spins `poll` with a 0 timeout.
+    /// Milliseconds until the earliest deadline, rounded up so a sub-millisecond remainder never busy-spins `poll` with a 0 timeout.
     pub fn poll_timeout_ms(&self, now: Instant) -> c_int {
         let mut next = self.next_tick;
         for d in [self.pctl, self.respawn].into_iter().flatten() {
@@ -62,14 +51,13 @@ fn pollfd(fd: RawFd) -> libc::pollfd {
     }
 }
 
-/// Drain the nonblocking self-pipe completely, returning bytes in arrival order.
 fn drain_pipe(fd: RawFd, buf: &mut [u8]) -> Vec<u8> {
     let mut out = Vec::new();
     loop {
         // SAFETY: read into a live buffer from a valid nonblocking fd.
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n <= 0 {
-            break; // 0 = EOF (never, master holds wr), <0 = EAGAIN
+            break;
         }
         out.extend_from_slice(&buf[..n as usize]);
     }
@@ -81,8 +69,6 @@ fn kill(pid: libc::pid_t, sig: c_int) {
     unsafe { libc::kill(pid, sig) };
 }
 
-/// The running master. Owns the worker closure (called only in forked children)
-/// and all loop state.
 pub(crate) struct Master<F: FnMut(WorkerEnv) -> i32> {
     cfg: MasterConfig,
     scoreboard: Scoreboard,
@@ -93,15 +79,10 @@ pub(crate) struct Master<F: FnMut(WorkerEnv) -> i32> {
     deadlines: Deadlines,
     table: ProcTable,
     spawn_rate: u32,
-    /// Ceiling warning latch: warn once per saturation episode, not every tick.
     warned_max_children: bool,
-    /// Absolute deadline for the current reload Await gate: once reached, drain
-    /// the next old worker even if the replacement never started serving.
+    /// Absolute cap on the reload Await gate: once reached, drain the next old worker anyway.
     reload_await_until: Option<Instant>,
-    /// Latched once the pool has ever served a successful request. Guards the
-    /// failboot check: only a pool that never managed to serve is an
-    /// unrecoverable boot failure. Needed because scoreboard counters are
-    /// unreliable history - a replacement `bind()` zeroes a slot's served count.
+    /// Latched history: scoreboard counters cannot carry it, a replacement `bind()` zeroes a slot's served count.
     ever_served: bool,
 }
 
@@ -131,8 +112,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    // ---- scoreboard-derived counts -------------------------------------
-
     fn idle_count(&self) -> usize {
         self.scoreboard
             .slots()
@@ -149,17 +128,12 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             .count()
     }
 
-    /// Requests that completed WITHOUT error, pool-wide. A failbooting worker
-    /// sheds 503s (handled++ AND errors++), so `handled` alone never reaches 0
-    /// there - the master must weigh successful service, not raw throughput.
+    /// Requests completed without error: Acquire pairs with the worker's Release on `handled` (stored after `errors`) so a shed 503 never counts as a success.
     fn total_successful(&self) -> u64 {
         self.scoreboard
             .slots()
             .iter()
             .map(|s| {
-                // Acquire pairs with the worker's Release on `handled` (stored
-                // after `errors`): an observed handled implies its error is too,
-                // so a shed can never be counted as a success.
                 let handled = s.handled.load(Acquire);
                 let errors = s.errors.load(Relaxed);
                 handled.saturating_sub(errors)
@@ -167,9 +141,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             .sum()
     }
 
-    /// Latch `ever_served` the first time the pool is seen to have served a
-    /// successful request. Idempotent; read before the scoreboard can be
-    /// overwritten (slot clear / replacement bind).
+    /// Must run before a slot clear or a replacement bind can overwrite the scoreboard counters.
     fn latch_served(&mut self) {
         if !self.ever_served && self.total_successful() > 0 {
             self.ever_served = true;
@@ -191,9 +163,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             .unwrap_or(false)
     }
 
-    /// The slot's worker is serving: bound and parked (IDLE) or on a request
-    /// (ACTIVE). Under load a replacement may never be observed IDLE between
-    /// requests, so the reload gate must accept ACTIVE as proof of service.
+    /// Serving is IDLE or ACTIVE: under load a replacement may never be observed IDLE between requests.
     fn slot_is_serving(&self, i: usize) -> bool {
         self.scoreboard
             .slot(i)
@@ -204,8 +174,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             .unwrap_or(false)
     }
 
-    /// A slot free in the scoreboard, with no live proc and no pending respawn
-    /// (so we never race the respawn-deadline path).
     fn find_spawn_slot(&self) -> Option<usize> {
         (0..self.table.slots.len()).find(|&i| {
             self.slot_is_free(i)
@@ -222,8 +190,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             .min_by_key(|p| p.spawned_at)
             .map(|p| p.pid)
     }
-
-    // ---- spawning ------------------------------------------------------
 
     fn spawn_into(&mut self, slot: usize, now: Instant) {
         self.scoreboard.set_starting(slot);
@@ -245,7 +211,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             Err(e) => {
                 tracing::error!(target: "master", "spawn failed for slot {slot}: {e}");
                 self.scoreboard.clear(slot);
-                // Back off so a readable ondemand listener does not spin.
                 self.table.slots[slot].schedule_backoff(Duration::ZERO, now);
             }
         }
@@ -270,10 +235,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         self.recompute_respawn_deadline();
     }
 
-    // ---- signal handling -----------------------------------------------
-
-    /// Apply a control byte. `Some(reason)` means the loop must return now
-    /// (forced stop, or a stop with nothing left to drain).
+    /// `Some(reason)` means the loop must return now: forced stop, or a stop with nothing left to drain.
     fn handle_signal(&mut self, byte: u8, now: Instant) -> Option<StopReason> {
         match self.pctl.on_signal(byte) {
             SignalAction::Stop => self.begin_stop(now),
@@ -301,7 +263,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             s.cancel_respawn();
         }
         self.deadlines.pctl = Some(now + self.cfg.process_control_timeout);
-        self.reload_await_until = None; // stop overrides any in-flight reload gate
+        self.reload_await_until = None;
         if self.table.procs.is_empty() {
             return Some(StopReason::Drained);
         }
@@ -314,10 +276,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    /// Overlap reload: bump the generation and spawn one current-gen worker as
-    /// headroom, then wait for it to report IDLE or ACTIVE before any old worker
-    /// is drained, so serving capacity never dips below the pool. With no live
-    /// old-gen worker there is nothing to overlap - no headroom is spawned.
+    /// Overlap reload: spawn one current-gen worker as headroom and gate on it serving before any old worker is drained, so capacity never dips.
     fn begin_reload(&mut self, now: Instant) {
         self.table.generation += 1;
         let slot = if self.has_old_gen() {
@@ -328,11 +287,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         self.reload_enter_await(slot, now);
     }
 
-    /// Enter the overlap gate: for non-ondemand spawn a current-gen replacement
-    /// into `slot`, arm the short re-check plus the `process_control_timeout`
-    /// safety cap, and wait for it to start serving. Ondemand (or no free slot)
-    /// spawns nothing and drains the next old worker directly - replacements
-    /// come from demand.
+    /// Ondemand (or no free slot) spawns no replacement and drains the next old worker directly: replacements come from demand.
     fn reload_enter_await(&mut self, slot: Option<usize>, now: Instant) {
         match slot {
             Some(s) if !matches!(self.cfg.scaling, Scaling::Ondemand) => {
@@ -345,8 +300,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    /// Overlap-gate probe: once the pending replacement is serving (IDLE or
-    /// ACTIVE), QUIT the next old worker. A no-op while still waiting.
     fn reload_try_advance(&mut self, now: Instant) {
         if let PctlState::Reloading(ReloadPhase::Await { slot }) = self.pctl.state {
             let ready = slot.is_none_or(|s| self.slot_is_serving(s));
@@ -356,8 +309,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    /// QUIT the next-oldest old-generation worker (→ Drain), or finish the reload
-    /// when none remain. Always leaves the Await gate.
     fn reload_quit_next(&mut self, now: Instant) {
         self.reload_await_until = None;
         let cur = self.table.generation;
@@ -378,7 +329,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    /// Reload complete: back to Normal, clear the pctl deadline and the gate cap.
     fn reload_finish(&mut self) {
         self.pctl.finish_reload();
         self.deadlines.pctl = None;
@@ -408,8 +358,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    // ---- child exits ---------------------------------------------------
-
+    /// Failboot only for a gen-0 worker in a pool that never served: a reload replacement dying unhealthy must not take down the running pool.
     fn on_child_exit(
         &mut self,
         w: WorkerProc,
@@ -418,17 +367,12 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     ) -> anyhow::Result<()> {
         let slot = w.slot;
         let lived = now.saturating_duration_since(w.spawned_at);
-        // Read served history before clearing this slot / handing it to a fork.
         self.latch_served();
         self.scoreboard.clear(slot);
 
         if let PctlState::Reloading(ReloadPhase::Drain { draining, .. }) = self.pctl.state
             && draining == w.pid
         {
-            // Drained old worker reaped. If old workers remain, spawn its
-            // replacement into the freed slot and gate on it becoming IDLE
-            // before draining the next; the last old worker needs no
-            // replacement (begin_reload's headroom already covers it).
             if self.has_old_gen() {
                 self.reload_enter_await(Some(slot), now);
             } else {
@@ -437,22 +381,16 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             return Ok(());
         }
         if self.pctl.is_stopping() {
-            return Ok(()); // draining down; no respawn
+            return Ok(());
         }
 
         match verdict {
-            ExitVerdict::IdleKill => {
-                // Trimmed: do not respawn.
-            }
+            ExitVerdict::IdleKill => {}
             ExitVerdict::Recycle | ExitVerdict::Drain | ExitVerdict::TimeoutKill => {
                 self.table.slots[slot].schedule_immediate(now);
                 self.apply_respawn_gate(slot);
             }
             ExitVerdict::Unhealthy => {
-                // Failboot only for a generation-0 worker in a pool that NEVER
-                // served a successful request: an unrecoverable boot failure. A
-                // reload replacement (gen > 0) dying unhealthy must never take
-                // down the running pool - respawn with backoff instead.
                 if w.generation == 0 && !self.ever_served {
                     anyhow::bail!(
                         "worker {} exited unhealthy before the pool served any request",
@@ -468,17 +406,12 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         Ok(())
     }
 
-    /// Ondemand never proactively respawns a cleanly-exited worker; demand
-    /// re-forks. Crash/unhealthy backoff deadlines are kept even under ondemand:
-    /// they suppress forking into the slot until they expire (see
-    /// `fire_due_deadlines`), throttling a fork-crash loop.
+    /// Ondemand re-forks from demand; crash and unhealthy backoff deadlines are kept as fork suppression until they expire, throttling a fork-crash loop.
     fn apply_respawn_gate(&mut self, slot: usize) {
         if matches!(self.cfg.scaling, Scaling::Ondemand) {
             self.table.slots[slot].cancel_respawn();
         }
     }
-
-    // ---- master-initiated kills (idle trim / request timeout) ----------
 
     fn idle_kill_pid(&mut self, pid: libc::pid_t) {
         if let Some(p) = self.table.procs.iter_mut().find(|p| p.pid == pid) {
@@ -491,12 +424,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    /// Wall-clock bound on a single request, run from the Normal-state
-    /// maintenance tick: an ACTIVE worker whose current request is older than
-    /// `request_terminate_timeout` gets TERM (SIG_DFL in the worker - dies
-    /// fast, its queued sockets close, clients retry against healthy workers).
-    /// Still ACTIVE a tick later means TERM could not land (uninterruptible
-    /// sleep): escalate to KILL.
+    /// TERM an ACTIVE worker past `request_terminate_timeout`, KILL if it is still ACTIVE a tick later (TERM could not land, uninterruptible sleep); Acquire on the state load orders the timestamp read after it.
     fn watchdog_tick(&mut self) {
         let limit = self.cfg.request_terminate_timeout;
         if limit.is_zero() {
@@ -507,8 +435,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             let Some(s) = self.scoreboard.slot(p.slot) else {
                 continue;
             };
-            // Acquire pairs with the worker's Release state store so the
-            // timestamp read below cannot be hoisted above it
             if s.state.load(Acquire) != SLOT_ACTIVE {
                 continue;
             }
@@ -531,11 +457,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    // ---- periodic maintenance -----------------------------------------
-
     fn maintenance_tick(&mut self, now: Instant) {
-        // Latch served history while workers are live and counters populated,
-        // before any exit can clear a slot.
         self.latch_served();
         self.watchdog_tick();
         match self.cfg.scaling {
@@ -600,10 +522,8 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
+    /// Trims the idle worker with the stalest activity: by process age, a busy older worker could shield a long-expired younger one indefinitely.
     fn ondemand_maintenance(&mut self, _now: Instant) {
-        // Victim = the idle worker with the stalest activity. Selecting by
-        // process age instead would let a busy-at-tick older worker shield a
-        // long-expired younger one indefinitely.
         let target = self
             .table
             .procs
@@ -624,8 +544,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    // ---- deadlines -----------------------------------------------------
-
     fn escalate(&mut self, now: Instant) {
         if let Some(step) = self.pctl.escalate() {
             match step.target {
@@ -644,16 +562,13 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    /// The pctl deadline fired. In the reload Await gate it means "re-check the
-    /// replacement, and force past one that never accepted once the safety cap
-    /// elapses"; otherwise it drives QUIT→TERM→KILL escalation.
+    /// In the reload Await gate: re-probe the replacement and force past a stuck one at the safety cap; otherwise drive QUIT/TERM/KILL escalation.
     fn on_pctl_deadline(&mut self, now: Instant) {
         let PctlState::Reloading(ReloadPhase::Await { slot }) = self.pctl.state else {
             self.escalate(now);
             return;
         };
         self.reload_try_advance(now);
-        // Still waiting: re-arm the short probe, or force past the safety cap.
         if let PctlState::Reloading(ReloadPhase::Await { .. }) = self.pctl.state {
             if self.reload_await_until.is_some_and(|t| now >= t) {
                 if let Some(s) = slot {
@@ -681,8 +596,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 && !self.table.has_proc(slot)
             {
                 self.table.slots[slot].cancel_respawn();
-                // Ondemand: the expired backoff only lifts the fork suppression;
-                // the next connection forks, never the timer.
                 if !matches!(self.cfg.scaling, Scaling::Ondemand) {
                     self.spawn_into(slot, now);
                 }
@@ -700,13 +613,11 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         self.deadlines.respawn = self.table.slots.iter().filter_map(|s| s.respawn_at).min();
     }
 
+    /// Arm only when a fork could land: a readable level-triggered listener would otherwise busy-spin poll through the backoff window.
     fn compute_armed(&self) -> bool {
         if !matches!(self.cfg.scaling, Scaling::Ondemand) {
             return false;
         }
-        // Arm only when a fork could actually land: with every free slot in
-        // crash backoff, a readable level-triggered listener would otherwise
-        // busy-spin poll for the whole backoff window.
         ondemand_armed(
             self.pctl.is_normal(),
             self.table.running(),
@@ -721,8 +632,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             self.spawn_into(slot, now);
         }
     }
-
-    // ---- main loop -----------------------------------------------------
 
     pub(crate) fn run_loop(&mut self) -> anyhow::Result<StopReason> {
         self.fork_initial();
@@ -740,14 +649,12 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
             let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
             if n < 0 {
                 if errno_get() == libc::EINTR {
-                    continue; // handler already wrote the byte
+                    continue;
                 }
                 anyhow::bail!("poll: {}", std::io::Error::last_os_error());
             }
             let now = Instant::now();
 
-            // Drain the self-pipe fully. SIGCHLD bytes only set a flag, so the
-            // reap below runs once per wakeup however many signals coalesced.
             let mut got_chld: bool = false;
             if n > 0 && (fds[0].revents & libc::POLLIN) != 0 {
                 let mut buf = [0u8; 64];
@@ -769,8 +676,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 }
             }
 
-            // Ondemand: a readable listener while armed forks exactly one.
-            // Arming is re-checked - a control byte above may have changed it.
             if n > 0 && fds.len() > 1 && self.compute_armed() {
                 let readable = fds[1..].iter().any(|p| (p.revents & libc::POLLIN) != 0);
                 if readable {
@@ -780,7 +685,6 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
 
             self.fire_due_deadlines(now);
 
-            // Feeds the next iteration's poll timeout.
             self.recompute_respawn_deadline();
         }
     }
@@ -820,35 +724,26 @@ mod tests {
             pctl: None,
             respawn: None,
         };
-        // Sub-millisecond remainders round up (a 0 timeout would busy-spin).
         assert_eq!(
             at(base + Duration::from_micros(1500)).poll_timeout_ms(base),
             2
         );
         assert_eq!(at(base + Duration::from_nanos(1)).poll_timeout_ms(base), 1);
-        // Exact milliseconds are not rounded; a past deadline yields 0.
         assert_eq!(at(base + Duration::from_millis(3)).poll_timeout_ms(base), 3);
         assert_eq!(at(base).poll_timeout_ms(base + Duration::from_millis(5)), 0);
     }
 
-    // ---- overlap reload gate ------------------------------------------
-    //
-    // These drive the reload state machine directly on an in-process master:
-    // no fork (spawn is never triggered on the paths exercised) and no signal
-    // handler install. Sentinel pids sit above PID_MAX_LIMIT, so the harmless
-    // QUITs `reload_quit_next` sends resolve to ESRCH.
-
     use crate::process::WorkerProc;
     use std::os::fd::{FromRawFd, OwnedFd};
 
+    // Sentinel pids above PID_MAX_LIMIT: the QUITs these tests send resolve to ESRCH.
     const P_OLD0: libc::pid_t = 2_000_000_001;
     const P_OLD1: libc::pid_t = 2_000_000_002;
     const P_NEW: libc::pid_t = 2_000_000_100;
 
     fn dummy_self_pipe() -> SelfPipe {
         let mut fds = [0 as RawFd; 2];
-        // SAFETY: socketpair fills a 2-element array with two owned fds; no
-        // signal handler is installed (test-only, process signal state untouched).
+        // SAFETY: socketpair fills a 2-element array with two owned fds.
         let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(rc, 0, "socketpair");
         SelfPipe {
@@ -902,26 +797,22 @@ mod tests {
     fn reload_gate_holds_until_replacement_idle() {
         let mut m = test_master(6, Scaling::Static);
         let t0 = Instant::now();
-        m.table.generation = 1; // begin_reload already bumped the generation
-        // Three old-gen workers (ascending spawn time), all idle.
+        m.table.generation = 1;
         for (i, &pid) in [P_OLD0, P_OLD1, 2_000_000_003].iter().enumerate() {
             push_proc(&mut m, pid, i, 0, t0 + Duration::from_millis(i as u64));
             set_slot(&m, i, SLOT_IDLE);
         }
-        // Current-gen replacement in slot 3, not serving yet.
         push_proc(&mut m, P_NEW, 3, 1, t0 + Duration::from_millis(10));
         set_slot(&m, 3, SLOT_STARTING);
         m.pctl.set_reload_await(Some(3));
         m.reload_await_until = Some(t0 + Duration::from_secs(30));
 
-        // Gate closed: replacement still STARTING ⇒ no old worker is drained.
         m.reload_try_advance(t0);
         assert!(matches!(
             m.pctl.state,
             PctlState::Reloading(ReloadPhase::Await { slot: Some(3) })
         ));
 
-        // Replacement reaches IDLE ⇒ gate opens, oldest old worker drained.
         set_slot(&m, 3, SLOT_IDLE);
         m.reload_try_advance(t0);
         assert!(matches!(
@@ -930,10 +821,9 @@ mod tests {
         ));
     }
 
+    /// Under load a replacement can be ACTIVE at every probe; the gate must accept that as serving.
     #[test]
     fn reload_gate_opens_on_active_replacement() {
-        // Under load a replacement can be ACTIVE at every probe; the gate must
-        // accept that as serving rather than stall to the control timeout.
         let mut m = test_master(6, Scaling::Static);
         let t0 = Instant::now();
         m.table.generation = 1;
@@ -958,10 +848,9 @@ mod tests {
         m.table.generation = 1;
         push_proc(&mut m, P_OLD0, 0, 0, t0);
         set_slot(&m, 0, SLOT_IDLE);
-        push_proc(&mut m, P_NEW, 3, 1, t0); // replacement never becomes IDLE
+        push_proc(&mut m, P_NEW, 3, 1, t0);
         set_slot(&m, 3, SLOT_STARTING);
         m.pctl.set_reload_await(Some(3));
-        // Safety cap already in the past ⇒ the deadline forces the drain.
         m.reload_await_until = Some(t0);
         m.deadlines.pctl = Some(t0);
 
@@ -980,13 +869,12 @@ mod tests {
         push_proc(&mut m, P_OLD0, 0, 0, t0);
         set_slot(&m, 0, SLOT_IDLE);
         push_proc(&mut m, P_NEW, 3, 1, t0);
-        set_slot(&m, 3, SLOT_STARTING); // still booting
+        set_slot(&m, 3, SLOT_STARTING);
         m.pctl.set_reload_await(Some(3));
         m.reload_await_until = Some(t0 + Duration::from_secs(30));
 
         let now = t0 + Duration::from_millis(1);
         m.on_pctl_deadline(now);
-        // Not idle and cap not reached ⇒ stay in Await, re-arm the short probe.
         assert!(matches!(
             m.pctl.state,
             PctlState::Reloading(ReloadPhase::Await { slot: Some(3) })
@@ -999,8 +887,6 @@ mod tests {
         let mut m = test_master(6, Scaling::Static);
         let t0 = Instant::now();
         m.table.generation = 1;
-        // Current-gen worker up, drained old worker already reaped: no old-gen
-        // workers left.
         push_proc(&mut m, P_NEW, 0, 1, t0);
         let drained = WorkerProc {
             pid: P_OLD0,
@@ -1016,7 +902,7 @@ mod tests {
         assert!(m.pctl.is_normal());
         assert_eq!(m.deadlines.pctl, None);
         assert_eq!(m.reload_await_until, None);
-        assert_eq!(m.table.procs.len(), 1); // only the pre-existing current-gen worker
+        assert_eq!(m.table.procs.len(), 1);
     }
 
     #[test]
@@ -1028,7 +914,6 @@ mod tests {
             set_slot(&m, i, SLOT_IDLE);
         }
 
-        // Reload: no headroom spawn (ondemand); vacuous gate ⇒ oldest QUIT now.
         m.begin_reload(t0);
         assert_eq!(m.table.generation, 1);
         assert_eq!(
@@ -1041,7 +926,6 @@ mod tests {
             PctlState::Reloading(ReloadPhase::Drain { draining, .. }) if draining == P_OLD0
         ));
 
-        // First old worker reaped ⇒ next oldest QUIT, still no spawn.
         let i = m.table.procs.iter().position(|p| p.pid == P_OLD0).unwrap();
         let w0 = m.table.procs.swap_remove(i);
         m.on_child_exit(w0, ExitVerdict::Drain, t0).unwrap();
@@ -1051,15 +935,12 @@ mod tests {
             PctlState::Reloading(ReloadPhase::Drain { draining, .. }) if draining == P_OLD1
         ));
 
-        // Last old worker reaped ⇒ reload complete.
         let i = m.table.procs.iter().position(|p| p.pid == P_OLD1).unwrap();
         let w1 = m.table.procs.swap_remove(i);
         m.on_child_exit(w1, ExitVerdict::Drain, t0).unwrap();
         assert!(m.pctl.is_normal());
         assert_eq!(m.table.procs.len(), 0);
     }
-
-    // ---- failboot guard (ever_served latch) ---------------------------
 
     fn dead_worker(pid: libc::pid_t, slot: usize, generation: u32, at: Instant) -> WorkerProc {
         WorkerProc {
@@ -1075,9 +956,8 @@ mod tests {
     fn unhealthy_after_ever_served_respawns_not_failboot() {
         let mut m = test_master(3, Scaling::Static);
         let t0 = Instant::now();
-        m.ever_served = true; // the pool has already served successfully
+        m.ever_served = true;
         let w = dead_worker(4242, 0, 0, t0);
-        // Recoverable: unhealthy death must schedule a backoff respawn, not bail.
         let r = m.on_child_exit(w, ExitVerdict::Unhealthy, t0 + Duration::from_secs(1));
         assert!(r.is_ok());
         assert!(m.table.slots[0].respawn_at.is_some());
@@ -1088,7 +968,6 @@ mod tests {
         let mut m = test_master(3, Scaling::Static);
         let t0 = Instant::now();
         assert!(!m.ever_served);
-        // Fresh pool, nothing served → unrecoverable boot failure → Err.
         let w = dead_worker(4243, 0, 0, t0);
         let r = m.on_child_exit(w, ExitVerdict::Unhealthy, t0);
         assert!(r.is_err());
@@ -1096,8 +975,6 @@ mod tests {
 
     #[test]
     fn gen1_unhealthy_never_served_respawns_not_failboot() {
-        // A reload replacement dying unhealthy before the pool served anything
-        // must back off and respawn, never kill the healthy old generation.
         let mut m = test_master(3, Scaling::Static);
         let t0 = Instant::now();
         m.table.generation = 1;
@@ -1108,8 +985,6 @@ mod tests {
         assert!(m.table.slots[0].respawn_at.is_some());
     }
 
-    // ---- request-terminate watchdog ------------------------------------
-
     #[test]
     fn watchdog_terms_overdue_active_worker_then_escalates() {
         let mut m = test_master(3, Scaling::Static);
@@ -1117,7 +992,6 @@ mod tests {
         let t0 = Instant::now();
         push_proc(&mut m, P_OLD0, 0, 0, t0);
         set_slot(&m, 0, SLOT_ACTIVE);
-        // Request started well past the limit.
         m.scoreboard.slots()[0]
             .last_activity_ms
             .store(now_millis().saturating_sub(5_000), Relaxed);
@@ -1128,8 +1002,6 @@ mod tests {
             Some(KillIntent::Timeout),
             "first pass must TERM and mark the intent"
         );
-        // Still ACTIVE a tick later: the KILL escalation path must not clear
-        // or change the intent (the reap consumes it).
         m.watchdog_tick();
         assert_eq!(m.table.procs[0].kill_intent, Some(KillIntent::Timeout));
     }
@@ -1139,13 +1011,11 @@ mod tests {
         let mut m = test_master(3, Scaling::Static);
         m.cfg.request_terminate_timeout = Duration::from_secs(2);
         let t0 = Instant::now();
-        // ACTIVE but fresh: within the limit.
         push_proc(&mut m, P_OLD0, 0, 0, t0);
         set_slot(&m, 0, SLOT_ACTIVE);
         m.scoreboard.slots()[0]
             .last_activity_ms
             .store(now_millis(), Relaxed);
-        // IDLE and stale: not serving a request, never a watchdog target.
         push_proc(&mut m, P_OLD1, 1, 0, t0);
         set_slot(&m, 1, SLOT_IDLE);
         m.scoreboard.slots()[1]
@@ -1156,14 +1026,12 @@ mod tests {
         assert!(m.table.procs.iter().all(|p| p.kill_intent.is_none()));
     }
 
+    /// A master-chosen kill respawns immediately: no failboot (that is for Unhealthy only) and no backoff.
     #[test]
     fn timeout_kill_respawns_immediately_without_failboot() {
         let mut m = test_master(3, Scaling::Static);
         let t0 = Instant::now();
         assert!(!m.ever_served);
-        // A gen-0 timeout kill before any served request must respawn
-        // immediately - never bail (failboot is for Unhealthy only) and never
-        // back off (the master chose this kill).
         let w = dead_worker(4246, 0, 0, t0);
         let r = m.on_child_exit(w, ExitVerdict::TimeoutKill, t0);
         assert!(r.is_ok());
@@ -1173,9 +1041,6 @@ mod tests {
 
     #[test]
     fn ondemand_crash_backoff_suppresses_without_respawn() {
-        // A crash under ondemand keeps its backoff deadline as fork suppression:
-        // the slot is not spawnable (loop stays disarmed) until the deadline,
-        // whose expiry only lifts the suppression - it never forks.
         let mut m = test_master(2, Scaling::Ondemand);
         let t0 = Instant::now();
         let w = dead_worker(4245, 0, 0, t0);
@@ -1190,13 +1055,10 @@ mod tests {
         assert!(m.table.procs.is_empty(), "expiry must not fork");
     }
 
-    // ---- pool maintenance ticks ----------------------------------------
-
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
-    /// Counts WARN events on the `master` target; the crate depends only on
-    /// the `tracing` facade, so the subscriber is hand-rolled.
+    /// Counts WARN events on the `master` target; hand-rolled because the crate depends only on the `tracing` facade.
     #[derive(Clone, Default)]
     struct WarnCounter(Arc<AtomicUsize>);
 
@@ -1227,15 +1089,11 @@ mod tests {
         );
         m.cfg.processes = 2;
         let t0 = Instant::now();
-        // Both workers busy at the ceiling: idle(0) < min_spare(2) with zero
-        // headroom ⇒ ReachedMaxChildren, never Spawn.
         for (i, &pid) in [P_OLD0, P_OLD1].iter().enumerate() {
             push_proc(&mut m, pid, i, 0, t0);
             set_slot(&m, i, SLOT_ACTIVE);
         }
 
-        // Two saturated ticks: the latch must hold the second warning back -
-        // one per saturation episode, not one per second.
         let warns = WarnCounter::default();
         tracing::subscriber::with_default(warns.clone(), || {
             m.maintenance_tick(t0);
@@ -1248,8 +1106,6 @@ mod tests {
 
     #[test]
     fn static_refill_counts_pending_respawn_as_committed() {
-        // A slot holding a respawn deadline is already committed to the target,
-        // so refill must not spawn a second worker into the spare free slot.
         let mut m = test_master(2, Scaling::Static);
         let t0 = Instant::now();
         m.cfg.processes = 1;
@@ -1263,19 +1119,13 @@ mod tests {
         assert_eq!(m.table.slots[0].respawn_at, Some(t0), "deadline untouched");
     }
 
-    // ---- ondemand listener arming --------------------------------------
-
     use crate::signals::SIG_TERM;
 
     #[test]
     fn ondemand_arms_only_when_a_fork_can_land() {
         let mut m = test_master(2, Scaling::Ondemand);
-        // Nothing running, no idle worker to take the connection, a spawnable
-        // slot: the listeners are worth polling.
         assert!(m.compute_armed());
 
-        // Every slot in crash backoff ⇒ no fork can land, and a readable
-        // level-triggered listener would spin poll for the whole window.
         let t0 = Instant::now();
         for s in &mut m.table.slots {
             s.schedule_backoff(Duration::ZERO, t0);
@@ -1285,17 +1135,15 @@ mod tests {
 
     #[test]
     fn ondemand_disarms_while_stopping() {
-        // Draining down: a late connection must not fork a fresh worker.
         let mut m = test_master(2, Scaling::Ondemand);
         assert!(m.compute_armed());
         m.pctl.on_signal(SIG_TERM);
         assert!(!m.compute_armed());
     }
 
+    /// Static and dynamic workers accept in the children; the master watches only its self-pipe.
     #[test]
     fn non_ondemand_never_arms_listeners() {
-        // Static/dynamic workers accept in the children; the master watches only
-        // its self-pipe however spawnable the pool looks.
         let m = test_master(2, Scaling::Static);
         assert!(!m.compute_armed());
     }

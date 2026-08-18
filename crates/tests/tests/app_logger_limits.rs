@@ -1,21 +1,12 @@
-//! Bounds on what one `\Rapira\log()` call can put on the wire, adopted from
-//! Monolog's `NormalizerFormatterTest`.
-//!
-//! No normalization pass yet: the array goes straight to `php_json_encode`.
-//! The `#[ignore]`d tests specify the caps that pass adds.
-
 use tests::{app_record, app_records};
 use tracing::Level;
 
-/// Monolog: testIgnoresRecursiveObjectReferences, testCanNormalizeReferences.
-/// Both of its tests install an error handler that fails on any diagnostic, so
-/// "no warning raised" is part of the contract, not just "no crash".
+/// Cycles are cut at the back-edge and raise no PHP diagnostic.
 #[test]
 fn cycles_are_broken_without_a_diagnostic() {
     let (level, _, ctx) = app_record("app_logger/limits-cycles.php");
 
     assert_eq!(level, Level::ERROR);
-    // The back-edge becomes null; everything up to it survives.
     assert!(
         ctx.contains(r#""objects":{"bar":{"foo":null}}"#),
         "object cycle must be cut at the back-edge: {ctx:?}"
@@ -28,7 +19,6 @@ fn cycles_are_broken_without_a_diagnostic() {
         ctx.contains(r#""keep":"visible""#),
         "siblings of a cycle must survive: {ctx:?}"
     );
-    // A cycle must not surface to the app as a PHP diagnostic.
     let phpdiag: Vec<_> = tests::captured()
         .iter()
         .filter(|c| c.target == "php")
@@ -37,9 +27,7 @@ fn cycles_are_broken_without_a_diagnostic() {
     assert!(phpdiag.is_empty(), "cycles must raise nothing: {phpdiag:?}");
 }
 
-/// Monolog: testNormalizeHandleLargeArraysWithExactly1000Items. The boundary is
-/// the point - this must keep passing once a cap exists, so it guards the
-/// off-by-one rather than the cap itself.
+/// Guards the off-by-one at the 1000-item boundary: the last item must survive.
 #[test]
 fn a_thousand_items_are_not_truncated() {
     let records = app_records("app_logger/limits-large-array.php");
@@ -58,8 +46,7 @@ fn a_thousand_items_are_not_truncated() {
     );
 }
 
-/// Monolog: testNormalizeHandleLargeArrays - over the cap, the array is truncated
-/// and carries a marker naming the real size.
+/// An over-cap array must be truncated and carry a marker naming the real size.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn large_arrays_are_capped_and_marked() {
@@ -83,8 +70,7 @@ fn large_arrays_are_capped_and_marked() {
     );
 }
 
-/// Beyond Monolog, which caps items and depth but never string length: a huge
-/// scalar becomes an equally huge log record with no cap and no marker.
+/// A huge scalar must not become an equally huge log record: no cap, no marker.
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn huge_strings_are_capped() {
@@ -101,10 +87,7 @@ fn huge_strings_are_capped() {
     );
 }
 
-/// Monolog: testMaxNormalizeDepth - over-deep branches abort with a marker naming
-/// the limit. PHP_JSON_PARTIAL_OUTPUT_ON_ERROR disables json's depth ceiling
-/// entirely (json_encoder.c:192-197), so encoding runs until Zend's stack guard
-/// trips and substitutes a bare null: bounded, but silent.
+/// Over-deep branches must be marked, not silently cut: PHP_JSON_PARTIAL_OUTPUT_ON_ERROR disables json's depth ceiling (json_encoder.c:192-197).
 #[test]
 #[ignore = "needs the context normalizer (Monolog NormalizerFormatter parity)"]
 fn deep_nesting_is_marked_not_silently_cut() {

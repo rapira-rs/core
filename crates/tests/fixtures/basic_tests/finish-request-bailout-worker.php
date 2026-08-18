@@ -1,6 +1,5 @@
 <?php
-// display_errors=Off keeps fatal text out of the stream; the observable
-// outcome is the 500 head committed by the recycle path
+// display_errors=Off keeps fatal text out of the stream, so the observable outcome is the 500 head committed by the recycle path
 ini_set('display_errors', '0');
 class Counter { public static int $n = 0; }
 $handler = static function (): void {

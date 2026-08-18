@@ -1,6 +1,5 @@
 <?php
-// Echoes like echo-worker, but ?hang=1 blocks the request forever in native
-// sleep - the master's request_terminate_timeout watchdog must kill the worker.
+// ?hang=1 blocks the request forever in native sleep: the master's request_terminate_timeout watchdog must kill the worker.
 
 use Rapira\Exception\ClosedException;
 
