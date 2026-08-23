@@ -3,7 +3,7 @@
 [![CI](https://github.com/rapira-rs/rapira/actions/workflows/ci.yml/badge.svg)](https://github.com/rapira-rs/rapira/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/rapira-rs/rapira/graph/badge.svg)](https://app.codecov.io/gh/rapira-rs/rapira) [![Release](https://img.shields.io/github/v/release/rapira-rs/rapira)](https://github.com/rapira-rs/rapira/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Docs](https://img.shields.io/badge/docs-rapira.rs-4682b4)](https://rapira.rs)
 ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rapira-rs/rapira?utm_source=oss&utm_medium=github&utm_campaign=rapira-rs%2Frapira&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
-Rapira is a PHP application server written in Rust. It embeds NTS PHP into the server process through PHP's embed SAPI - the host calls the interpreter directly, with no FastCGI, no sockets, no per-request serialization - and serves HTTP through a bundled Pingora-based front.
+Rapira is a PHP application server written in Rust. It embeds NTS PHP into the server process through PHP's embed SAPI - the host calls the interpreter directly, with no FastCGI, no sockets, no per-request serialization - and serves HTTP itself through a bundled front.
 
 Run an existing app unchanged in classic mode (a front controller executed per request, where php-fpm used to sit), or keep it resident in worker mode and pay the bootstrap cost once per worker instead of once per request.
 

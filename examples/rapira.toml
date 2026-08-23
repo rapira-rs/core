@@ -6,7 +6,8 @@ listen = "127.0.0.1:8000"    # host:port, ":port" (all interfaces), or "unix:/pa
 # server_name = "localhost"
 # server_port = 8000         # what PHP sees as SERVER_PORT; defaults to the listen port
 # max_body_size_mb = 8       # larger request bodies answer 413
-# write_timeout_secs = 30    # per-write bound on the response path
+# write_timeout_secs = 30    # closes the connection when a response write stalls this long
+# keepalive_timeout_secs = 60 # closes a keepalive connection idle past the limit; also caps one head or body-frame read
 # unsafe_field_names = "drop" # or "reject": 400 for header names aliasing a CGI variable
 
 # Host-side multipart limits - dispatcher mode only (classic/worker parse in PHP,

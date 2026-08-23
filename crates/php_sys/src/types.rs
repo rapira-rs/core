@@ -6,7 +6,6 @@ use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::Sender;
 
-/// One entry per field line, wire order, values raw bytes (latin1/binary-safe).
 pub type FieldLines = Vec<(String, Vec<u8>)>;
 
 #[derive(Debug, Clone)]

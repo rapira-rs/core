@@ -12,6 +12,8 @@ pub struct HttpSettings {
     pub server_port: u16,
     pub max_body_size: usize,
     pub write_timeout: std::time::Duration,
+    /// Bounds client read progress: one request-head read (including the keepalive idle wait) and each request-body frame.
+    pub keepalive_timeout: std::time::Duration,
     pub unsafe_field_names: UnsafeFieldNames,
     pub uploads: UploadSettings,
     /// `[http.sendfile].root`; None = the entrypoint's directory.
@@ -45,6 +47,7 @@ pub(crate) struct HttpSection {
     pub(crate) server_port: Option<u16>,
     pub(crate) max_body_size_mb: Option<usize>,
     pub(crate) write_timeout_secs: Option<u64>,
+    pub(crate) keepalive_timeout_secs: Option<u64>,
     pub(crate) unsafe_field_names: Option<UnsafeFieldNames>,
     /// Option so presence is observable: the table is rejected outside dispatcher mode.
     pub(crate) uploads: Option<UploadsSection>,

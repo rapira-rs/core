@@ -39,22 +39,19 @@ php_sys = { path = "crates/php_sys" }
 rapira_runtime = { path = "crates/runtime" }
 rapira_config = { path = "crates/config" }
 extension_api = { path = "crates/api" }
-rapira_pingora = { path = "crates/plugins/pingora" }
+rapira_tower = { path = "crates/plugins/tower" }
 rapira_master = { path = "crates/master" }
 rapira_scoreboard = { path = "crates/scoreboard" }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
+http = "1"
+http-body-util = "0.1"
+libc = "0"
 
 [workspace.lints.clippy]
 all = "warn"
 
 [profile.release]
-# Cross-crate LTO + a single codegen unit: the hot path spans the pingora/tokio/plugin crates
-# as many small cross-crate calls.
-# NOTE: `panic` must stay "unwind". php_sys::callbacks::guard wraps every SAPI callback in
-# catch_unwind, and that is the only thing turning a panic inside PHP into "fail this request
-# and recycle the worker" instead of aborting the process. Cargo ignores `panic` for the test
-# profile, so switching it here would not fail any test.
 lto = "thin"
 codegen-units = 1
 
@@ -67,7 +64,7 @@ rapira_scoreboard = { workspace = true }
 rapira_runtime = { workspace = true }
 php_sys = { workspace = true }
 rapira_config = { workspace = true }
-rapira_pingora = { workspace = true }
+rapira_tower = { workspace = true }
 libc = "0.2"
 mimalloc = "0.1"
 tracing.workspace = true

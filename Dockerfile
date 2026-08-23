@@ -16,7 +16,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends clang libclang-dev cmake; \
+    apt-get install -y --no-install-recommends clang libclang-dev; \
     rm -rf /var/lib/apt/lists/*
 
 RUN rustup toolchain install stable --profile minimal --component rustfmt --component clippy

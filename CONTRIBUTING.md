@@ -51,17 +51,17 @@ C sources (`crates/php_sys/*.c`, `*.h`) follow `.clang-format`.
 
 ## Repository layout
 
-| Path | What it is |
-| --- | --- |
-| `src/` | the `rapira` binary: CLI and boot |
-| `crates/php_sys` | the SAPI: C glue, bindgen bindings, worker/classic request loops, `rapira.stub.php` |
-| `crates/runtime` | the extension runtime that drives PHP |
-| `crates/master` | the pre-fork supervisor: forking, reaping, scaling, signals, reload |
-| `crates/config` | `rapira.toml` and CLI configuration |
-| `crates/api` | the native extension contract |
-| `crates/scoreboard` | shared per-worker counters |
-| `crates/plugins/pingora` | the HTTP front |
-| `crates/tests` | integration and e2e suites |
+| Path                   | What it is                                                                          |
+| ---------------------- | ----------------------------------------------------------------------------------- |
+| `src/`                 | the `rapira` binary: CLI and boot                                                   |
+| `crates/php_sys`       | the SAPI: C glue, bindgen bindings, worker/classic request loops, `rapira.stub.php` |
+| `crates/runtime`       | the extension runtime that drives PHP                                               |
+| `crates/master`        | the pre-fork supervisor: forking, reaping, scaling, signals, reload                 |
+| `crates/config`        | `rapira.toml` and CLI configuration                                                 |
+| `crates/api`           | the native extension contract                                                       |
+| `crates/scoreboard`    | shared per-worker counters                                                          |
+| `crates/plugins/tower` | the HTTP front                                                                      |
+| `crates/tests`         | integration and e2e suites                                                          |
 
 ## Pull requests
 

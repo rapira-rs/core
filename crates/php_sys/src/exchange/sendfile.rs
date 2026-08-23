@@ -1,10 +1,12 @@
+use std::path::PathBuf;
+use std::sync::Mutex;
+
 use super::respond::{Verb, discard_unit, emit_head, seal, send_frame, throw_verb};
 use super::*;
 
-/// Canonicalized root `sendFile()` paths must stay inside; None denies every path.
-static SENDFILE_ROOT: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+static SENDFILE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-pub fn set_sendfile_root(root: std::path::PathBuf) {
+pub fn set_sendfile_root(root: PathBuf) {
     let canonical = std::fs::canonicalize(&root).unwrap_or_else(|e| {
         tracing::warn!(
             target: "rapira",
@@ -18,14 +20,13 @@ pub fn set_sendfile_root(root: std::path::PathBuf) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(canonical);
 }
 
-fn sendfile_root() -> Option<std::path::PathBuf> {
+fn sendfile_root() -> Option<PathBuf> {
     SENDFILE_ROOT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
 }
 
-/// Opens and validates on the calling thread, so a throw precedes any write.
 fn open_send_file(
     path: &[u8],
     offset: u64,
