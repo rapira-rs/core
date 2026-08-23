@@ -16,7 +16,9 @@ concurrency:
 
 jobs:
   claude-review:
-    if: github.actor == 'rustatian'
+    if: |
+      contains(fromJSON('["rustatian", "claude[bot]"]'), github.event.pull_request.user.login) ||
+      contains(fromJSON('["rustatian", "claude[bot]"]'), github.actor)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
