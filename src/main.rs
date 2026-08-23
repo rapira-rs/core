@@ -1,9 +1,7 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use extension_api::{ListenAddr, PrepareCtx};
 use php_sys::{Mode, Rapira};
-use rapira_config::{
-    Listen, Overrides, RunMode, Scaling, Settings, UnsafeFieldNames, UploadSettings,
-};
+use rapira_config::{Listen, Overrides, RunMode, Scaling, Settings, UnsafeFieldNames};
 use rapira_runtime::ExtensionRuntime;
 use rapira_scoreboard::Scoreboard;
 use rapira_tower::{Config as HttpConfig, HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames};

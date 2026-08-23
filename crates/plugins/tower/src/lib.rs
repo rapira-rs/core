@@ -7,12 +7,12 @@ use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, Prepared
 use tokio::runtime::{self, Builder};
 use tokio::sync::{oneshot, watch};
 
-mod check;
 mod bridge;
+mod check;
+mod handler;
 mod request;
 mod response;
 mod serve;
-mod handler;
 
 #[derive(Clone)]
 pub struct Config {
