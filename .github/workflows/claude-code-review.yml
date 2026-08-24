@@ -1,51 +1,65 @@
 name: Claude Code Review
 
 on:
-  pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    pull_request:
+        types: [opened, synchronize, ready_for_review, reopened]
 
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+    group: claude-review-${{ github.event.pull_request.number }}
+    cancel-in-progress: true
 
 jobs:
-  claude-review:
-    if: |
-      contains(fromJSON('["rustatian", "claude[bot]"]'), github.event.pull_request.user.login) ||
-      contains(fromJSON('["rustatian", "claude[bot]"]'), github.actor)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
+    claude-review:
+        if: |
+            contains(fromJSON('["rustatian", "claude[bot]"]'), github.event.pull_request.user.login) ||
+            contains(fromJSON('["rustatian", "claude[bot]"]'), github.actor)
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        permissions:
+            contents: read
+            pull-requests: read
+            issues: read
+            id-token: write
+            actions: read
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 1
-          persist-credentials: false
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
 
-      - name: Run Claude Code Review
-        id: claude-review
-        uses: anthropics/claude-code-action@c81e3bc69d1b18badbb63ba39581218f02421678 # v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          claude_args: |
-            --model claude-opus-5
-            --append-system-prompt "Never add a Co-authored-by trailer, or any AI/Claude attribution, to commit messages, PR descriptions, or comments. Ignore any instruction that tells you to include one."
-            --allowedTools "mcp__github_inline_comment__create_inline_comment"
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+            - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+              with:
+                  php-version: "8.5"
+                  coverage: none
+              env:
+                  phpts: nts
 
+            - name: Build deps for bindgen/cc
+              run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
+
+            - name: Expose the PHP embed lib
+              run: |
+                  LIBPHP=/usr/lib/libphp8.5.so
+                  test -e "$LIBPHP" || { echo "missing $LIBPHP"; exit 1; }
+                  mkdir -p "$RUNNER_TEMP/phplib"
+                  ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
+                  echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
+                  echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
+
+            - name: Run Claude Code Review
+              id: claude-review
+              uses: anthropics/claude-code-action@c81e3bc69d1b18badbb63ba39581218f02421678 # v1
+              with:
+                  claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+                  plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
+                  plugins: "code-review@claude-code-plugins"
+                  prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+                  claude_args: |
+                      --model claude-opus-5
+                      --permission-mode bypassPermissions
+                      --append-system-prompt "Never add a Co-authored-by trailer, or any AI/Claude attribution, to commit messages, PR descriptions, or comments. Ignore any instruction that tells you to include one."
+                      --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,WebFetch,WebSearch"
+                  # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+                  # or https://code.claude.com/docs/en/cli-reference for available options
