@@ -18,6 +18,7 @@ mod worker;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// PHP application server driven by native extensions.
 #[derive(Parser)]
 #[command(name = "rapira", version)]
 struct Cli {
@@ -27,21 +28,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Boot the server: start PHP, register extensions, and serve requests.
     Serve(ServeArgs),
 }
 
 #[derive(Args)]
 struct ServeArgs {
+    /// Load settings from a rapira.toml. The flags below override values it sets.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    /// Worker processes to fork (static count; max_children for `pool.scaling`
+    /// dynamic/ondemand). Defaults to the CPU count.
     #[arg(long)]
     processes: Option<usize>,
+
+    /// Run mode: classic, worker, or dispatcher. Overrides `pool.mode`.
     #[arg(long, value_name = "MODE")]
     mode: Option<RunMode>,
-    #[arg(long)]
-    classic: bool,
+
+    /// Listen address: `host:port`, `:port` (all interfaces), or `unix:<path>`.
     #[arg(long, value_name = "ADDR")]
     listen: Option<Listen>,
+
+    /// PHP entry script; overrides `pool.entrypoint` from the config file.
     #[arg(value_name = "SCRIPT")]
     script: Option<PathBuf>,
 }
@@ -74,16 +84,12 @@ fn spool_dir_reclaimable(name: &str) -> bool {
 }
 
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
-    if args.classic && args.mode.is_some_and(|m| m != RunMode::Classic) {
-        anyhow::bail!("--classic conflicts with --mode; use --mode classic");
-    }
-
     let settings: Settings = rapira_config::resolve(
         args.config.as_deref(),
         Overrides {
             listen: args.listen,
             processes: args.processes,
-            mode: args.mode.or(args.classic.then_some(RunMode::Classic)),
+            mode: args.mode,
             entrypoint: args.script,
         },
     )?;

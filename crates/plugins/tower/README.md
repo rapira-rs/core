@@ -17,6 +17,7 @@ Connections are served by hyper's http1 builder. Each request runs through admis
 - The request body is buffered before dispatch and capped by `max_body_size`: a declared `Content-Length` over the cap answers 413 before the body is read, an over-long streamed body answers 413 when the cap is crossed.
 - `Expect: 100-continue` is honored by hyper: the interim 100 goes out when the body is first read and is skipped entirely when the request is refused first.
 - `Host` rules per RFC 9112 §3.2: a repeated, missing or empty `Host` on HTTP/1.1 answers 400. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+- Absolute-form request-targets are accepted. The target's host information replaces `Host`, without the userinfo part. PHP sees the origin-form path and query; the request target keeps the full form. https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
 - `CONNECT` answers 501; this front implements no tunnels.
 - A request body that makes no read progress for `keepalive_timeout` answers 408 and closes the connection.
 - `unsafe_field_names` guards the CGI variable mapping: a field name with `_` or `.` lands on the `$_SERVER` entry a `-` name owns, so such names are dropped (default) or the request answers 400 (`"reject"`).
@@ -54,7 +55,7 @@ On the stop signal the accept loop ends immediately, idle keepalive connections 
 
 ## Build
 
-```
+```sh
 cargo build -p rapira_tower
 cargo clippy -p rapira_tower --all-targets
 ```

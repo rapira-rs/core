@@ -9,6 +9,7 @@ use extension_api::{
     Addr, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Php,
     Protocol, Rejected, ReplyEvent,
 };
+use http_body::Body;
 use http_body_util::BodyExt;
 
 use crate::response::{error_response, response_headers};
@@ -50,22 +51,22 @@ pub(crate) struct ConnInfo {
 pub(crate) enum RespBody {
     Reply(bridge::ReplyBody),
     Empty,
-    Boxed(extension_api::Body),
-    /// A front-authored refusal; the guard keeps the drain window open until hyper finishes writing it.
-    Refused {
+    /// A body that did not reach PHP: a front-authored refusal or a middleware answer.
+    /// The guard keeps the drain window open until hyper finishes the write.
+    Guarded {
         body: extension_api::Body,
         _guard: Option<InflightGuard>,
     },
 }
 
 fn refused(status: http::StatusCode, guard: Option<InflightGuard>) -> http::Response<RespBody> {
-    error_response(status).map(|body| RespBody::Refused {
+    error_response(status).map(|body| RespBody::Guarded {
         body,
         _guard: guard,
     })
 }
 
-impl http_body::Body for RespBody {
+impl Body for RespBody {
     type Data = bytes::Bytes;
     type Error = BoxError;
 
@@ -76,7 +77,7 @@ impl http_body::Body for RespBody {
         match self.get_mut() {
             RespBody::Reply(b) => Pin::new(b).poll_frame(cx),
             RespBody::Empty => Poll::Ready(None),
-            RespBody::Boxed(b) | RespBody::Refused { body: b, .. } => Pin::new(b).poll_frame(cx),
+            RespBody::Guarded { body: b, .. } => Pin::new(b).poll_frame(cx),
         }
     }
 
@@ -84,7 +85,7 @@ impl http_body::Body for RespBody {
         match self {
             RespBody::Reply(_) => false,
             RespBody::Empty => true,
-            RespBody::Boxed(b) | RespBody::Refused { body: b, .. } => b.is_end_stream(),
+            RespBody::Guarded { body: b, .. } => b.is_end_stream(),
         }
     }
 
@@ -92,7 +93,7 @@ impl http_body::Body for RespBody {
         match self {
             RespBody::Reply(b) => b.size_hint(),
             RespBody::Empty => http_body::SizeHint::with_exact(0),
-            RespBody::Boxed(b) | RespBody::Refused { body: b, .. } => b.size_hint(),
+            RespBody::Guarded { body: b, .. } => b.size_hint(),
         }
     }
 }
@@ -120,11 +121,15 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for RapiraSer
     }
 }
 
-async fn handle(
+async fn handle<B>(
     shared: Arc<Shared>,
     conn: ConnInfo,
-    req: http::Request<hyper::body::Incoming>,
-) -> http::Response<RespBody> {
+    req: http::Request<B>,
+) -> http::Response<RespBody>
+where
+    B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let guard: InflightGuard = InflightGuard::arm(&shared.inflight);
     let received_at: f64 = std::time::UNIX_EPOCH
         .elapsed()
@@ -178,10 +183,15 @@ async fn handle(
         authority: Mutex::new(Some(authority)),
         guard: Mutex::new(Some(guard)),
     });
-    Next::new(Arc::clone(&shared.chain), handler)
-        .run(req)
-        .await
-        .map(RespBody::Boxed)
+    let keep = Arc::clone(&handler);
+    let res = Next::new(Arc::clone(&shared.chain), handler).run(req).await;
+    // A middleware that answered without the handler left the guard in its slot.
+    // Attach it to the body so shutdown counts the response until hyper writes it.
+    let guard = keep.guard.lock().expect("guard mutex poisoned").take();
+    res.map(|body| RespBody::Guarded {
+        body,
+        _guard: guard,
+    })
 }
 
 struct PhpHandler {
@@ -235,7 +245,7 @@ async fn serve_php<B>(
     peer: &Peer,
 ) -> http::Response<RespBody>
 where
-    B: http_body::Body<Data = bytes::Bytes> + Unpin,
+    B: Body<Data = bytes::Bytes> + Unpin,
     B::Error: std::fmt::Display,
 {
     let cfg = &shared.cfg;
@@ -352,4 +362,62 @@ where
     *res.status_mut() = status;
     *res.headers_mut() = response_headers(headers, declared_cl, no_body);
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use extension_api::{Backend, Reply, Request};
+    use std::future::Future;
+
+    struct NoPhp;
+
+    impl Backend for NoPhp {
+        fn exec(
+            &self,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Reply>> + Send + '_>> {
+            unreachable!("the middleware answers before PHP")
+        }
+    }
+
+    struct Deny;
+
+    impl Middleware for Deny {
+        fn handle<'a>(&'a self, _req: HttpRequest, _next: Next) -> BoxFuture<'a, HttpResponse> {
+            Box::pin(async { error_response(http::StatusCode::FORBIDDEN) })
+        }
+    }
+
+    /// A middleware answer must hold the inflight guard until hyper drops the body.
+    #[tokio::test]
+    async fn short_circuit_keeps_the_inflight_guard() {
+        let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        let shared = Arc::new(Shared {
+            cfg: Arc::new(Config::default()),
+            php: Php::new(Arc::new(NoPhp)),
+            chain: Arc::from(vec![Arc::new(Deny) as Arc<dyn Middleware>]),
+            inflight: Arc::clone(&inflight),
+        });
+        let (_closed_tx, closed) = tokio::sync::watch::channel(false);
+        let conn = ConnInfo {
+            remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
+            server: Addr::Inet(([127, 0, 0, 1], 8000).into()),
+            closed,
+        };
+        let req = http::Request::builder()
+            .uri("/")
+            .header("host", "e2e")
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .unwrap();
+        let res = handle(shared, conn, req).await;
+        assert_eq!(res.status(), http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            inflight.load(Ordering::Acquire),
+            1,
+            "the guard must ride the response body"
+        );
+        drop(res);
+        assert_eq!(inflight.load(Ordering::Acquire), 0);
+    }
 }

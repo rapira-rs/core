@@ -46,7 +46,7 @@ tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 http = "1"
 http-body-util = "0.1"
-libc = "0"
+libc = "0.2"
 
 [workspace.lints.clippy]
 all = "warn"

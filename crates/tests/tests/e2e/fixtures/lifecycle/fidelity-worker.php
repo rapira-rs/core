@@ -29,6 +29,14 @@ try {
 				"content-length" => ["999"],
 			]);
 			$ex->writeBody("body");
+		} elseif ($probe === "target") {
+			$ex->writeBody(
+				implode("\n", [
+					"target=" . $req->target,
+					"uri=" . $req->uri,
+					"authority=" . ($req->authority ?? "null"),
+				]),
+			);
 		} elseif ($probe === "received") {
 			$ex->writeBody("received=" . var_export($req->receivedAt, true));
 		} elseif ($probe === "multipart") {

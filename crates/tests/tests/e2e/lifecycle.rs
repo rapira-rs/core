@@ -602,6 +602,38 @@ fn dispatcher_write_head_reaches_the_wire() {
     );
 }
 
+/// RFC 9112 §3.2.2: for an absolute-form target the origin server must ignore Host and use the target's host information.
+/// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
+#[test]
+fn absolute_form_target_overrides_host() {
+    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
+    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+
+    let raw = http_raw_bytes(
+        srv.addr,
+        b"GET http://target.example/echo?probe=target HTTP/1.1\r\n\
+          Host: spoofed.example\r\nConnection: close\r\n\r\n",
+        Duration::from_secs(10),
+    )
+    .expect("absolute-form request");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.contains("target=http://target.example/echo?probe=target"),
+        "the target must keep the absolute form: {text}\n{}",
+        diagnostics(&srv)
+    );
+    assert!(
+        text.contains("authority=target.example"),
+        "the target authority must replace Host: {text}\n{}",
+        diagnostics(&srv)
+    );
+    assert!(
+        text.contains("uri=http://target.example/echo?probe=target"),
+        "the absolute uri must carry the target authority and the path: {text}\n{}",
+        diagnostics(&srv)
+    );
+}
+
 /// Host-side multipart over the wire: a non-UTF-8 boundary round-trips, the spool file dies with finalization, malformed framing answers 400 and an over-limit file part 413.
 #[test]
 fn dispatcher_multipart_over_the_wire() {

@@ -72,7 +72,7 @@ jobs:
                   additional_permissions: |
                       actions: read
                   claude_args: |
-                      --model claude-opus-5
+                      --model claude-fable-5
                       --permission-mode bypassPermissions
                       --append-system-prompt "Never add a Co-authored-by trailer, or any AI/Claude attribution, to commit messages, PR descriptions, or comments. Ignore any instruction that tells you to include one."
                       --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,WebFetch,WebSearch"

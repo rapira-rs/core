@@ -62,12 +62,15 @@ pub(crate) fn apply_field_name_policy(
         UnsafeFieldNames::Drop => {
             for name in &unsafe_names {
                 headers.remove(name);
-                tracing::warn!(
-                    target: "http",
-                    "dropped request header {name}: name aliases a CGI variable \
-                     (unsafe_field_names = \"drop\"; use \"reject\" to answer 400 instead)"
-                );
             }
+            // One record per request. The client controls the count and the names.
+            tracing::warn!(
+                target: "http",
+                "dropped {} request header(s) aliasing a CGI variable, e.g. {} \
+                 (unsafe_field_names = \"drop\"; use \"reject\" to answer 400 instead)",
+                unsafe_names.len(),
+                unsafe_names[0]
+            );
         }
         UnsafeFieldNames::Reject => {
             return Err(Rejection::new(
@@ -99,6 +102,15 @@ pub(crate) fn check_request(
     }
     let authority = authority(&parts.headers, parts.version == Version::HTTP_11)
         .map_err(|reason| Rejection::new(http::StatusCode::BAD_REQUEST, reason))?;
+
+    let authority = match parts.uri.authority() {
+        Some(a) => {
+            let a = a.as_str();
+            let host_port = a.rsplit_once('@').map_or(a, |(_, hp)| hp);
+            Some(host_port.as_bytes().to_vec())
+        }
+        None => authority,
+    };
 
     apply_field_name_policy(&mut parts.headers, unsafe_field_names, superglobals)?;
 
@@ -216,6 +228,40 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.status, http::StatusCode::NOT_IMPLEMENTED);
+    }
+
+    /// RFC 9112 §3.2.2: the absolute-form target authority replaces Host. Userinfo is stripped.
+    /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
+    #[test]
+    fn absolute_form_authority_overrides_host() {
+        let mut p = parts(
+            Method::GET,
+            Version::HTTP_11,
+            &[("host", "spoofed.example")],
+        );
+        p.uri = "http://target.example/admin?x=1".parse().unwrap();
+        let authority = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024).unwrap();
+        assert_eq!(authority.as_deref(), Some(&b"target.example"[..]));
+
+        let mut p = parts(
+            Method::GET,
+            Version::HTTP_11,
+            &[("host", "spoofed.example")],
+        );
+        p.uri = "http://u:pw@target.example:8080/x".parse().unwrap();
+        let authority = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024).unwrap();
+        assert_eq!(authority.as_deref(), Some(&b"target.example:8080"[..]));
+    }
+
+    /// RFC 9112 §3.2: the Host 400 rules stay in force for an absolute-form target.
+    #[test]
+    fn absolute_form_keeps_the_host_rules() {
+        let mut p = parts(Method::GET, Version::HTTP_11, &[]);
+        p.uri = "http://target.example/".parse().unwrap();
+        let err = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024)
+            .err()
+            .unwrap();
+        assert_eq!(err.status, http::StatusCode::BAD_REQUEST);
     }
 
     #[test]

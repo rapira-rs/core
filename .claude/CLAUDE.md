@@ -4,6 +4,12 @@ PHP application server in Rust: rapira embeds PHP behind its own SAPI and a pre-
 A single-threaded master binds listeners and forks workers; each worker owns one PHP interpreter and one resident PHP thread.
 Extensions reach PHP through the `extension_api` `Php` bridge.
 
+## All text:
+
+- Write all English using ASD-STE100 Simplified Technical English (STE).
+  Use short sentences, active voice, approved vocabulary, and one instruction per sentence.
+  Avoid idioms, slang, and unnecessary synonyms. Don't write poems in the code comments.
+
 ## Settled, do not reopen
 
 - NTS only, `build.rs` rejects ZTS. Unix only.

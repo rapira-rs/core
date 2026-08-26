@@ -18,8 +18,17 @@ pub(crate) fn build(
     };
     Request {
         method: parts.method.as_str().to_owned(),
-        uri: parts.uri.to_string(),
-        target: None,
+        // Origin-form view for every target form. Display restores the leading slash
+        // that an authority-only absolute-form omits ("http://h?q" -> "/?q"). It keeps
+        // "*" unchanged.
+        // https://docs.rs/http/1/http/uri/struct.PathAndQuery.html
+        uri: parts
+            .uri
+            .path_and_query()
+            .map(|pq| pq.to_string())
+            .unwrap_or_else(|| "/".to_owned()),
+        // Reconstructed request-target. hyper hands out only the parsed Uri, not the raw bytes.
+        target: Some(parts.uri.to_string().into_bytes()),
         authority,
         https: peer.https,
         protocol,
@@ -79,8 +88,46 @@ mod tests {
             .collect();
         assert_eq!(probes, [b"one".as_slice(), b"two".as_slice()]);
         assert_eq!(built.uri, "/a/b?x=1");
+        assert_eq!(built.target.as_deref(), Some(&b"/a/b?x=1"[..]));
         assert_eq!(built.protocol, "HTTP/1.1");
         assert_eq!(built.authority.as_deref(), Some(&b"e2e"[..]));
         assert_eq!(built.received_at, Some(1.5));
+    }
+
+    fn built(uri: &str, method: &str) -> Request {
+        let req = http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(())
+            .unwrap();
+        let (parts, ()) = req.into_parts();
+        build(&parts, None, Vec::new(), &peer(), &Config::default())
+    }
+
+    /// RFC 9112 §3.2.2 absolute-form: PHP gets the origin-form view; the target keeps the full form.
+    /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
+    #[test]
+    fn absolute_form_yields_an_origin_form_uri() {
+        let b = built("http://h.example/admin?x=1", "GET");
+        assert_eq!(b.uri, "/admin?x=1");
+        assert_eq!(
+            b.target.as_deref(),
+            Some(&b"http://h.example/admin?x=1"[..])
+        );
+    }
+
+    /// An absolute-form target with no path still yields a rooted uri.
+    #[test]
+    fn empty_path_absolute_form_roots_the_uri() {
+        let b = built("http://h.example?x=1", "GET");
+        assert_eq!(b.uri, "/?x=1");
+    }
+
+    /// Asterisk-form passes through unchanged (server-wide OPTIONS).
+    #[test]
+    fn asterisk_form_is_preserved() {
+        let b = built("*", "OPTIONS");
+        assert_eq!(b.uri, "*");
+        assert_eq!(b.target.as_deref(), Some(&b"*"[..]));
     }
 }
