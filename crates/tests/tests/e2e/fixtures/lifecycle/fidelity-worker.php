@@ -35,6 +35,7 @@ try {
 					"target=" . $req->target,
 					"uri=" . $req->uri,
 					"authority=" . ($req->authority ?? "null"),
+					"host=" . implode("|", $req->headers["host"] ?? []),
 				]),
 			);
 		} elseif ($probe === "received") {

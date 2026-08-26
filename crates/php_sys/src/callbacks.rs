@@ -10,6 +10,12 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::null_mut;
 
+// Only this catch_unwind turns a panic inside PHP into a failed request and a
+// recycled worker instead of a process abort. The build enforces the strategy.
+// https://doc.rust-lang.org/reference/conditional-compilation.html#panic
+#[cfg(panic = "abort")]
+compile_error!("php_sys needs panic = \"unwind\": callbacks::guard relies on catch_unwind");
+
 pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
         tracing::error!(target: "rapira", "panic caught at the FFI boundary; default substituted");

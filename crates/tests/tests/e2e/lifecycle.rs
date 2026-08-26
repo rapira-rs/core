@@ -632,6 +632,11 @@ fn absolute_form_target_overrides_host() {
         "the absolute uri must carry the target authority and the path: {text}\n{}",
         diagnostics(&srv)
     );
+    assert!(
+        text.contains("host=target.example"),
+        "the Host field line must carry the effective authority: {text}\n{}",
+        diagnostics(&srv)
+    );
 }
 
 /// Host-side multipart over the wire: a non-UTF-8 boundary round-trips, the spool file dies with finalization, malformed framing answers 400 and an over-limit file part 413.

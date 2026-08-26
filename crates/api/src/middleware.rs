@@ -36,6 +36,8 @@ pub trait Handler: Send + Sync + 'static {
     fn call<'a>(&'a self, req: HttpRequest) -> BoxFuture<'a, HttpResponse>;
 }
 
+/// A middleware that rebuilds the request must keep the request extensions.
+/// The handler reads [`Peer`] and [`Protocol`] from them.
 pub trait Middleware: Send + Sync + 'static {
     fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse>;
 }

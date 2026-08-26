@@ -107,6 +107,11 @@ pub(crate) fn check_request(
         Some(a) => {
             let a = a.as_str();
             let host_port = a.rsplit_once('@').map_or(a, |(_, hp)| hp);
+            // Rewrite Host to the effective authority, so HTTP_HOST cannot disagree.
+            // https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
+            if let Ok(v) = http::HeaderValue::from_str(host_port) {
+                parts.headers.insert(HOST, v);
+            }
             Some(host_port.as_bytes().to_vec())
         }
         None => authority,
@@ -231,6 +236,7 @@ mod tests {
     }
 
     /// RFC 9112 §3.2.2: the absolute-form target authority replaces Host. Userinfo is stripped.
+    /// The Host field line is rewritten too, so HTTP_HOST agrees with the authority.
     /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
     #[test]
     fn absolute_form_authority_overrides_host() {
@@ -242,6 +248,7 @@ mod tests {
         p.uri = "http://target.example/admin?x=1".parse().unwrap();
         let authority = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024).unwrap();
         assert_eq!(authority.as_deref(), Some(&b"target.example"[..]));
+        assert_eq!(p.headers.get("host").unwrap(), "target.example");
 
         let mut p = parts(
             Method::GET,
@@ -251,6 +258,7 @@ mod tests {
         p.uri = "http://u:pw@target.example:8080/x".parse().unwrap();
         let authority = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024).unwrap();
         assert_eq!(authority.as_deref(), Some(&b"target.example:8080"[..]));
+        assert_eq!(p.headers.get("host").unwrap(), "target.example:8080");
     }
 
     /// RFC 9112 §3.2: the Host 400 rules stay in force for an absolute-form target.
