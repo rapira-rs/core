@@ -32,8 +32,7 @@ pub fn php_lock_with_ini(ini: &Path) -> sync::MutexGuard<'static, ()> {
     guard
 }
 
-/// One resident worker: the follow-up request rides the same interpreter, so an
-/// uncaught throw must leave it serving. `ini` overrides PHPRC for the boot.
+/// One resident worker serves every request; `ini` overrides PHPRC for this whole test binary, like [`php_lock_with_ini`].
 pub fn run_worker(
     name: &str,
     uris: &[&str],
@@ -54,8 +53,7 @@ pub fn run_worker(
     Ok(out)
 }
 
-/// Panics when RAPIRA_REQUIRE_EXTS names an extension this fixture covers: where CI
-/// installs the extensions a skip is a broken install, not a pass.
+/// Panics when RAPIRA_REQUIRE_EXTS names an extension this fixture covers: a skip where CI installs the extension is a broken install.
 pub fn assert_skip_allowed(fixture: &str) {
     let Ok(required) = std::env::var("RAPIRA_REQUIRE_EXTS") else {
         return;

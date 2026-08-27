@@ -1,17 +1,12 @@
 <?php
-// The tracer's compatible-SAPI gate (dd-trace-php ext/datadog.c; the name strings are
-// in components/sapi/sapi.c; docs at
-// https://docs.datadoghq.com/tracing/trace_collection/compatibility/php/) has neither
-// "fastcgi" (PHP 8.4) nor "rapira" (8.5). MINIT must set datadog_disable and still
-// return SUCCESS: the extension loads, keeps its API, and traces nothing. phpinfo()
-// renders the flag as the "Datadog tracing support" row. ini_get('ddtrace.disable')
-// does not show it: the ini handler writes into the flag one-way.
+// The compatible-SAPI gate (ext/datadog.c; names in components/sapi/sapi.c) has neither "fastcgi" (8.4) nor "rapira" (8.5): MINIT disables tracing and still returns SUCCESS.
+// https://docs.datadoghq.com/tracing/trace_collection/compatibility/php/
 $handler = static function (): void {
+	// phpinfo() renders the disable flag as the "Datadog tracing support" row; ini_get('ddtrace.disable') does not show it
 	ob_start();
 	phpinfo(INFO_MODULES);
 	$info = (string) ob_get_clean();
-	// tags and the text-mode " => " both become spaces, so the row parses the same
-	// in HTML and text phpinfo output
+	// tags and the text-mode " => " become spaces, so the row parses the same in both phpinfo modes
 	$flat = (string) preg_replace('/<[^>]*>/', ' ', $info);
 	$flat = trim((string) preg_replace('/\s+/', ' ', str_replace('=>', ' ', $flat)));
 	if (str_contains($flat, 'Datadog tracing support disabled (not built)')) {

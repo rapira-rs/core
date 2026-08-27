@@ -1,9 +1,12 @@
 use std::path::Path;
 
-use tests::{assert_skip_allowed, captured, init_log_capture, run_worker};
+use php_sys::{Mode, Rapira};
+use tests::{
+    assert_skip_allowed, captured, drain, fixture, init_log_capture, php_lock_with_ini, req,
+    run_worker,
+};
 
-// ext/imap (PECL imap) reads default_socket_timeout at module startup only. This suite
-// runs in its own process with its own ini. The ini value 17 differs from the built-in 60.
+// ext/imap (PECL imap) reads default_socket_timeout at module startup only; the ini value 17 differs from the built-in 60, so the snapshot is provable.
 const IMAP_INI: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/ini/imap_tests/imap.ini"
@@ -13,10 +16,7 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
     run_worker(name, uris, Some(Path::new(IMAP_INI)))
 }
 
-/// MINIT stores FG(default_socket_timeout) into c-client (PECL imap php_imap.c,
-/// SET_*TIMEOUT). Nothing reads the ini again, so a per-request ini_set changes only
-/// PHP's ini view. A real connect uses the same value: no request can change the imap
-/// socket timeouts. Under the server the value comes from the master's php.ini.
+/// MINIT stores FG(default_socket_timeout) into c-client once (PECL imap php_imap.c, SET_*TIMEOUT): no request can change the imap socket timeouts.
 #[test]
 fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     let out = run("imap_tests/imap-timeout-worker.php", &["/", "/"])?;
@@ -40,9 +40,7 @@ fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// rapira reloads ext/imap per job (RELOAD_MODULES in php_sys/module.c): RSHUTDOWN
-/// frees the error stack and RINIT resets it, as under php-fpm. An undrained error
-/// must not leak into the next request on the same interpreter.
+/// rapira reloads ext/imap per job (RELOAD_MODULES in php_sys/module.c), so an undrained error must not leak into the next request, as under php-fpm.
 #[test]
 fn imap_error_stack_does_not_leak_between_requests() -> anyhow::Result<()> {
     let out = run("imap_tests/imap-errors-worker.php", &["/?step=leak", "/"])?;
@@ -65,24 +63,37 @@ fn imap_error_stack_does_not_leak_between_requests() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The per-job RSHUTDOWN reports each undrained entry as an E_NOTICE (free_errorlist
-/// in PECL imap php_imap.c). The notice reaches the operator log through the SAPI
-/// log_message hook, so an application that never drains imap_errors() is visible.
+/// The per-job RSHUTDOWN reports each undrained entry as an E_NOTICE through the SAPI log_message hook; the lock stays held through the capture read (the app_records pattern).
 #[test]
 fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
+    let name = "imap_tests/imap-errors-worker.php";
+    let _guard = php_lock_with_ini(Path::new(IMAP_INI));
     init_log_capture();
     captured().clear();
-    let out = run("imap_tests/imap-errors-worker.php", &["/?step=leak", "/"])?;
-    if out[0].1 == "skip" {
-        assert_skip_allowed("imap_tests/imap-errors-worker.php");
+
+    let r = Rapira::start(Mode::Worker(fixture(name)))?;
+    let h = r.handle();
+    let (s1, b1) = drain(h.handle_blocking(req("/?step=leak", name))?);
+    if b1 == "skip" {
+        drop(h);
+        r.shutdown();
+        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(
-        (out[1].0, out[1].1.as_str()),
-        (200, "imap:errors:empty"),
-        "the follow-up must see a reset stack (got: {:?})",
-        out[1]
+        (s1, b1.as_str()),
+        (200, "imap:leaked:1"),
+        "the leak request must push one entry and keep it undrained"
     );
+    let (s2, b2) = drain(h.handle_blocking(req("/", name))?);
+    assert_eq!(
+        (s2, b2.as_str()),
+        (200, "imap:errors:empty"),
+        "the follow-up must see a reset stack"
+    );
+    drop(h);
+    r.shutdown();
+
     let seen = captured()
         .iter()
         .any(|c| c.target == "php" && c.message.contains("invalid remote specification (errflg="));

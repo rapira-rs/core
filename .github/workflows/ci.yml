@@ -15,10 +15,7 @@ jobs:
                 php: ["8.4", "8.5"]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
-            # CI-only APM agents for Linux; the source-built PHP jobs (macOS, master,
-            # release) do not change. The pins are manual: dependabot has no ecosystem
-            # for vendor tarballs. On a version bump, refresh NEWRELIC_SHA256 and the
-            # per-asset ddtrace hashes in the install step below.
+            # CI-only APM agents for Linux; the pins are manual (dependabot has no ecosystem for vendor tarballs): on a bump, refresh NEWRELIC_SHA256 and the ddtrace hashes below.
             #   https://github.com/newrelic/newrelic-php-agent/releases
             #   https://github.com/DataDog/dd-trace-php/releases
             NEWRELIC_VERSION: "12.9.0.38"
@@ -61,18 +58,12 @@ jobs:
                   echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
                   echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
 
-            # The APM agents go into the extension dir and stay out of conf.d, so the
-            # test suite boots agent-free by default. The e2e tests
-            # (crates/tests/tests/e2e/apm.rs) load them through their own php.ini and
-            # skip when the .so is absent; RAPIRA_REQUIRE_EXTS below turns a skip on
-            # Linux into a failure. The load checks keep a broken install loud.
+            # The APM agents go into the extension dir and stay out of conf.d, so the suite boots agent-free; the e2e tests load them through their own php.ini (crates/tests/tests/e2e/apm.rs).
             - name: Resolve the PHP ABI (Linux)
               if: runner.os == 'Linux'
               run: |
                   set -euo pipefail
-                  # ZEND_MODULE_API_NO: the extension dir and both vendor assets key on
-                  # it. The newrelic .so name uses PHP_API_VERSION, equal to this number
-                  # today; a divergence fails loudly at the download.
+                  # ZEND_MODULE_API_NO: the extension dir and both vendor asset names key on it; a divergence fails at the download
                   echo "PHP_API=$(php -i | awk -F'=> ' '/^PHP Extension =>/{print $2; exit}')" >> "$GITHUB_ENV"
                   # the same oracle build.rs and the e2e harness read
                   echo "EXT_DIR=$(php-config --extension-dir)" >> "$GITHUB_ENV"
@@ -89,8 +80,7 @@ jobs:
                   url="https://download.newrelic.com/php_agent/archive/${NEWRELIC_VERSION}/newrelic-php5-${NEWRELIC_VERSION}-linux.tar.gz"
                   curl -fsSL --retry 3 --retry-all-errors "$url" -o "$RUNNER_TEMP/newrelic.tar.gz"
                   echo "${NEWRELIC_SHA256}  $RUNNER_TEMP/newrelic.tar.gz" | sha256sum -c -
-                  # tarball layout: newrelic-php5-<ver>-linux/agent/{x64,aarch64}/newrelic-<api>.so.
-                  # tar fails when the wildcard matches nothing, so a layout change fails the step.
+                  # layout: newrelic-php5-<ver>-linux/agent/{x64,aarch64}/newrelic-<api>.so; tar fails when the wildcard matches nothing
                   mkdir -p "$RUNNER_TEMP/newrelic"
                   tar -xzf "$RUNNER_TEMP/newrelic.tar.gz" -C "$RUNNER_TEMP/newrelic" \
                       --strip-components=1 --wildcards "*/agent/${NR_ARCH}/newrelic-${PHP_API}.so"
@@ -104,8 +94,7 @@ jobs:
               run: |
                   set -euo pipefail
                   ARCH=$(uname -m) # x86_64 / aarch64 match the asset names verbatim
-                  # GitHub release assets are publisher-mutable; the digests come from the
-                  # release API and pin each asset exactly.
+                  # release assets are publisher-mutable; the digests come from the release API and pin each asset exactly
                   case "${ARCH}-${PHP_API}" in
                     x86_64-20240924)  SHA=e76d211c15c3b73c164e9ae403304f65670c064219ec713e2e96a3296342ab77 ;;
                     x86_64-20250925)  SHA=7ccd7b973865fd1bf7b26a0c93eda8908af1118cece281ec74b5a14b3be1f743 ;;
@@ -116,10 +105,7 @@ jobs:
                   url="https://github.com/DataDog/dd-trace-php/releases/download/${DDTRACE_VERSION}/dd-library-php-${DDTRACE_VERSION}-${ARCH}-linux-gnu-${PHP_API}.tar.gz"
                   curl -fsSL --retry 3 --retry-all-errors "$url" -o "$RUNNER_TEMP/ddtrace.tar.gz"
                   echo "${SHA}  $RUNNER_TEMP/ddtrace.tar.gz" | sha256sum -c -
-                  # per-ABI NTS bundle. The bundle also ships trace/src, the userland
-                  # DDTrace classes, loaded only when datadog.trace.sources_path points
-                  # at them. A bare ddtrace.so carries the native surface; the tests
-                  # touch only that.
+                  # per-ABI NTS bundle; a bare ddtrace.so carries the native surface only (trace/src loads via datadog.trace.sources_path), and the tests touch only that
                   mkdir -p "$RUNNER_TEMP/ddtrace"
                   tar -xzf "$RUNNER_TEMP/ddtrace.tar.gz" -C "$RUNNER_TEMP/ddtrace" \
                       --wildcards "*/trace/ext/${PHP_API}/ddtrace.so"

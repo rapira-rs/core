@@ -1,11 +1,4 @@
-//! CI-only APM agent suites. CI on Linux places newrelic.so and ddtrace.so into the
-//! PHP extension dir and does not enable them globally. Each suite loads its agent
-//! through its own php.ini and skips when the object is absent; PHPRC replaces the
-//! main php.ini only, so the distro conf.d extensions load next to the agent.
-//!
-//! rapira registers no fatal-signal handlers (crates/master/src/signals.rs) and crash
-//! classification reads the wait status, so the agent's per-worker fatal-signal
-//! handler cannot change what the master observes.
+//! CI-only APM suites: Linux CI installs newrelic.so and ddtrace.so into the extension dir without enabling them; each suite loads its agent through its own php.ini and skips when the .so is absent.
 
 use std::collections::BTreeSet;
 use std::process::Command;
@@ -20,12 +13,10 @@ use crate::harness::{
 const REQ: Duration = Duration::from_secs(10);
 const BOOT_POOL: Duration = Duration::from_secs(20);
 
-/// A pool with the New Relic agent loaded for one test. The 40-char license passes the
-/// length-only local validation. `dont_launch = 3` stops every daemon fork. The debug
-/// log in the scratch dir feeds the late-init assertion; the relative path resolves
-/// because the harness starts the child in the scratch dir when a cwd ini is present.
+/// A pool with the agent loaded: the 40-char dummy license passes the length-only local validation, and `dont_launch = 3` stops every daemon fork.
 fn newrelic_srv(processes: usize, extra_toml: &str) -> Option<Server> {
     let so = php_extension("newrelic.so")?;
+    // the relative logfile resolves against the scratch dir: the harness starts the child there for a cwd ini
     let ini = format!(
         "extension = \"{}\"\n\
          newrelic.enabled = 1\n\
@@ -65,8 +56,7 @@ fn nr_pid(body: &str) -> u32 {
         .unwrap_or_else(|_| panic!("bad pid in {body:?}"))
 }
 
-/// The daemon double-forks and reparents to init, so a child scan cannot see it: scan
-/// the whole process table for its command name and check its log stayed unwritten.
+/// The daemon double-forks and reparents to init, so scan the whole process table and check its log stayed unwritten.
 fn assert_no_daemon(srv: &Server) {
     let out = Command::new("ps")
         .args(["-axo", "command="])
@@ -86,9 +76,7 @@ fn assert_no_daemon(srv: &Server) {
     );
 }
 
-/// Every newrelic MINIT branch returns SUCCESS, and all newrelic_* functions register
-/// unconditionally. With no daemon and a dummy license the agent must load, expose
-/// its API, and leave the pool serving.
+/// Every newrelic MINIT branch returns SUCCESS and all newrelic_* functions register unconditionally: the pool must keep serving with no daemon and a dummy license.
 #[test]
 fn newrelic_loads_and_the_pool_keeps_serving() {
     let Some(srv) = newrelic_srv(2, "") else {
@@ -110,11 +98,7 @@ fn newrelic_loads_and_the_pool_keeps_serving() {
     );
 }
 
-/// The agent finishes its per-process setup at the first RINIT (late init). Under a
-/// pre-fork pool it must run once in every worker. The master contributes only the
-/// MINIT lines. Every agent log line carries "(<pid> <tid>)" in its preamble
-/// (axiom/util_logging.c). The assertion uses the pid, not the message text, so a
-/// changed agent message does not break it.
+/// Late init runs at each worker's first RINIT; every agent log line carries "(<pid> <tid>)" (axiom/util_logging.c), so the pid, not the message text, is the assertion.
 #[test]
 fn newrelic_late_init_runs_in_every_worker() {
     let Some(srv) = newrelic_srv(2, "") else {
@@ -148,8 +132,7 @@ fn newrelic_late_init_runs_in_every_worker() {
     }
 }
 
-/// With `newrelic.daemon.dont_launch = 3` the agent never starts the daemon, from
-/// MINIT or RINIT.
+/// With `newrelic.daemon.dont_launch = 3` the agent never starts the daemon, from MINIT or RINIT.
 #[test]
 fn newrelic_launches_no_daemon_under_the_pool() {
     let Some(srv) = newrelic_srv(2, "") else {
@@ -163,9 +146,7 @@ fn newrelic_launches_no_daemon_under_the_pool() {
     assert_no_daemon(&srv);
 }
 
-/// The agent swaps zend_error_cb at late init but chains to the original. rapira's
-/// diagnostics use the SAPI log_message hook. The 500, the recovery on the same
-/// interpreter, and the logged message must all survive with the agent attached.
+/// The agent swaps zend_error_cb at late init but chains to the original: the 500, the recovery on the same interpreter, and the logged message must all survive.
 #[test]
 fn newrelic_uncaught_throw_path_is_unchanged() {
     let Some(srv) = newrelic_srv(1, "") else {
@@ -189,8 +170,7 @@ fn newrelic_uncaught_throw_path_is_unchanged() {
     );
 }
 
-/// A recycled worker is a fresh process, so the agent's late init must run again in
-/// the respawn and keep serving.
+/// A recycled worker is a fresh process: the agent's late init must run again in the respawn and keep serving.
 #[test]
 fn newrelic_survives_worker_recycle() {
     let Some(srv) = newrelic_srv(1, "max_requests = 2\n") else {
@@ -208,11 +188,7 @@ fn newrelic_survives_worker_recycle() {
     );
 }
 
-/// A pool with the Datadog tracer loaded for one test. No datadog.* keys: the SAPI
-/// check disables the tracer before sidecar, telemetry, or remote-config setup, so
-/// there is nothing to configure. When upstream adds rapira to the compatible-SAPI
-/// list, ddtrace_self_disables_under_the_rapira_sapi fails and this suite gets
-/// reworked with the configuration that new state needs.
+/// No datadog.* keys: the SAPI check disables the tracer before sidecar, telemetry, or remote-config setup, so there is nothing to configure until upstream adds rapira to the list.
 fn ddtrace_srv(processes: usize) -> Option<Server> {
     let so = php_extension("ddtrace.so")?;
     let ini = format!("extension = \"{}\"\ndisplay_errors = Off\n", so.display());
@@ -241,9 +217,7 @@ fn dd_pid(body: &str) -> u32 {
         .unwrap_or_else(|_| panic!("bad pid in {body:?}"))
 }
 
-/// Neither of rapira's SAPI names is in the tracer's compatible-SAPI list, so MINIT
-/// must disable tracing and still load the extension. When upstream adds rapira to
-/// the list, this test fails with `enabled`; rework the suite then.
+/// Neither of rapira's SAPI names is in the tracer's compatible list: MINIT must disable tracing and still load the extension; an `enabled` failure here means upstream added rapira.
 #[test]
 fn ddtrace_self_disables_under_the_rapira_sapi() {
     let Some(srv) = ddtrace_srv(2) else { return };
@@ -270,8 +244,7 @@ fn ddtrace_self_disables_under_the_rapira_sapi() {
     );
 }
 
-/// The disabled tracer must stay disabled across requests and workers, keep the pool
-/// serving, and start no sidecar process.
+/// The disabled tracer must stay disabled across requests and workers, keep the pool serving, and start no sidecar process.
 #[test]
 fn ddtrace_keeps_the_pool_serving_and_forks_nothing() {
     let Some(srv) = ddtrace_srv(2) else { return };

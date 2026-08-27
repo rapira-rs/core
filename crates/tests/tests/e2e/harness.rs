@@ -120,9 +120,7 @@ pub fn spawn_in_cwd(fixture: &str, processes: usize, php_ini: &str) -> Server {
     spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
 }
 
-/// [`spawn_in_cwd`] with PHPRC pointing at the same directory: the control showing that
-/// same file does apply. `extra_toml` is appended inside `[pool]`, so any other section
-/// needs its own header and must come after all bare pool keys.
+/// [`spawn_in_cwd`] with PHPRC pointing at the same directory; `extra_toml` is appended inside `[pool]`, so any other section needs its own header and must come last.
 pub fn spawn_with_phprc_and_config(
     fixture: &str,
     processes: usize,
@@ -574,8 +572,7 @@ fn php_extension_dir() -> Option<PathBuf> {
         .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
-/// The shared object for `name`, or None when this PHP build does not have it: the
-/// CI-only agent suites skip on None. RAPIRA_REQUIRE_EXTS turns a demanded skip into a panic.
+/// The shared object for `name`, or None when this PHP build lacks it; RAPIRA_REQUIRE_EXTS turns a demanded skip into a panic.
 pub fn php_extension(name: &str) -> Option<PathBuf> {
     let p = php_extension_dir().map(|d| d.join(name));
     if let Some(p) = &p

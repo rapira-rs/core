@@ -9,8 +9,7 @@ $handler = static function (): void {
 		openssl_random_pseudo_bytes(0);
 		return;
 	}
-	// ext/openssl has no RINIT or RSHUTDOWN. The error ring lives in persistent
-	// memory (php_openssl.h). ?step=leak leaves one error for the next request.
+	// ext/openssl has no RINIT or RSHUTDOWN; the persistent error ring (php_openssl.h) keeps ?step=leak's error for the next request.
 	if (($_GET['step'] ?? '') === 'leak') {
 		@openssl_x509_read('not a certificate');
 		echo 'openssl:leaked';

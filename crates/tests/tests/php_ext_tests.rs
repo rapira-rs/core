@@ -202,10 +202,7 @@ fn opcache_success() -> anyhow::Result<()> {
     success("php_ext/opcache-worker.php", "opcache:enabled")
 }
 
-/// ext/openssl has no RINIT or RSHUTDOWN, in php-fpm and in rapira alike, so the
-/// error ring persists for the process. php_openssl_store_errors (openssl.c) keeps it
-/// in persistent memory: allocated at first use, freed at GSHUTDOWN. An undrained
-/// error therefore outlives its request on a resident interpreter.
+/// ext/openssl has no RINIT or RSHUTDOWN (openssl.c), in php-fpm and in rapira alike, so an undrained error in the persistent ring outlives its request.
 #[test]
 fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
     // the first drain empties whatever earlier tests left on the process-global ring
@@ -228,9 +225,7 @@ fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
         "leak request must succeed (got: {:?})",
         out[1]
     );
-    // The PEM reader (php_openssl_x509_from_str, PEM_ASN1_read_bio) leaves one
-    // PEM_R_NO_START_LINE entry on a non-PEM string. The full error string differs
-    // between OpenSSL 1.1.1 and 3.x. The routine and reason substrings do not.
+    // the PEM reader leaves one PEM_R_NO_START_LINE entry; only the routine and reason substrings are stable across OpenSSL 1.1.1 and 3.x
     assert!(
         out[2].1.starts_with("openssl:drained:1:"),
         "the next request must drain exactly one error (got: {:?})",
@@ -250,9 +245,7 @@ fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The ring holds PHP_OPENSSL_ERR_BUFFER_SIZE (16) slots and overwrites the oldest
-/// entry when full, so at most 15 errors are readable (php_openssl_store_errors,
-/// openssl.c). An application that never drains keeps the newest 15, not all.
+/// The 16-slot ring overwrites the oldest entry when full, so at most the newest 15 errors are readable (php_openssl_store_errors, openssl.c).
 #[test]
 fn openssl_error_ring_overwrites_the_oldest() -> anyhow::Result<()> {
     let out = run(
@@ -281,8 +274,7 @@ fn openssl_error_ring_overwrites_the_oldest() -> anyhow::Result<()> {
 fn browscap_unset_exception() -> anyhow::Result<()> {
     exception("php_ext/browscap-worker.php", "browscap:false")
 }
-/// The `browscap` ini is PHP_INI_SYSTEM and the test php.ini does not set it.
-/// get_browser() must warn "browscap ini directive not set" (browscap.c) and return false.
+/// The `browscap` ini is PHP_INI_SYSTEM and unset here: get_browser() must warn and return false (browscap.c).
 #[test]
 fn browscap_unset_warns() -> anyhow::Result<()> {
     let out = run("php_ext/browscap-worker.php", &["/"])?;

@@ -1,8 +1,5 @@
 <?php
-// The agent takes the web path under rapira: its SAPI name is not "cli". The agent
-// must load, register its API, and leave the request cycle unchanged with no daemon
-// and no valid license. The Rust side spawns this fixture only when newrelic.so
-// exists, so a load failure surfaces as a failed assertion, not a skip.
+// The agent takes the web path (the SAPI name is not "cli") and must load, register its API, and leave the request cycle unchanged with no daemon and no valid license.
 $handler = static function (): void {
 	if (($_GET['boom'] ?? '') === '1') {
 		throw new RuntimeException('newrelic-worker: uncaught');

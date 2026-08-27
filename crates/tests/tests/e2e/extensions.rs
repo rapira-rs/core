@@ -19,10 +19,7 @@ fn rng_draw(body: &str) -> (u32, String) {
     (pid, first.to_owned())
 }
 
-/// No two workers may emit identical first draws. The master runs no PHP, so no DRBG
-/// state exists at fork time and each worker seeds its own; the cached draw also pins
-/// that the entrypoint's top level runs once per worker. random_bytes() uses
-/// ext/random's getrandom(2) path, never OpenSSL, and this test does not cover it.
+/// No two workers may emit identical first draws; the cached draw also pins that the entrypoint top level runs once per worker (random_bytes() never uses OpenSSL).
 #[test]
 fn forked_workers_do_not_share_the_openssl_drbg() {
     let srv = spawn_with_config("extensions/openssl-rng-worker.php", 4, "");
@@ -75,9 +72,7 @@ fn browscap_ini() -> String {
     )
 }
 
-/// The `browscap` ini is PHP_INI_SYSTEM. MINIT reads the file once into persistent
-/// memory. Under rapira the parse runs in the master, before the fork, and the
-/// workers share the pages copy-on-write.
+/// The `browscap` ini is PHP_INI_SYSTEM: MINIT parses the file once into persistent memory, in the master before the fork.
 fn browscap_probe(ua: &str) -> String {
     let srv = spawn_with_phprc_and_config(
         "browscap/browscap-worker.php",
@@ -92,10 +87,7 @@ fn browscap_probe(ua: &str) -> String {
     String::from_utf8_lossy(&body).into_owned()
 }
 
-/// Two patterns match. browser_reg_compare keeps the one with the most non-wildcard
-/// characters. The parent fills only the keys the winner omits. The regex is the
-/// lowercased pattern with `*` -> `.*`, `?` -> `.` and the specials escaped
-/// (browscap_convert_pattern); the true/false value mapping is stated in the fixture ini.
+/// browser_reg_compare keeps the pattern with the most non-wildcard characters, the parent fills only the keys the winner omits, and browscap_convert_pattern builds the regex.
 #[test]
 fn get_browser_picks_the_longest_pattern_and_inherits_the_parent() {
     let body = browscap_probe("Rapira/1.0 (Linux x86_64) Bot/9");
@@ -109,9 +101,7 @@ fn get_browser_picks_the_longest_pattern_and_inherits_the_parent() {
     assert_eq!(body, expected);
 }
 
-/// This user agent is shorter than the Bot pattern's literal minimum, so browscap's
-/// length check discards that entry before any comparison. The shorter `Rapira/1.0*`
-/// entry wins, and its own keys override the parent's.
+/// The user agent is shorter than the Bot pattern's literal minimum, so the length check discards that entry and `Rapira/1.0*` wins.
 #[test]
 fn get_browser_falls_through_to_the_less_specific_pattern() {
     let body = browscap_probe("Rapira/1.0 (Darwin)");
@@ -125,8 +115,7 @@ fn get_browser_falls_through_to_the_less_specific_pattern() {
     assert_eq!(body, expected);
 }
 
-/// No pattern matches, so the literal "Default Browser Capability Settings" entry
-/// (DEFAULT_SECTION_NAME in browscap.c) answers. It has no Parent, so no parent key.
+/// No pattern matches, so the DEFAULT_SECTION_NAME entry (browscap.c) answers; it has no Parent, so no parent key.
 #[test]
 fn get_browser_falls_back_to_the_default_section() {
     let body = browscap_probe("curl/8.5.0");
@@ -140,8 +129,7 @@ fn get_browser_falls_back_to_the_default_section() {
     assert_eq!(body, expected);
 }
 
-/// get_browser(null) reads $_SERVER['HTTP_USER_AGENT']; without the header it must
-/// warn and return false. This pins that the SAPI does not invent a user agent.
+/// get_browser(null) reads $_SERVER['HTTP_USER_AGENT']; without the header it must warn and return false: the SAPI does not invent a user agent.
 #[test]
 fn get_browser_without_a_user_agent_returns_false() {
     let srv = spawn_with_phprc_and_config(
@@ -171,8 +159,7 @@ fn table_and_pid(body: &str) -> (String, u32) {
     )
 }
 
-/// The browscap table parses once in the master at MINIT and every worker serves from
-/// the same persistent table: identical answers from distinct pids, request after request.
+/// One MINIT parse in the master serves every worker: identical answers from distinct pids, request after request.
 #[test]
 fn browscap_table_is_shared_and_stable_across_workers() {
     let srv = spawn_with_phprc_and_config(
