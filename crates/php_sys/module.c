@@ -464,6 +464,46 @@ void rapira_release_temporary_streams(void) {
     ZEND_HASH_FOREACH_END();
 }
 
+// Boot-registered shutdown functions run once, at cycle end. The stash keeps
+// them out of the per-job calls in rapira_run_handler. Request memory: the
+// cycle is one PHP request, so the pointer stays valid.
+static HashTable *rapira_boot_shutdown_functions = NULL;
+
+void rapira_stash_boot_shutdown_functions(void) {
+    rapira_boot_shutdown_functions = BG(user_shutdown_function_names);
+    BG(user_shutdown_function_names) = NULL;
+}
+
+// Restore before php_request_shutdown so its own pass runs the boot functions.
+// Post-loop registrations go behind the boot entries; the buckets change owner,
+// so destroy the late table with its dtor cleared (basic_functions.c:1589).
+static void rapira_restore_boot_shutdown_functions(void) {
+    HashTable *boot = rapira_boot_shutdown_functions;
+    if (!boot) {
+        return;
+    }
+    rapira_boot_shutdown_functions = NULL;
+
+    HashTable *late = BG(user_shutdown_function_names);
+    if (late) {
+        zend_string *key = NULL;
+        zval *entry = NULL;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(late, key, entry) {
+            // register_user_shutdown_function() entries carry a string key
+            if (key) {
+                zend_hash_update(boot, key, entry);
+            } else {
+                zend_hash_next_index_insert(boot, entry);
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+        late->pDestructor = NULL;
+        zend_hash_destroy(late);
+        FREE_HASHTABLE(late);
+    }
+    BG(user_shutdown_function_names) = boot;
+}
+
 // retry is safe: end_all NULLs EG(current_observed_frame) (zend_observer.c:322)
 int rapira_request_shutdown(void) {
     volatile int bailed = OK;
@@ -472,6 +512,7 @@ int rapira_request_shutdown(void) {
         EG(timeout_seconds) = rapira_job_timeout;
     }
     rapira_job_timeout = -1; // cycle over: next cycle re-captures its budget
+    rapira_restore_boot_shutdown_functions();
 #ifdef HAVE_PHP_SESSION
     // left set, it makes RSHUTDOWN skip the handler's close() (mod_user.c:29)
     PS(in_save_handler) = false;

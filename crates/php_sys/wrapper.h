@@ -34,6 +34,7 @@ php_core_globals *rapira_pg(void);
 void rapira_init_call_stack(void);
 void rapira_process_init(void);
 void rapira_release_temporary_streams(void);
+void rapira_stash_boot_shutdown_functions(void);
 int rapira_request_activate(void);
 int rapira_request_shutdown(void);
 size_t rapira_ub_write(const char *str, size_t len);

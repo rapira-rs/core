@@ -229,6 +229,8 @@ fn next_job() -> Option<Job> {
                 wc.recycle = true;
                 return None;
             }
+            // boot-registered shutdown functions run at cycle end
+            unsafe { rapira_stash_boot_shutdown_functions() };
             sb_update(scoreboard::Event::Healthy);
         }
         log_and_clear_last_error();
