@@ -1,32 +1,33 @@
-//! CI-only APM agent suites. The Linux CI legs place newrelic.so and ddtrace.so into
-//! the PHP extension dir and do not enable them globally. Each suite loads its agent
-//! through its own php.ini and skips when the object is absent.
+//! CI-only APM agent suites. CI on Linux places newrelic.so and ddtrace.so into the
+//! PHP extension dir and does not enable them globally. Each suite loads its agent
+//! through its own php.ini and skips when the object is absent; PHPRC replaces the
+//! main php.ini only, so the distro conf.d extensions load next to the agent.
 //!
-//! Not tested here: newrelic's fatal-signal handler. It runs per worker, covers
-//! SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGABRT, and re-raises with the default disposition.
-//! rapira registers none of those signals (crates/master/src/signals.rs), and crash
-//! classification reads the wait status, so the handler cannot change what the
-//! master observes.
+//! rapira registers no fatal-signal handlers (crates/master/src/signals.rs) and crash
+//! classification reads the wait status, so the agent's per-worker fatal-signal
+//! handler cannot change what the master observes.
 
 use std::collections::BTreeSet;
+use std::process::Command;
 use std::time::Duration;
 
 use crate::harness::{
-    Server, diagnostics, http_get, php_extension, php_extension_dir, spawn_with_phprc_and_config,
-    wait_log_contains, wait_workers, worker_pids,
+    Server, assert_only_workers, diagnostics, fan_out, http_get, php_extension,
+    spawn_with_phprc_and_config, wait_file_contains_all, wait_log_contains, wait_workers,
+    worker_pids,
 };
 
 const REQ: Duration = Duration::from_secs(10);
 const BOOT_POOL: Duration = Duration::from_secs(20);
 
-/// A pool with the New Relic agent loaded for one test. The 40-char license is a
-/// dummy: local validation checks only the length. `dont_launch = 3` stops every
-/// daemon fork. The debug log in the scratch dir feeds the late-init assertion.
-fn newrelic_srv(processes: usize) -> Option<Server> {
-    php_extension("newrelic.so")?;
+/// A pool with the New Relic agent loaded for one test. The 40-char license passes the
+/// length-only local validation. `dont_launch = 3` stops every daemon fork. The debug
+/// log in the scratch dir feeds the late-init assertion; the relative path resolves
+/// because the harness starts the child in the scratch dir when a cwd ini is present.
+fn newrelic_srv(processes: usize, extra_toml: &str) -> Option<Server> {
+    let so = php_extension("newrelic.so")?;
     let ini = format!(
-        "extension_dir = \"{}\"\n\
-         extension = newrelic.so\n\
+        "extension = \"{}\"\n\
          newrelic.enabled = 1\n\
          newrelic.appname = \"rapira-e2e\"\n\
          newrelic.license = \"0123456789abcdef0123456789abcdef01234567\"\n\
@@ -34,35 +35,28 @@ fn newrelic_srv(processes: usize) -> Option<Server> {
          newrelic.loglevel = debug\n\
          newrelic.logfile = \"newrelic-agent.log\"\n\
          newrelic.daemon.logfile = \"newrelic-daemon.log\"\n\
-         display_errors = On\n\
-         error_reporting = E_ALL\n\
-         max_execution_time = 0\n\
-         session.gc_probability = 0\n",
-        php_extension_dir()?.display()
+         display_errors = Off\n",
+        so.display()
     );
     Some(spawn_with_phprc_and_config(
         "apm/newrelic-worker.php",
         processes,
         &ini,
-        "mode = \"worker\"\n",
+        &format!("mode = \"worker\"\n{extra_toml}"),
     ))
 }
 
-/// One request whose body decides skip-vs-run for the whole test.
-fn probe(srv: &Server) -> Option<String> {
+fn probe(srv: &Server) -> String {
     let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
     let body = String::from_utf8_lossy(&body).into_owned();
-    if body == "skip" {
-        return None;
-    }
     assert_eq!(code, 200, "probe failed: {body:?}\n{}", diagnostics(srv));
-    Some(body)
+    body
 }
 
-fn nr_pid(body: &str, srv: &Server) -> u32 {
+fn nr_pid(body: &str) -> u32 {
     let rest = body
         .strip_prefix("nr:ok:")
-        .unwrap_or_else(|| panic!("unexpected body {body:?}\n{}", diagnostics(srv)));
+        .unwrap_or_else(|| panic!("unexpected body {body:?}"));
     let (version, pid) = rest
         .rsplit_once(':')
         .unwrap_or_else(|| panic!("unexpected body {body:?}"));
@@ -71,20 +65,38 @@ fn nr_pid(body: &str, srv: &Server) -> u32 {
         .unwrap_or_else(|_| panic!("bad pid in {body:?}"))
 }
 
+/// The daemon double-forks and reparents to init, so a child scan cannot see it: scan
+/// the whole process table for its command name and check its log stayed unwritten.
+fn assert_no_daemon(srv: &Server) {
+    let out = Command::new("ps")
+        .args(["-axo", "command="])
+        .output()
+        .expect("ps");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.contains("newrelic-daemon"),
+        "a newrelic-daemon process is running\n{}",
+        diagnostics(srv)
+    );
+    let log = srv.dir.join("newrelic-daemon.log");
+    assert!(
+        std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+        "the daemon log must stay unwritten\n{}",
+        diagnostics(srv)
+    );
+}
+
 /// Every newrelic MINIT branch returns SUCCESS, and all newrelic_* functions register
 /// unconditionally. With no daemon and a dummy license the agent must load, expose
 /// its API, and leave the pool serving.
 #[test]
 fn newrelic_loads_and_the_pool_keeps_serving() {
-    let Some(srv) = newrelic_srv(2) else { return };
+    let Some(srv) = newrelic_srv(2, "") else {
+        return;
+    };
     let before = wait_workers(&srv, BOOT_POOL, "2 workers", |p| p.len() == 2);
-    let Some(first) = probe(&srv) else { return };
-    nr_pid(&first, &srv);
     for _ in 0..20 {
-        let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
-        let body = String::from_utf8_lossy(&body);
-        assert_eq!(code, 200, "got {body:?}\n{}", diagnostics(&srv));
-        let pid = nr_pid(&body, &srv);
+        let pid = nr_pid(&probe(&srv));
         assert!(
             before.contains(&pid),
             "answering pid {pid} must be one of the workers {before:?}"
@@ -105,112 +117,71 @@ fn newrelic_loads_and_the_pool_keeps_serving() {
 /// changed agent message does not break it.
 #[test]
 fn newrelic_late_init_runs_in_every_worker() {
-    let Some(srv) = newrelic_srv(2) else { return };
-    wait_workers(&srv, BOOT_POOL, "2 workers", |p| p.len() == 2);
-    if probe(&srv).is_none() {
+    let Some(srv) = newrelic_srv(2, "") else {
         return;
-    }
+    };
+    wait_workers(&srv, BOOT_POOL, "2 workers", |p| p.len() == 2);
+    probe(&srv);
 
-    let addr = srv.addr;
-    let handles: Vec<_> = (0..4u32)
-        .map(|_| {
-            std::thread::spawn(move || {
-                let mut pids = BTreeSet::new();
-                for _ in 0..25 {
-                    let (code, body) = http_get(addr, "/", REQ).expect("GET /");
-                    assert_eq!(code, 200);
-                    let body = String::from_utf8_lossy(&body).into_owned();
-                    let pid: u32 = body
-                        .rsplit_once(':')
-                        .and_then(|(_, p)| p.parse().ok())
-                        .unwrap_or_else(|| panic!("unexpected body {body:?}"));
-                    pids.insert(pid);
-                }
-                pids
-            })
-        })
-        .collect();
-    let mut pids: BTreeSet<u32> = BTreeSet::new();
-    for h in handles {
-        match h.join() {
-            Ok(p) => pids.extend(p),
-            Err(e) => std::panic::resume_unwind(e),
-        }
-    }
+    let pids: BTreeSet<u32> = fan_out(srv.addr, "/", 4, 25, nr_pid).into_iter().collect();
     assert!(
         pids.len() >= 2,
         "4 concurrent clients against 2 workers must reach both\n{}",
         diagnostics(&srv)
     );
 
-    let log_path = srv.dir.join("newrelic-agent.log");
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-        let all_present = pids.iter().all(|p| log.contains(&format!("({p} ")))
-            && log.contains(&format!("({} ", srv.pid()));
-        if all_present {
-            return;
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "agent log must show the master (MINIT) and every serving worker (late init); \
-                 master {} workers {pids:?}\n--- {} ---\n{log}",
-                srv.pid(),
-                log_path.display()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    let needles: Vec<String> = pids
+        .iter()
+        .chain([srv.pid()].iter())
+        .map(|p| format!("({p} "))
+        .collect();
+    if let Err(state) = wait_file_contains_all(
+        &srv.dir.join("newrelic-agent.log"),
+        &needles,
+        Duration::from_secs(5),
+    ) {
+        panic!(
+            "agent log must show the master (MINIT) and every serving worker (late init); \
+             master {} workers {pids:?}\n{state}",
+            srv.pid()
+        );
     }
 }
 
-/// With `newrelic.daemon.dont_launch = 3` the agent never forks the daemon, from MINIT
-/// or RINIT. No worker may have a child, and the master's children are the workers only.
+/// With `newrelic.daemon.dont_launch = 3` the agent never starts the daemon, from
+/// MINIT or RINIT.
 #[test]
 fn newrelic_launches_no_daemon_under_the_pool() {
-    let Some(srv) = newrelic_srv(2) else { return };
-    let workers = wait_workers(&srv, BOOT_POOL, "2 workers", |p| p.len() == 2);
-    if probe(&srv).is_none() {
+    let Some(srv) = newrelic_srv(2, "") else {
         return;
-    }
+    };
+    let workers = wait_workers(&srv, BOOT_POOL, "2 workers", |p| p.len() == 2);
     for _ in 0..10 {
-        let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
-        assert_eq!(code, 200);
+        nr_pid(&probe(&srv));
     }
-    for &w in &workers {
-        assert!(
-            worker_pids(w).is_empty(),
-            "worker {w} must not have forked a daemon\n{}",
-            diagnostics(&srv)
-        );
-    }
-    assert_eq!(
-        worker_pids(srv.pid()),
-        workers,
-        "the master's children must be the workers only\n{}",
-        diagnostics(&srv)
-    );
+    assert_only_workers(&srv, &workers);
+    assert_no_daemon(&srv);
 }
 
 /// The agent swaps zend_error_cb at late init but chains to the original. rapira's
-/// diagnostics use the SAPI log_message hook. The 500, the recovery, and the logged
-/// message must all survive with the agent attached.
+/// diagnostics use the SAPI log_message hook. The 500, the recovery on the same
+/// interpreter, and the logged message must all survive with the agent attached.
 #[test]
-fn newrelic_leaves_the_uncaught_throw_path_alone() {
-    let Some(srv) = newrelic_srv(1) else { return };
-    wait_workers(&srv, BOOT_POOL, "1 worker", |p| p.len() == 1);
-    if probe(&srv).is_none() {
+fn newrelic_uncaught_throw_path_is_unchanged() {
+    let Some(srv) = newrelic_srv(1, "") else {
         return;
-    }
+    };
+    wait_workers(&srv, BOOT_POOL, "1 worker", |p| p.len() == 1);
+    let before = nr_pid(&probe(&srv));
     let (code, _) = http_get(srv.addr, "/?boom=1", REQ).expect("GET /?boom=1");
     assert_eq!(code, 500, "{}", diagnostics(&srv));
-    let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
-    let body = String::from_utf8_lossy(&body);
+    let after = nr_pid(&probe(&srv));
     assert_eq!(
-        code, 200,
-        "the interpreter must survive the throw (got {body:?})"
+        before,
+        after,
+        "the same interpreter must serve the follow-up: a pid change means a respawn\n{}",
+        diagnostics(&srv)
     );
-    nr_pid(&body, &srv);
     assert!(
         wait_log_contains(&srv, "newrelic-worker: uncaught", Duration::from_secs(5)),
         "the exception text must reach the server log\n{}",
@@ -218,27 +189,33 @@ fn newrelic_leaves_the_uncaught_throw_path_alone() {
     );
 }
 
-/// A pool with the Datadog tracer loaded for one test. The quieting keys are redundant
-/// today: the SAPI check disables the tracer before sidecar, telemetry, or
-/// remote-config setup. They stay so that a future upstream allowlist change starts no
-/// network activity in CI. Env DD_* overrides these ini keys; the runners export none.
-fn ddtrace_srv(processes: usize) -> Option<Server> {
-    php_extension("ddtrace.so")?;
-    let ini = format!(
-        "extension_dir = \"{}\"\n\
-         extension = ddtrace.so\n\
-         datadog.trace.agent_url = \"http://127.0.0.1:9\"\n\
-         datadog.trace.startup_logs = 0\n\
-         datadog.instrumentation_telemetry_enabled = 0\n\
-         datadog.remote_config_enabled = 0\n\
-         datadog.trace.sidecar_connection_mode = subprocess\n\
-         datadog.trace.log_level = error\n\
-         display_errors = On\n\
-         error_reporting = E_ALL\n\
-         max_execution_time = 0\n\
-         session.gc_probability = 0\n",
-        php_extension_dir()?.display()
+/// A recycled worker is a fresh process, so the agent's late init must run again in
+/// the respawn and keep serving.
+#[test]
+fn newrelic_survives_worker_recycle() {
+    let Some(srv) = newrelic_srv(1, "max_requests = 2\n") else {
+        return;
+    };
+    wait_workers(&srv, BOOT_POOL, "1 worker", |p| p.len() == 1);
+    let mut pids = BTreeSet::new();
+    for _ in 0..6 {
+        pids.insert(nr_pid(&probe(&srv)));
+    }
+    assert!(
+        pids.len() >= 2,
+        "max_requests = 2 over 6 requests must recycle the worker at least once\n{}",
+        diagnostics(&srv)
     );
+}
+
+/// A pool with the Datadog tracer loaded for one test. No datadog.* keys: the SAPI
+/// check disables the tracer before sidecar, telemetry, or remote-config setup, so
+/// there is nothing to configure. When upstream adds rapira to the compatible-SAPI
+/// list, ddtrace_self_disables_under_the_rapira_sapi fails and this suite gets
+/// reworked with the configuration that new state needs.
+fn ddtrace_srv(processes: usize) -> Option<Server> {
+    let so = php_extension("ddtrace.so")?;
+    let ini = format!("extension = \"{}\"\ndisplay_errors = Off\n", so.display());
     Some(spawn_with_phprc_and_config(
         "apm/ddtrace-worker.php",
         processes,
@@ -253,18 +230,29 @@ fn dd_field<'a>(body: &'a str, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no {key} line in {body:?}"))
 }
 
+fn dd_pid(body: &str) -> u32 {
+    let disabled = dd_field(body, "dd:tracing") == "disabled";
+    assert!(
+        disabled,
+        "the disabled state must not change (got {body:?})"
+    );
+    dd_field(body, "dd:pid")
+        .parse()
+        .unwrap_or_else(|_| panic!("bad pid in {body:?}"))
+}
+
 /// Neither of rapira's SAPI names is in the tracer's compatible-SAPI list, so MINIT
 /// must disable tracing and still load the extension. When upstream adds rapira to
-/// the list, this test fails with `enabled`. That failure is not a flake: rework the
-/// suite then.
+/// the list, this test fails with `enabled`; rework the suite then.
 #[test]
 fn ddtrace_self_disables_under_the_rapira_sapi() {
     let Some(srv) = ddtrace_srv(2) else { return };
     wait_workers(&srv, BOOT_POOL, "2 workers", |p| p.len() == 2);
-    let Some(body) = probe(&srv) else { return };
-    assert!(
-        ["fastcgi", "rapira"].contains(&dd_field(&body, "dd:sapi")),
-        "unexpected SAPI name (got {body:?})"
+    let body = probe(&srv);
+    assert_eq!(
+        dd_field(&body, "dd:sapi_ok"),
+        "1",
+        "the SAPI name must match the PHP version's expected name (got {body:?})"
     );
     assert!(
         !dd_field(&body, "dd:version").is_empty(),
@@ -288,30 +276,16 @@ fn ddtrace_self_disables_under_the_rapira_sapi() {
 fn ddtrace_keeps_the_pool_serving_and_forks_nothing() {
     let Some(srv) = ddtrace_srv(2) else { return };
     let workers = wait_workers(&srv, BOOT_POOL, "2 workers", |p| p.len() == 2);
-    if probe(&srv).is_none() {
-        return;
-    }
-    for _ in 0..50 {
-        let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
-        let body = String::from_utf8_lossy(&body);
-        assert_eq!(code, 200, "got {body:?}\n{}", diagnostics(&srv));
-        assert_eq!(
-            dd_field(&body, "dd:tracing"),
-            "disabled",
-            "the disabled state must not change after the fork (got {body:?})"
-        );
-    }
-    for &w in &workers {
-        assert!(
-            worker_pids(w).is_empty(),
-            "worker {w} must not have started a sidecar\n{}",
-            diagnostics(&srv)
-        );
-    }
-    assert_eq!(
-        worker_pids(srv.pid()),
-        workers,
-        "the master's children must be the workers only\n{}",
+    probe(&srv);
+    let pids: BTreeSet<u32> = fan_out(srv.addr, "/", 4, 10, dd_pid).into_iter().collect();
+    assert!(
+        pids.len() >= 2,
+        "4 concurrent clients against 2 workers must reach both\n{}",
         diagnostics(&srv)
     );
+    assert!(
+        pids.iter().all(|p| workers.contains(p)),
+        "every answering pid must be a worker: {pids:?} vs {workers:?}"
+    );
+    assert_only_workers(&srv, &workers);
 }

@@ -9,12 +9,15 @@ $handler = static function (): void {
 		imap_timeout('boom');
 		return;
 	}
-	// c-client rejects the empty host in mail_valid_net_parse before any DNS or
-	// socket work, so imap_open cannot stall on default_socket_timeout.
-	// imap_errors() drains the stack; RSHUTDOWN reports an undrained entry as an E_NOTICE.
+	// c-client rejects the empty host in mail_valid_net_parse (uw-imap mail.c) before
+	// any DNS or socket work. The 1-second bound keeps a wrong assumption from
+	// stalling the suite: imap_timeout() writes c-client directly, unlike ini_set.
+	imap_timeout(IMAP_OPENTIMEOUT, 1);
 	$open = @imap_open('{}INBOX', 'u', 'p');
+	// imap_errors() drains the stack; RSHUTDOWN reports an undrained entry as an E_NOTICE.
 	$errs = imap_errors();
-	echo 'imap:' . ($open === false && is_array($errs) && count($errs) === 1 ? 'ok' : 'bad');
+	$rejected = is_array($errs) && str_contains(implode('|', $errs), 'invalid remote specification');
+	echo 'imap:' . ($open === false && $rejected ? 'ok' : 'bad');
 };
 while (\Rapira\handle_request($handler)) {
 }

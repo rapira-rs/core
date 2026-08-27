@@ -16,6 +16,13 @@ $handler = static function (): void {
 		echo 'openssl:leaked';
 		return;
 	}
+	if (($_GET['step'] ?? '') === 'leak_many') {
+		for ($i = 0; $i < 20; $i++) {
+			@openssl_x509_read('not a certificate');
+		}
+		echo 'openssl:leaked:20';
+		return;
+	}
 	if (($_GET['step'] ?? '') === 'drain') {
 		$errs = [];
 		while (($e = openssl_error_string()) !== false) {

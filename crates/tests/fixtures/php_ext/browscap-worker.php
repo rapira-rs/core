@@ -1,6 +1,7 @@
 <?php
 $handler = static function (): void {
-	if (!function_exists('get_browser')) {
+	// the unset-path assertions need no system browscap; skip when one is configured
+	if ((string) ini_get('browscap') !== '') {
 		echo 'skip';
 		return;
 	}

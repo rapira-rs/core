@@ -1,14 +1,10 @@
 <?php
-// The agent's only SAPI-name test is `name == "cli"`, so rapira takes the web path.
-// The agent must load, register its API, and leave the request cycle unchanged with
-// no daemon and no valid license.
+// The agent takes the web path under rapira: its SAPI name is not "cli". The agent
+// must load, register its API, and leave the request cycle unchanged with no daemon
+// and no valid license. The Rust side spawns this fixture only when newrelic.so
+// exists, so a load failure surfaces as a failed assertion, not a skip.
 $handler = static function (): void {
-	if (!extension_loaded('newrelic')) {
-		echo 'skip';
-		return;
-	}
 	if (($_GET['boom'] ?? '') === '1') {
-		ini_set('display_errors', '0');
 		throw new RuntimeException('newrelic-worker: uncaught');
 	}
 	$api = ['newrelic_start_transaction', 'newrelic_end_transaction', 'newrelic_name_transaction',

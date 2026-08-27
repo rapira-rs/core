@@ -32,6 +32,42 @@ pub fn php_lock_with_ini(ini: &Path) -> sync::MutexGuard<'static, ()> {
     guard
 }
 
+/// One resident worker: the follow-up request rides the same interpreter, so an
+/// uncaught throw must leave it serving. `ini` overrides PHPRC for the boot.
+pub fn run_worker(
+    name: &str,
+    uris: &[&str],
+    ini: Option<&Path>,
+) -> anyhow::Result<Vec<(u16, String)>> {
+    let guard = php_lock();
+    if let Some(ini) = ini {
+        set_phprc(&guard, ini);
+    }
+    let r = Rapira::start(Mode::Worker(fixture(name)))?;
+    let h = r.handle();
+    let mut out = Vec::with_capacity(uris.len());
+    for uri in uris {
+        out.push(drain(h.handle_blocking(req(uri, name))?));
+    }
+    drop(h);
+    r.shutdown();
+    Ok(out)
+}
+
+/// Panics when RAPIRA_REQUIRE_EXTS names an extension this fixture covers: where CI
+/// installs the extensions a skip is a broken install, not a pass.
+pub fn assert_skip_allowed(fixture: &str) {
+    let Ok(required) = std::env::var("RAPIRA_REQUIRE_EXTS") else {
+        return;
+    };
+    for ext in required.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        assert!(
+            !fixture.contains(ext),
+            "{fixture} skipped, but RAPIRA_REQUIRE_EXTS demands {ext}"
+        );
+    }
+}
+
 /// Build a minimal `GET` request for `uri`, with `$_SERVER` metadata pointing at `fixture_name`.
 pub fn req(uri: &str, fixture_name: &str) -> Request {
     let query = uri.split_once('?').map(|x: (&str, &str)| x.1);

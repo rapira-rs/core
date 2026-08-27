@@ -1,8 +1,9 @@
 <?php
-// MINIT copies default_socket_timeout into c-client (php_imap.c, SET_*TIMEOUT).
-// Under rapira MINIT runs in the master, before the fork, so a per-request ini_set
-// does not reach c-client. imap_timeout($type) with one argument reads the c-client
-// value (https://www.php.net/manual/en/function.imap-timeout.php).
+// MINIT copies default_socket_timeout into c-client once (PECL imap php_imap.c,
+// SET_*TIMEOUT) and nothing reads the ini again, so a per-request ini_set does not
+// reach c-client. Under the server, MINIT runs in the master before the fork.
+// imap_timeout($type) with one argument reads the c-client value
+// (https://www.php.net/manual/en/function.imap-timeout.php).
 $handler = static function (): void {
 	if (!extension_loaded('imap')) {
 		echo 'skip';

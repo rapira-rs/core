@@ -1,23 +1,13 @@
-use php_sys::{Mode, Rapira};
-use tests::{drain, fixture, php_lock, req};
+use tests::{assert_skip_allowed, run_worker};
 
-// One resident worker per extension: the follow-up request rides the same interpreter, so an uncaught throw must leave it serving.
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
-    let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(name)))?;
-    let h = r.handle();
-    let mut out = Vec::with_capacity(uris.len());
-    for uri in uris {
-        out.push(drain(h.handle_blocking(req(uri, name))?));
-    }
-    drop(h);
-    r.shutdown();
-    Ok(out)
+    run_worker(name, uris, None)
 }
 
 fn success(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/"])?;
     if out[0].1 == "skip" {
+        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(out[0].0, 200, "{name} must serve 200 (got: {:?})", out[0]);
@@ -32,6 +22,7 @@ fn success(name: &str, token: &str) -> anyhow::Result<()> {
 fn exception(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/?boom=1", "/"])?;
     if out[0].1 == "skip" {
+        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(
@@ -211,50 +202,81 @@ fn opcache_success() -> anyhow::Result<()> {
     success("php_ext/opcache-worker.php", "opcache:enabled")
 }
 
-/// ext/openssl has no RINIT or RSHUTDOWN. php_openssl_store_errors() keeps the error
-/// ring in persistent memory (php_openssl.h). An undrained error therefore outlives
-/// its request on a resident interpreter.
+/// ext/openssl has no RINIT or RSHUTDOWN, in php-fpm and in rapira alike, so the
+/// error ring persists for the process. php_openssl_store_errors (openssl.c) keeps it
+/// in persistent memory: allocated at first use, freed at GSHUTDOWN. An undrained
+/// error therefore outlives its request on a resident interpreter.
 #[test]
 fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
+    // the first drain empties whatever earlier tests left on the process-global ring
     let out = run(
         "php_ext/openssl-worker.php",
-        &["/?step=leak", "/?step=drain", "/?step=drain"],
+        &[
+            "/?step=drain",
+            "/?step=leak",
+            "/?step=drain",
+            "/?step=drain",
+        ],
     )?;
     if out[0].1 == "skip" {
+        assert_skip_allowed("php_ext/openssl-worker.php");
         return Ok(());
     }
     assert_eq!(
-        (out[0].0, out[0].1.as_str()),
+        (out[1].0, out[1].1.as_str()),
         (200, "openssl:leaked"),
         "leak request must succeed (got: {:?})",
-        out[0]
+        out[1]
     );
-    // PEM_read_bio_X509 on a non-PEM string leaves one PEM_R_NO_START_LINE entry.
-    // The full error string differs between OpenSSL 1.1.1 and 3.x. The routine and
-    // reason substrings do not.
+    // The PEM reader (php_openssl_x509_from_str, PEM_ASN1_read_bio) leaves one
+    // PEM_R_NO_START_LINE entry on a non-PEM string. The full error string differs
+    // between OpenSSL 1.1.1 and 3.x. The routine and reason substrings do not.
     assert!(
-        out[1].1.starts_with("openssl:drained:1:"),
+        out[2].1.starts_with("openssl:drained:1:"),
         "the next request must drain exactly one error (got: {:?})",
-        out[1].1
+        out[2].1
     );
     assert!(
-        out[1].1.contains("PEM routines") && out[1].1.contains("no start line"),
+        out[2].1.contains("PEM routines") && out[2].1.contains("no start line"),
         "drained error must be the PEM no-start-line entry (got: {:?})",
-        out[1].1
+        out[2].1
     );
     assert_eq!(
-        (out[2].0, out[2].1.as_str()),
+        (out[3].0, out[3].1.as_str()),
         (200, "openssl:drained:0:"),
-        "the ring is FIFO-drained, so the third request must find it empty (got: {:?})",
-        out[2]
+        "the ring is FIFO-drained, so the last request must find it empty (got: {:?})",
+        out[3]
     );
     Ok(())
 }
 
+/// The ring holds PHP_OPENSSL_ERR_BUFFER_SIZE (16) slots and overwrites the oldest
+/// entry when full, so at most 15 errors are readable (php_openssl_store_errors,
+/// openssl.c). An application that never drains keeps the newest 15, not all.
 #[test]
-fn browscap_unset_success() -> anyhow::Result<()> {
-    success("php_ext/browscap-worker.php", "browscap:false")
+fn openssl_error_ring_overwrites_the_oldest() -> anyhow::Result<()> {
+    let out = run(
+        "php_ext/openssl-worker.php",
+        &["/?step=drain", "/?step=leak_many", "/?step=drain"],
+    )?;
+    if out[0].1 == "skip" {
+        assert_skip_allowed("php_ext/openssl-worker.php");
+        return Ok(());
+    }
+    assert_eq!(
+        (out[1].0, out[1].1.as_str()),
+        (200, "openssl:leaked:20"),
+        "the leak request must push 20 errors (got: {:?})",
+        out[1]
+    );
+    assert!(
+        out[2].1.starts_with("openssl:drained:15:"),
+        "20 pushes wrap the 16-slot ring down to 15 readable entries (got: {:?})",
+        out[2].1
+    );
+    Ok(())
 }
+
 #[test]
 fn browscap_unset_exception() -> anyhow::Result<()> {
     exception("php_ext/browscap-worker.php", "browscap:false")

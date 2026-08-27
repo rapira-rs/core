@@ -19,7 +19,7 @@ fn php_ini_in_the_working_directory_is_ignored() {
 /// Control for the test above: proves the fixture does read the ini, so a green cwd test is not vacuous.
 #[test]
 fn the_same_file_applies_through_phprc() {
-    let srv = harness::spawn_in_cwd_with_phprc("ini/precision.php", 1, "precision = 5\n");
+    let srv = harness::spawn_with_phprc_and_config("ini/precision.php", 1, "precision = 5\n", "");
     let (code, body) = http_get(srv.addr, "/", REQ).expect("request");
     assert_eq!(code, 200, "{}", harness::diagnostics(&srv));
     let body = String::from_utf8_lossy(&body);
