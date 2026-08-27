@@ -15,7 +15,7 @@ jobs:
       contents: read
       id-token: write # Codecov OIDC upload (unavailable on fork PRs; see use_oidc below)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { persist-credentials: false }
 
       - uses: shivammathur/setup-php@v2
