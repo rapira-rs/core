@@ -210,3 +210,84 @@ fn filter_exception() -> anyhow::Result<()> {
 fn opcache_success() -> anyhow::Result<()> {
     success("php_ext/opcache-worker.php", "opcache:enabled")
 }
+
+/// ext/openssl has no RINIT or RSHUTDOWN. php_openssl_store_errors() keeps the error
+/// ring in persistent memory (php_openssl.h). An undrained error therefore outlives
+/// its request on a resident interpreter.
+#[test]
+fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
+    let out = run(
+        "php_ext/openssl-worker.php",
+        &["/?step=leak", "/?step=drain", "/?step=drain"],
+    )?;
+    if out[0].1 == "skip" {
+        return Ok(());
+    }
+    assert_eq!(
+        (out[0].0, out[0].1.as_str()),
+        (200, "openssl:leaked"),
+        "leak request must succeed (got: {:?})",
+        out[0]
+    );
+    // PEM_read_bio_X509 on a non-PEM string leaves one PEM_R_NO_START_LINE entry.
+    // The full error string differs between OpenSSL 1.1.1 and 3.x. The routine and
+    // reason substrings do not.
+    assert!(
+        out[1].1.starts_with("openssl:drained:1:"),
+        "the next request must drain exactly one error (got: {:?})",
+        out[1].1
+    );
+    assert!(
+        out[1].1.contains("PEM routines") && out[1].1.contains("no start line"),
+        "drained error must be the PEM no-start-line entry (got: {:?})",
+        out[1].1
+    );
+    assert_eq!(
+        (out[2].0, out[2].1.as_str()),
+        (200, "openssl:drained:0:"),
+        "the ring is FIFO-drained, so the third request must find it empty (got: {:?})",
+        out[2]
+    );
+    Ok(())
+}
+
+#[test]
+fn browscap_unset_success() -> anyhow::Result<()> {
+    success("php_ext/browscap-worker.php", "browscap:false")
+}
+#[test]
+fn browscap_unset_exception() -> anyhow::Result<()> {
+    exception("php_ext/browscap-worker.php", "browscap:false")
+}
+/// The `browscap` ini is PHP_INI_SYSTEM and the test php.ini does not set it.
+/// get_browser() must warn "browscap ini directive not set" (browscap.c) and return false.
+#[test]
+fn browscap_unset_warns() -> anyhow::Result<()> {
+    let out = run("php_ext/browscap-worker.php", &["/"])?;
+    if out[0].1 == "skip" {
+        return Ok(());
+    }
+    assert_eq!(out[0].0, 200, "must serve 200 (got: {:?})", out[0]);
+    assert!(
+        out[0]
+            .1
+            .contains("get_browser(): browscap ini directive not set"),
+        "the E_WARNING must be visible in the body (got: {:?})",
+        out[0].1
+    );
+    assert!(
+        out[0].1.contains("browscap:false"),
+        "get_browser() must return false (got: {:?})",
+        out[0].1
+    );
+    Ok(())
+}
+
+#[test]
+fn imap_success() -> anyhow::Result<()> {
+    success("php_ext/imap-worker.php", "imap:ok")
+}
+#[test]
+fn imap_exception() -> anyhow::Result<()> {
+    exception("php_ext/imap-worker.php", "imap:ok")
+}

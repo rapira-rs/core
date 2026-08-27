@@ -15,6 +15,15 @@ jobs:
                 php: ["8.4", "8.5"]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
+            # CI-only APM agents for the Linux legs. They are not part of the source-built
+            # libphp (.github/php-configure-flags.txt does not change). The pins are manual:
+            # dependabot has no ecosystem for vendor tarballs.
+            #   https://github.com/newrelic/newrelic-php-agent/releases
+            #   https://github.com/DataDog/dd-trace-php/releases
+            NEWRELIC_VERSION: "12.9.0.38"
+            DDTRACE_VERSION: "1.24.2"
+            # Optional: copy the hash from a green run's log to pin the tarball exactly.
+            NEWRELIC_SHA256: ""
         steps:
             - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
               with: { persist-credentials: false }
@@ -24,7 +33,7 @@ jobs:
               with:
                   php-version: ${{ matrix.php }}
                   coverage: none
-                  extensions: calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, mbstring, opcache, openssl, pdo_sqlite, phar, posix, session, shmop, simplexml, sockets, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib
+                  extensions: calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, imap, mbstring, opcache, openssl, pdo_sqlite, phar, posix, session, shmop, simplexml, sockets, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib
               env:
                   phpts: nts
                   fail-fast: true # a missing extension fails the job instead of warning
@@ -51,6 +60,65 @@ jobs:
                   ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
                   echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
                   echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
+
+            # The APM agents go into the extension dir only, never into conf.d, so the test
+            # suite does not boot every test with an agent attached. The e2e tests
+            # (crates/tests/tests/e2e/apm.rs) load them through their own php.ini and skip
+            # when the .so is absent. The load checks below fail the job on a broken install.
+            - name: Install the New Relic PHP agent (Linux, CI only)
+              if: runner.os == 'Linux'
+              run: |
+                  set -euo pipefail
+                  case "${{ matrix.php }}" in
+                    8.4) API=20240924 ;;
+                    8.5) API=20250925 ;;
+                    *) echo "::error::no New Relic module-API mapping for PHP ${{ matrix.php }}"; exit 1 ;;
+                  esac
+                  case "$(uname -m)" in
+                    x86_64)  NR_ARCH=x64 ;;
+                    aarch64) NR_ARCH=aarch64 ;;
+                    *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;;
+                  esac
+                  url="https://download.newrelic.com/php_agent/archive/${NEWRELIC_VERSION}/newrelic-php5-${NEWRELIC_VERSION}-linux.tar.gz"
+                  curl -fsSL --retry 3 --retry-all-errors "$url" -o "$RUNNER_TEMP/newrelic.tar.gz"
+                  if [ -n "${NEWRELIC_SHA256:-}" ]; then
+                    echo "${NEWRELIC_SHA256}  $RUNNER_TEMP/newrelic.tar.gz" | sha256sum -c -
+                  else
+                    echo "newrelic tarball sha256: $(sha256sum "$RUNNER_TEMP/newrelic.tar.gz" | cut -d' ' -f1)"
+                  fi
+                  # tarball layout: newrelic-php5-<ver>-linux/agent/{x64,aarch64}/newrelic-<modapi>.so.
+                  # tar fails when the wildcard matches nothing, so a layout change fails the step.
+                  mkdir -p "$RUNNER_TEMP/newrelic"
+                  tar -xzf "$RUNNER_TEMP/newrelic.tar.gz" -C "$RUNNER_TEMP/newrelic" \
+                      --strip-components=1 --wildcards "*/agent/${NR_ARCH}/newrelic-${API}.so"
+                  EXT_DIR=$(php -r 'echo ini_get("extension_dir");')
+                  sudo install -m 0644 "$RUNNER_TEMP/newrelic/agent/${NR_ARCH}/newrelic-${API}.so" \
+                      "$EXT_DIR/newrelic.so"
+                  php -d "extension=$EXT_DIR/newrelic.so" \
+                      -d newrelic.daemon.dont_launch=3 -d newrelic.logfile=/dev/null -m | grep -qix newrelic
+
+            - name: Install the Datadog PHP tracer (Linux, CI only)
+              if: runner.os == 'Linux'
+              run: |
+                  set -euo pipefail
+                  case "${{ matrix.php }}" in
+                    8.4) API=20240924 ;;
+                    8.5) API=20250925 ;;
+                    *) echo "::error::no ddtrace module-API mapping for PHP ${{ matrix.php }}"; exit 1 ;;
+                  esac
+                  ARCH=$(uname -m) # x86_64 / aarch64 match the asset names verbatim
+                  url="https://github.com/DataDog/dd-trace-php/releases/download/${DDTRACE_VERSION}/dd-library-php-${DDTRACE_VERSION}-${ARCH}-linux-gnu-${API}.tar.gz"
+                  curl -fsSL --retry 3 --retry-all-errors "$url" -o "$RUNNER_TEMP/ddtrace.tar.gz"
+                  # per-ABI NTS bundle: rapira needs only ./dd-library-php/trace/ext/<api>/ddtrace.so.
+                  # Non-PECL builds compile the PHP-side sources into the extension.
+                  mkdir -p "$RUNNER_TEMP/ddtrace"
+                  tar -xzf "$RUNNER_TEMP/ddtrace.tar.gz" -C "$RUNNER_TEMP/ddtrace" \
+                      --wildcards "*/trace/ext/${API}/ddtrace.so"
+                  EXT_DIR=$(php -r 'echo ini_get("extension_dir");')
+                  sudo install -m 0644 "$RUNNER_TEMP/ddtrace/dd-library-php/trace/ext/${API}/ddtrace.so" \
+                      "$EXT_DIR/ddtrace.so"
+                  DD_TRACE_ENABLED=0 DD_INSTRUMENTATION_TELEMETRY_ENABLED=0 DD_TRACE_STARTUP_LOGS=0 \
+                    php -d "extension=$EXT_DIR/ddtrace.so" -m | grep -qix ddtrace
 
             - name: Install build deps (macOS)
               if: runner.os == 'macOS'

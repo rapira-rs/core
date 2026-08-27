@@ -1,4 +1,6 @@
+mod apm;
 mod concurrency;
+mod extensions;
 mod harness;
 mod ini;
 mod lifecycle;

@@ -129,6 +129,20 @@ pub fn spawn_in_cwd_with_phprc(fixture: &str, processes: usize, php_ini: &str) -
     spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
 }
 
+/// [`spawn_in_cwd_with_phprc`] plus `[pool]` keys: sets a custom php.ini and extra pool keys in one spawn.
+pub fn spawn_with_phprc_and_config(
+    fixture: &str,
+    processes: usize,
+    php_ini: &str,
+    extra_toml: &str,
+) -> Server {
+    let ini = CwdIni {
+        contents: php_ini,
+        via_phprc: true,
+    };
+    spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), Some(ini))
+}
+
 fn spawn_with_extras(
     fixture: &str,
     processes: usize,
@@ -552,10 +566,25 @@ fn scratch_dir() -> PathBuf {
     dir
 }
 
-fn fixture_path(name: &str) -> PathBuf {
+pub fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/e2e/fixtures")
         .join(name)
+}
+
+/// `extension_dir` of the linked PHP, from the same `php-config` the build script uses (crates/php_sys/build.rs).
+pub fn php_extension_dir() -> Option<PathBuf> {
+    let bin = std::env::var("PHP_CONFIG").unwrap_or_else(|_| "php-config".into());
+    let out = Command::new(bin).arg("--extension-dir").output().ok()?;
+    out.status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+/// The shared object for `name`, or None when this leg does not have it: the CI-only agent suites skip on None.
+pub fn php_extension(name: &str) -> Option<PathBuf> {
+    let p = php_extension_dir()?.join(name);
+    p.exists().then_some(p)
 }
 
 fn free_port() -> u16 {
