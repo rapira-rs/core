@@ -15,7 +15,7 @@ jobs:
       contents: read
       id-token: write # Codecov OIDC upload (unavailable on fork PRs; see use_oidc below)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { persist-credentials: false }
 
       - uses: shivammathur/setup-php@v2
@@ -60,7 +60,7 @@ jobs:
           --ignore-filename-regex '(crates/tests/|bindings\.rs$|/src/main\.rs$)'
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}

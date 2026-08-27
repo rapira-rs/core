@@ -20,7 +20,7 @@ jobs:
             run:
                 working-directory: core
         steps:
-            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
               with:
                   path: core
                   persist-credentials: false
@@ -49,7 +49,7 @@ jobs:
             # restore/save are split so the 15-25 min PHP build is kept even when a later cargo step fails: cache@v4's post-save only runs on job success.
             - name: Restore NTS+debug PHP (embed SAPI)
               id: php
-              uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+              uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
                   key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v9-${{ hashFiles('core/.github/php-configure-flags.txt') }}
@@ -76,7 +76,7 @@ jobs:
 
             - name: Save NTS+debug PHP cache
               if: steps.php.outputs.cache-hit != 'true'
-              uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+              uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
                   key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v9-${{ hashFiles('core/.github/php-configure-flags.txt') }}
