@@ -11,6 +11,7 @@ jobs:
     env:
       # setup-php's version and the versioned libphp path below must agree
       PHP_VERSION: "8.5"
+      RUST_BACKTRACE: "1"
     permissions:
       contents: read
       id-token: write # Codecov OIDC upload (unavailable on fork PRs; see use_oidc below)

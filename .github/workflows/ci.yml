@@ -15,6 +15,7 @@ jobs:
                 php: ["8.4", "8.5"]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
+            RUST_BACKTRACE: "1"
             # CI-only APM agents for Linux; the pins are manual (dependabot has no ecosystem for vendor tarballs): on a bump, refresh NEWRELIC_SHA256 and the ddtrace hashes below.
             #   https://github.com/newrelic/newrelic-php-agent/releases
             #   https://github.com/DataDog/dd-trace-php/releases

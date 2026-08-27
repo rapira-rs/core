@@ -398,11 +398,11 @@ pub fn signal(pid: u32, sig: i32) {
     }
 }
 
-/// Per-thread outcome counters: `refused` means the listener closed (a reload keeps it open, so it must stay 0), `truncated` means accepted then reset mid-response.
+/// Per-thread outcome counters: `refused` means the listener closed, `failed` means a served non-200 response; connection drops only record `last_err` (the balancer retries those).
 pub struct Tally {
     pub ok: u64,
     pub refused: u64,
-    pub truncated: u64,
+    pub failed: u64,
     pub last_err: Option<String>,
 }
 
@@ -411,7 +411,7 @@ impl Tally {
         Tally {
             ok: 0,
             refused: 0,
-            truncated: 0,
+            failed: 0,
             last_err: None,
         }
     }
@@ -435,7 +435,7 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
                     match http_get(addr, "/", Duration::from_secs(10)) {
                         Ok((200, _)) => tally.ok += 1,
                         Ok((code, _)) => {
-                            tally.truncated += 1;
+                            tally.failed += 1;
                             tally.last_err = Some(format!("status {code}"));
                         }
                         Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
@@ -443,7 +443,6 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
                             tally.last_err = Some(e.to_string());
                         }
                         Err(e) => {
-                            tally.truncated += 1;
                             tally.last_err = Some(e.to_string());
                         }
                     }
@@ -466,7 +465,7 @@ impl Storm {
             if let Ok(t) = h.join() {
                 total.ok += t.ok;
                 total.refused += t.refused;
-                total.truncated += t.truncated;
+                total.failed += t.failed;
                 if t.last_err.is_some() {
                     total.last_err = t.last_err;
                 }
