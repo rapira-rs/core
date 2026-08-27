@@ -10,6 +10,11 @@ Extensions reach PHP through the `extension_api` `Php` bridge.
   Use short sentences, active voice, approved vocabulary, and one instruction per sentence.
   Avoid idioms, slang, and unnecessary synonyms. Don't write poems in the code comments.
 
+## Other
+
+- If you're trying to fix something, look at it realistically. Instead of producing a bunch of code for the case
+  which is barely possible or possible by misuse - document that, but not fix. You can also mention this in the review.
+
 ## Settled, do not reopen
 
 - NTS only, `build.rs` rejects ZTS. Unix only.

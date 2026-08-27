@@ -1,7 +1,7 @@
 use std::{ops::Deref, path::Path};
 
 use php_sys::{Frame, Mode, Rapira, Request};
-use tests::{drain, fixture, php_lock, req};
+use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 
 fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u8>) -> Request {
     let mut r: Request = req(&format!("/{fixture_name}?{query}"), fixture_name);
@@ -53,6 +53,15 @@ fn header_value(r: &Resp, name: &str) -> Option<String> {
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
+}
+
+/// The captured `app`-target messages starting with `prefix`, in order.
+fn app_messages(prefix: &str) -> Vec<String> {
+    captured()
+        .iter()
+        .filter(|c| c.target == "app" && c.message.starts_with(prefix))
+        .map(|c| c.message.clone())
+        .collect()
 }
 
 /// POST form body parses into $_POST while the query string populates $_GET.
@@ -752,6 +761,190 @@ fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> 
         (s2, b2.as_str()),
         (200, "served=2"),
         "the cycle must survive a throwing post-job destructor"
+    );
+    Ok(())
+}
+
+/// A boot-registered shutdown function runs once, at cycle end.
+#[test]
+fn boot_shutdown_function_fires_once_at_worker_exit() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+
+    let r = Rapira::start(Mode::Worker(fixture(
+        "ported_tests/boot-shutdown-worker.php",
+    )))?;
+    let h = r.handle();
+    for _ in 0..2 {
+        let (status, body) = drain(h.handle_blocking(req(
+            "/boot-shutdown-worker.php",
+            "ported_tests/boot-shutdown-worker.php",
+        ))?);
+        assert_eq!(status, 200);
+        assert_eq!(
+            body, "fired=0",
+            "a boot-registered shutdown function must not run at a job's end"
+        );
+    }
+
+    assert_eq!(
+        app_messages("boot-shutdown fired="),
+        Vec::<String>::new(),
+        "the boot function must not run while the worker serves jobs"
+    );
+
+    drop(h);
+    r.shutdown();
+    assert_eq!(
+        app_messages("boot-shutdown fired="),
+        vec!["boot-shutdown fired=1".to_owned()],
+        "the boot-registered shutdown function must fire exactly once, at worker exit"
+    );
+    Ok(())
+}
+
+/// A shutdown function registered during a job runs at the end of that job, exactly once. The boot-registered one fires once, at cycle end.
+#[test]
+fn job_shutdown_function_fires_at_end_of_its_job() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+
+    let r = Rapira::start(Mode::Worker(fixture(
+        "ported_tests/job-shutdown-worker.php",
+    )))?;
+    let h = r.handle();
+    for want in [
+        "req=1 job_fired=0 boot_fired=0",
+        "req=2 job_fired=1 boot_fired=0",
+        "req=3 job_fired=1 boot_fired=0",
+    ] {
+        let (status, body) = drain(h.handle_blocking(req(
+            "/job-shutdown-worker.php",
+            "ported_tests/job-shutdown-worker.php",
+        ))?);
+        assert_eq!((status, body.as_str()), (200, want));
+    }
+
+    assert_eq!(
+        app_messages("job-fixture "),
+        vec!["job-fixture job fired=1".to_owned()],
+        "only the job-registered function runs while the worker serves jobs"
+    );
+
+    drop(h);
+    r.shutdown();
+    assert_eq!(
+        app_messages("job-fixture "),
+        vec![
+            "job-fixture job fired=1".to_owned(),
+            "job-fixture boot fired=1".to_owned(),
+        ],
+        "at worker exit the boot function fires once and the job function does not run again"
+    );
+    Ok(())
+}
+
+/// Boot entries run first at cycle end; a post-loop registration runs after them.
+#[test]
+fn late_shutdown_function_runs_after_boot_entries() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+
+    let r = Rapira::start(Mode::Worker(fixture(
+        "ported_tests/late-shutdown-worker.php",
+    )))?;
+    let h = r.handle();
+    for _ in 0..2 {
+        let (status, body) = drain(h.handle_blocking(req(
+            "/late-shutdown-worker.php",
+            "ported_tests/late-shutdown-worker.php",
+        ))?);
+        assert_eq!((status, body.as_str()), (200, "ok"));
+    }
+
+    assert_eq!(
+        app_messages("sd "),
+        Vec::<String>::new(),
+        "no shutdown function runs while the worker serves jobs"
+    );
+
+    drop(h);
+    r.shutdown();
+    assert_eq!(
+        app_messages("sd "),
+        vec![
+            "sd boot-a".to_owned(),
+            "sd boot-b".to_owned(),
+            "sd late".to_owned(),
+        ],
+        "cycle end runs the boot entries in registration order, then the post-loop entry"
+    );
+    Ok(())
+}
+
+/// A fatal inside a boot shutdown function leaves the worker's exit path clean.
+#[test]
+fn fatal_in_boot_shutdown_function_exits_clean() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+
+    let r = Rapira::start(Mode::Worker(fixture(
+        "ported_tests/shutdown-fatal-boot-worker.php",
+    )))?;
+    let h = r.handle();
+    let (status, body) = drain(h.handle_blocking(req(
+        "/shutdown-fatal-boot-worker.php",
+        "ported_tests/shutdown-fatal-boot-worker.php",
+    ))?);
+    assert_eq!((status, body.as_str()), (200, "ok"));
+
+    drop(h);
+    r.shutdown();
+    assert!(
+        captured()
+            .iter()
+            .any(|c| c.message.contains("boot shutdown bomb")),
+        "the fatal from the boot shutdown function must reach the log"
+    );
+    Ok(())
+}
+
+/// A refcount-1 object in a bare boot-level global must stay in the symbol table across jobs; its __destruct runs once, at cycle end.
+#[test]
+fn boot_global_object_survives_requests() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+
+    let r = Rapira::start(Mode::Worker(fixture("ported_tests/boot-global-worker.php")))?;
+    let h = r.handle();
+    for want in [
+        "kernel=ok calls=1",
+        "kernel=ok calls=2",
+        "kernel=ok calls=3",
+    ] {
+        let (status, body) = drain(h.handle_blocking(req(
+            "/boot-global-worker.php",
+            "ported_tests/boot-global-worker.php",
+        ))?);
+        assert_eq!((status, body.as_str()), (200, want));
+    }
+    assert_eq!(
+        app_messages("boot-kernel destructed").len(),
+        0,
+        "no __destruct while the worker serves jobs"
+    );
+
+    drop(h);
+    r.shutdown();
+    assert_eq!(
+        app_messages("boot-kernel destructed").len(),
+        1,
+        "the boot object must destruct exactly once, at worker exit"
     );
     Ok(())
 }

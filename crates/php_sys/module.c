@@ -416,7 +416,9 @@ void rapira_clear_last_error(void) {
         }
     }
 #if PHP_VERSION_ID >= 80500
-    // the captured trace pins request objects; only shutdown_executor frees it
+    // the captured trace pins request objects; only shutdown_executor frees it.
+    // the dtor is valid only inside a live request; after php_request_shutdown,
+    // rapira_request_shutdown scrubs the stale zval instead
     zend_try {
         zval_ptr_dtor(&EG(last_fatal_error_backtrace));
         ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
@@ -464,24 +466,72 @@ void rapira_release_temporary_streams(void) {
     ZEND_HASH_FOREACH_END();
 }
 
+// Boot-registered shutdown functions run once, at cycle end.
+static HashTable *rapira_boot_shutdown_functions = NULL;
+
+void rapira_stash_boot_shutdown_functions(void) {
+    rapira_boot_shutdown_functions = BG(user_shutdown_function_names);
+    BG(user_shutdown_function_names) = NULL;
+}
+
+static void rapira_restore_boot_shutdown_functions(void) {
+    HashTable *boot = rapira_boot_shutdown_functions;
+    if (!boot) {
+        return;
+    }
+    rapira_boot_shutdown_functions = NULL;
+
+    HashTable *late = BG(user_shutdown_function_names);
+    if (late) {
+        zend_string *key = NULL;
+        zval *entry = NULL;
+        ZEND_HASH_FOREACH_STR_KEY_VAL(late, key, entry) {
+            // only register_user_shutdown_function() keys by name
+            // (ext/session); userland register_shutdown_function() appends with
+            // a numeric key
+            if (key) {
+                zend_hash_update(boot, key, entry);
+            } else {
+                zend_hash_next_index_insert(boot, entry);
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+        late->pDestructor = NULL;
+        php_free_shutdown_functions();
+    }
+    BG(user_shutdown_function_names) = boot;
+}
+
 // retry is safe: end_all NULLs EG(current_observed_frame) (zend_observer.c:322)
 int rapira_request_shutdown(void) {
     volatile int bailed = OK;
-    // put the budget back: a stale 0 disables max_execution_time next cycle
+    // put the budget back armed: a stale 0 disables max_execution_time next
+    // cycle, and the boot shutdown functions run under the timer until
+    // php_request_shutdown disarms it (main/main.c:1993)
     if (rapira_job_timeout >= 0) {
-        EG(timeout_seconds) = rapira_job_timeout;
+        zend_set_timeout(rapira_job_timeout, false);
     }
     rapira_job_timeout = -1; // cycle over: next cycle re-captures its budget
 #ifdef HAVE_PHP_SESSION
     // left set, it makes RSHUTDOWN skip the handler's close() (mod_user.c:29)
     PS(in_save_handler) = false;
 #endif
-    zend_try { php_request_shutdown(NULL); }
+    // the restore sits inside the try: its hash inserts allocate, and a bailout
+    // with no jump target set is exit(-1) (zend.c:1258)
+    zend_try {
+        rapira_restore_boot_shutdown_functions();
+        php_request_shutdown(NULL);
+    }
     zend_catch {
         bailed = BAILOUT;
         zend_try { php_request_shutdown(NULL); }
         zend_end_try();
     }
     zend_end_try();
+#if PHP_VERSION_ID >= 80500
+    // fast shutdown skips the backtrace release (zend_execute_API.c:282,309)
+    // and the arena free reclaimed it; drop the stale zval without a dtor
+    ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
+#endif
     return bailed;
 }
