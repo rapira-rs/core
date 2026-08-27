@@ -22,12 +22,12 @@ pub(crate) struct Shared {
     pub inflight: Arc<AtomicUsize>,
 }
 
-pub(crate) struct InflightGuard {
+pub(crate) struct InflightReqCount {
     counter: Arc<AtomicUsize>,
 }
 
-impl InflightGuard {
-    fn arm(counter: &Arc<AtomicUsize>) -> Self {
+impl InflightReqCount {
+    fn init(counter: &Arc<AtomicUsize>) -> Self {
         counter.fetch_add(1, Ordering::AcqRel);
         Self {
             counter: Arc::clone(counter),
@@ -35,7 +35,7 @@ impl InflightGuard {
     }
 }
 
-impl Drop for InflightGuard {
+impl Drop for InflightReqCount {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
     }
@@ -50,19 +50,26 @@ pub(crate) struct ConnInfo {
 
 pub(crate) enum RespBody {
     Reply(bridge::ReplyBody),
-    Empty,
+    /// The head of a bodiless reply. The guard keeps the drain window open
+    /// until hyper writes the head.
+    Empty {
+        _guard: Option<Arc<InflightReqCount>>,
+    },
     /// A body that did not reach PHP: a front-authored refusal or a middleware answer.
     /// The guard keeps the drain window open until hyper finishes the write.
     Guarded {
         body: extension_api::Body,
-        _guard: Option<InflightGuard>,
+        _req_count: Option<Arc<InflightReqCount>>,
     },
 }
 
-fn refused(status: http::StatusCode, guard: Option<InflightGuard>) -> http::Response<RespBody> {
+fn refused(
+    status: http::StatusCode,
+    req_count: Option<Arc<InflightReqCount>>,
+) -> http::Response<RespBody> {
     error_response(status).map(|body| RespBody::Guarded {
         body,
-        _guard: guard,
+        _req_count: req_count,
     })
 }
 
@@ -76,7 +83,7 @@ impl Body for RespBody {
     ) -> Poll<Option<Result<http_body::Frame<bytes::Bytes>, BoxError>>> {
         match self.get_mut() {
             RespBody::Reply(b) => Pin::new(b).poll_frame(cx),
-            RespBody::Empty => Poll::Ready(None),
+            RespBody::Empty { .. } => Poll::Ready(None),
             RespBody::Guarded { body: b, .. } => Pin::new(b).poll_frame(cx),
         }
     }
@@ -84,7 +91,7 @@ impl Body for RespBody {
     fn is_end_stream(&self) -> bool {
         match self {
             RespBody::Reply(_) => false,
-            RespBody::Empty => true,
+            RespBody::Empty { .. } => true,
             RespBody::Guarded { body: b, .. } => b.is_end_stream(),
         }
     }
@@ -92,7 +99,7 @@ impl Body for RespBody {
     fn size_hint(&self) -> http_body::SizeHint {
         match self {
             RespBody::Reply(b) => b.size_hint(),
-            RespBody::Empty => http_body::SizeHint::with_exact(0),
+            RespBody::Empty { .. } => http_body::SizeHint::with_exact(0),
             RespBody::Guarded { body: b, .. } => b.size_hint(),
         }
     }
@@ -130,7 +137,7 @@ where
     B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let guard: InflightGuard = InflightGuard::arm(&shared.inflight);
+    let reqs_counter: Arc<InflightReqCount> = Arc::new(InflightReqCount::init(&shared.inflight));
     let received_at: f64 = std::time::UNIX_EPOCH
         .elapsed()
         .map(|d| d.as_secs_f64())
@@ -146,7 +153,7 @@ where
         Ok(authority) => authority,
         Err(rej) => {
             tracing::warn!(target: "http", "rejected: {}", rej.reason);
-            return refused(rej.status, Some(guard));
+            return refused(rej.status, Some(reqs_counter));
         }
     };
 
@@ -164,7 +171,7 @@ where
             &shared,
             &conn.closed,
             authority,
-            Some(guard),
+            Some(reqs_counter),
             &parts,
             incoming,
             &peer,
@@ -181,16 +188,14 @@ where
         shared: Arc::clone(&shared),
         closed: conn.closed,
         authority: Mutex::new(Some(authority)),
-        guard: Mutex::new(Some(guard)),
+        guard: Arc::clone(&reqs_counter),
     });
-    let keep = Arc::clone(&handler);
     let res = Next::new(Arc::clone(&shared.chain), handler).run(req).await;
-    // A middleware that answered without the handler left the guard in its slot.
-    // Attach it to the body so shutdown counts the response until hyper writes it.
-    let guard = keep.guard.lock().expect("guard mutex poisoned").take();
+    // The final response and the PHP reply share one guard; the drain window
+    // stays open until the last holder drops.
     res.map(|body| RespBody::Guarded {
         body,
-        _guard: guard,
+        _req_count: Some(reqs_counter),
     })
 }
 
@@ -198,7 +203,7 @@ struct PhpHandler {
     shared: Arc<Shared>,
     closed: tokio::sync::watch::Receiver<bool>,
     authority: Mutex<Option<Option<Vec<u8>>>>,
-    guard: Mutex<Option<InflightGuard>>,
+    guard: Arc<InflightReqCount>,
 }
 
 impl Handler for PhpHandler {
@@ -220,12 +225,11 @@ impl PhpHandler {
             .expect("authority mutex poisoned")
             .take()
             .flatten();
-        let guard = self.guard.lock().expect("guard mutex poisoned").take();
         serve_php(
             &self.shared,
             &self.closed,
             authority,
-            guard,
+            Some(Arc::clone(&self.guard)),
             &parts,
             body,
             &peer,
@@ -239,7 +243,7 @@ async fn serve_php<B>(
     shared: &Shared,
     closed: &tokio::sync::watch::Receiver<bool>,
     authority: Option<Vec<u8>>,
-    guard: Option<InflightGuard>,
+    guard: Option<Arc<InflightReqCount>>,
     parts: &http::request::Parts,
     body: B,
     peer: &Peer,
@@ -344,8 +348,8 @@ where
     let declared_cl = content_length.filter(|_| !no_body);
 
     let body: RespBody = if no_body {
-        bridge::spawn_drain(reply, closed.clone(), guard);
-        RespBody::Empty
+        bridge::spawn_drain(reply, closed.clone(), guard.clone());
+        RespBody::Empty { _guard: guard }
     } else {
         let staged = if declared_cl.is_some() {
             tokio::time::timeout(Duration::from_millis(10), reply.next())
@@ -367,8 +371,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::{Backend, Reply, Request};
+    use extension_api::{Backend, Reply, ReplySource, Request};
     use std::future::Future;
+    use std::sync::atomic::AtomicBool;
 
     struct NoPhp;
 
@@ -381,6 +386,66 @@ mod tests {
         }
     }
 
+    struct TestSource {
+        events: Vec<ReplyEvent>,
+        dropped: Option<Arc<AtomicBool>>,
+    }
+
+    impl ReplySource for TestSource {
+        fn poll_next(&mut self, _cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
+            match self.events.is_empty() {
+                true => Poll::Ready(None),
+                false => Poll::Ready(Some(self.events.remove(0))),
+            }
+        }
+    }
+
+    impl Drop for TestSource {
+        fn drop(&mut self) {
+            if let Some(flag) = &self.dropped {
+                flag.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    struct Scripted {
+        events: Mutex<Option<Vec<ReplyEvent>>>,
+        dropped: Option<Arc<AtomicBool>>,
+    }
+
+    impl Backend for Scripted {
+        fn exec(
+            &self,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Reply>> + Send + '_>> {
+            let events = self
+                .events
+                .lock()
+                .unwrap()
+                .take()
+                .expect("one exec per test");
+            let dropped = self.dropped.clone();
+            Box::pin(async move { Ok(Reply::new(Box::new(TestSource { events, dropped }))) })
+        }
+    }
+
+    fn head(bodiless: bool) -> ReplyEvent {
+        ReplyEvent::Head {
+            status: 200,
+            headers: Vec::new(),
+            content_length: None,
+            bodiless,
+            body_coded: false,
+        }
+    }
+
+    fn end() -> ReplyEvent {
+        ReplyEvent::End {
+            trailers: Vec::new(),
+            truncated: false,
+        }
+    }
+
     struct Deny;
 
     impl Middleware for Deny {
@@ -389,33 +454,138 @@ mod tests {
         }
     }
 
-    /// A middleware answer must hold the inflight guard until hyper drops the body.
-    #[tokio::test]
-    async fn short_circuit_keeps_the_inflight_guard() {
+    struct Replace;
+
+    impl Middleware for Replace {
+        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
+            Box::pin(async move {
+                let _ = next.run(req).await;
+                error_response(http::StatusCode::IM_A_TEAPOT)
+            })
+        }
+    }
+
+    struct Pass;
+
+    impl Middleware for Pass {
+        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
+            Box::pin(async move { next.run(req).await })
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setup(
+        backend: Arc<dyn Backend>,
+        chain: Vec<Arc<dyn Middleware>>,
+    ) -> (
+        Arc<Shared>,
+        ConnInfo,
+        Arc<AtomicUsize>,
+        tokio::sync::watch::Sender<bool>,
+    ) {
         let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Shared {
             cfg: Arc::new(Config::default()),
-            php: Php::new(Arc::new(NoPhp)),
-            chain: Arc::from(vec![Arc::new(Deny) as Arc<dyn Middleware>]),
+            php: Php::new(backend),
+            chain: chain.into(),
             inflight: Arc::clone(&inflight),
         });
-        let (_closed_tx, closed) = tokio::sync::watch::channel(false);
+        let (closed_tx, closed) = tokio::sync::watch::channel(false);
         let conn = ConnInfo {
             remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
             server: Addr::Inet(([127, 0, 0, 1], 8000).into()),
             closed,
         };
-        let req = http::Request::builder()
+        (shared, conn, inflight, closed_tx)
+    }
+
+    fn get_request() -> http::Request<http_body_util::Empty<bytes::Bytes>> {
+        http::Request::builder()
             .uri("/")
             .header("host", "e2e")
             .body(http_body_util::Empty::<bytes::Bytes>::new())
-            .unwrap();
-        let res = handle(shared, conn, req).await;
+            .unwrap()
+    }
+
+    /// A middleware answer must hold the inflight guard until hyper drops the body.
+    #[tokio::test]
+    async fn short_circuit_keeps_the_inflight_guard() {
+        let (shared, conn, inflight, _closed_tx) =
+            setup(Arc::new(NoPhp), vec![Arc::new(Deny) as Arc<dyn Middleware>]);
+        let res = handle(shared, conn, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::FORBIDDEN);
         assert_eq!(
             inflight.load(Ordering::Acquire),
             1,
             "the guard must ride the response body"
+        );
+        drop(res);
+        assert_eq!(inflight.load(Ordering::Acquire), 0);
+    }
+
+    /// A middleware that replaces the PHP response must keep the request counted
+    /// until hyper drops the replacement body.
+    #[tokio::test]
+    async fn replaced_response_keeps_the_inflight_guard() {
+        let backend = Arc::new(Scripted {
+            events: Mutex::new(Some(vec![head(false), end()])),
+            dropped: None,
+        });
+        let (shared, conn, inflight, _closed_tx) =
+            setup(backend, vec![Arc::new(Replace) as Arc<dyn Middleware>]);
+        let res = handle(shared, conn, get_request()).await;
+        assert_eq!(res.status(), http::StatusCode::IM_A_TEAPOT);
+        assert_eq!(
+            inflight.load(Ordering::Acquire),
+            1,
+            "the guard must ride the replacement response"
+        );
+        drop(res);
+        assert_eq!(inflight.load(Ordering::Acquire), 0);
+    }
+
+    /// One request counts once, no matter how many holders share the guard.
+    #[tokio::test]
+    async fn chained_response_counts_one_request() {
+        let backend = Arc::new(Scripted {
+            events: Mutex::new(Some(vec![head(false), end()])),
+            dropped: None,
+        });
+        let (shared, conn, inflight, _closed_tx) =
+            setup(backend, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
+        let res = handle(shared, conn, get_request()).await;
+        assert_eq!(res.status(), http::StatusCode::OK);
+        assert_eq!(
+            inflight.load(Ordering::Acquire),
+            1,
+            "one request must count once"
+        );
+        drop(res);
+        assert_eq!(inflight.load(Ordering::Acquire), 0);
+    }
+
+    /// A bodiless reply keeps the response guarded after the drain task finishes.
+    #[tokio::test]
+    async fn bodiless_response_stays_guarded_after_the_drain_ends() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(Scripted {
+            events: Mutex::new(Some(vec![head(true), end()])),
+            dropped: Some(Arc::clone(&dropped)),
+        });
+        let (shared, conn, inflight, _closed_tx) = setup(backend, Vec::new());
+        let res = handle(shared, conn, get_request()).await;
+        assert_eq!(res.status(), http::StatusCode::OK);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drain must run to End");
+        assert_eq!(
+            inflight.load(Ordering::Acquire),
+            1,
+            "the guard must ride the empty response"
         );
         drop(res);
         assert_eq!(inflight.load(Ordering::Acquire), 0);

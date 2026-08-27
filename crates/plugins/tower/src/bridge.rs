@@ -1,12 +1,13 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
 use extension_api::{BoxError, Reply, ReplyEvent};
 
-use crate::handler::InflightGuard;
+use crate::handler::InflightReqCount;
 
 pub(crate) struct ReplyBody {
     reply: Option<Reply>,
@@ -15,7 +16,7 @@ pub(crate) struct ReplyBody {
     staged: Option<ReplyEvent>,
     file: Option<FilePump>,
     err_armed: bool,
-    _guard: Option<InflightGuard>,
+    _guard: Option<Arc<InflightReqCount>>,
 }
 
 type FileRead = tokio::task::JoinHandle<(std::fs::File, std::io::Result<Vec<u8>>)>;
@@ -43,7 +44,7 @@ impl ReplyBody {
     pub(crate) fn new(
         reply: Reply,
         declared_cl: Option<u64>,
-        guard: Option<InflightGuard>,
+        guard: Option<Arc<InflightReqCount>>,
         staged: Option<ReplyEvent>,
     ) -> Self {
         Self {
