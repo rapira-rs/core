@@ -4,6 +4,7 @@ $bootFired = 0;
 $jobFired = 0;
 register_shutdown_function(static function () use (&$bootFired): void {
     $bootFired++;
+    \Rapira\log('job-fixture boot fired=' . $bootFired);
 });
 
 $req = 0;
@@ -12,6 +13,7 @@ $handler = static function () use (&$jobFired, &$req, &$bootFired): void {
     if ($req === 1) {
         register_shutdown_function(static function () use (&$jobFired): void {
             $jobFired++;
+            \Rapira\log('job-fixture job fired=' . $jobFired);
         });
     }
     echo 'req=', $req, ' job_fired=', $jobFired, ' boot_fired=', $bootFired;
