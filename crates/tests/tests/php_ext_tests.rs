@@ -1,23 +1,13 @@
-use php_sys::{Mode, Rapira};
-use tests::{drain, fixture, php_lock, req};
+use tests::{assert_skip_allowed, run_worker};
 
-// One resident worker per extension: the follow-up request rides the same interpreter, so an uncaught throw must leave it serving.
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
-    let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(name)))?;
-    let h = r.handle();
-    let mut out = Vec::with_capacity(uris.len());
-    for uri in uris {
-        out.push(drain(h.handle_blocking(req(uri, name))?));
-    }
-    drop(h);
-    r.shutdown();
-    Ok(out)
+    run_worker(name, uris, None)
 }
 
 fn success(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/"])?;
     if out[0].1 == "skip" {
+        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(out[0].0, 200, "{name} must serve 200 (got: {:?})", out[0]);
@@ -32,6 +22,7 @@ fn success(name: &str, token: &str) -> anyhow::Result<()> {
 fn exception(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/?boom=1", "/"])?;
     if out[0].1 == "skip" {
+        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(
@@ -209,4 +200,108 @@ fn filter_exception() -> anyhow::Result<()> {
 #[test]
 fn opcache_success() -> anyhow::Result<()> {
     success("php_ext/opcache-worker.php", "opcache:enabled")
+}
+
+/// ext/openssl has no RINIT or RSHUTDOWN (openssl.c), in php-fpm and in rapira alike, so an undrained error in the persistent ring outlives its request.
+#[test]
+fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
+    // the first drain empties whatever earlier tests left on the process-global ring
+    let out = run(
+        "php_ext/openssl-worker.php",
+        &[
+            "/?step=drain",
+            "/?step=leak",
+            "/?step=drain",
+            "/?step=drain",
+        ],
+    )?;
+    if out[0].1 == "skip" {
+        assert_skip_allowed("php_ext/openssl-worker.php");
+        return Ok(());
+    }
+    assert_eq!(
+        (out[1].0, out[1].1.as_str()),
+        (200, "openssl:leaked"),
+        "leak request must succeed (got: {:?})",
+        out[1]
+    );
+    // the PEM reader leaves one PEM_R_NO_START_LINE entry; only the routine and reason substrings are stable across OpenSSL 1.1.1 and 3.x
+    assert!(
+        out[2].1.starts_with("openssl:drained:1:"),
+        "the next request must drain exactly one error (got: {:?})",
+        out[2].1
+    );
+    assert!(
+        out[2].1.contains("PEM routines") && out[2].1.contains("no start line"),
+        "drained error must be the PEM no-start-line entry (got: {:?})",
+        out[2].1
+    );
+    assert_eq!(
+        (out[3].0, out[3].1.as_str()),
+        (200, "openssl:drained:0:"),
+        "the ring is FIFO-drained, so the last request must find it empty (got: {:?})",
+        out[3]
+    );
+    Ok(())
+}
+
+/// The 16-slot ring overwrites the oldest entry when full, so at most the newest 15 errors are readable (php_openssl_store_errors, openssl.c).
+#[test]
+fn openssl_error_ring_overwrites_the_oldest() -> anyhow::Result<()> {
+    let out = run(
+        "php_ext/openssl-worker.php",
+        &["/?step=drain", "/?step=leak_many", "/?step=drain"],
+    )?;
+    if out[0].1 == "skip" {
+        assert_skip_allowed("php_ext/openssl-worker.php");
+        return Ok(());
+    }
+    assert_eq!(
+        (out[1].0, out[1].1.as_str()),
+        (200, "openssl:leaked:20"),
+        "the leak request must push 20 errors (got: {:?})",
+        out[1]
+    );
+    assert!(
+        out[2].1.starts_with("openssl:drained:15:"),
+        "20 pushes wrap the 16-slot ring down to 15 readable entries (got: {:?})",
+        out[2].1
+    );
+    Ok(())
+}
+
+#[test]
+fn browscap_unset_exception() -> anyhow::Result<()> {
+    exception("php_ext/browscap-worker.php", "browscap:false")
+}
+/// The `browscap` ini is PHP_INI_SYSTEM and unset here: get_browser() must warn and return false (browscap.c).
+#[test]
+fn browscap_unset_warns() -> anyhow::Result<()> {
+    let out = run("php_ext/browscap-worker.php", &["/"])?;
+    if out[0].1 == "skip" {
+        return Ok(());
+    }
+    assert_eq!(out[0].0, 200, "must serve 200 (got: {:?})", out[0]);
+    assert!(
+        out[0]
+            .1
+            .contains("get_browser(): browscap ini directive not set"),
+        "the E_WARNING must be visible in the body (got: {:?})",
+        out[0].1
+    );
+    assert!(
+        out[0].1.contains("browscap:false"),
+        "get_browser() must return false (got: {:?})",
+        out[0].1
+    );
+    Ok(())
+}
+
+#[test]
+fn imap_success() -> anyhow::Result<()> {
+    success("php_ext/imap-worker.php", "imap:ok")
+}
+#[test]
+fn imap_exception() -> anyhow::Result<()> {
+    exception("php_ext/imap-worker.php", "imap:ok")
 }

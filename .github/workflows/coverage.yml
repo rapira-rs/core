@@ -22,7 +22,7 @@ jobs:
         with:
           php-version: ${{ env.PHP_VERSION }}
           coverage: none
-          extensions: ctype, curl, dom, fileinfo, filter, iconv, mbstring, opcache, openssl, pdo_sqlite, phar, posix, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
+          extensions: ctype, curl, dom, fileinfo, filter, iconv, imap, mbstring, opcache, openssl, pdo_sqlite, phar, posix, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
           phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning
@@ -55,6 +55,9 @@ jobs:
           cache-on-failure: true
 
       - name: Generate coverage (lcov)
+        # a skip in a gated suite on Linux means a broken install, not a pass
+        env:
+          RAPIRA_REQUIRE_EXTS: imap,openssl
         run: >-
           cargo llvm-cov --workspace --lcov --output-path lcov.info
           --ignore-filename-regex '(crates/tests/|bindings\.rs$|/src/main\.rs$)'

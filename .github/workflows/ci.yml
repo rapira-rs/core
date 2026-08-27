@@ -15,6 +15,12 @@ jobs:
                 php: ["8.4", "8.5"]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
+            # CI-only APM agents for Linux; the pins are manual (dependabot has no ecosystem for vendor tarballs): on a bump, refresh NEWRELIC_SHA256 and the ddtrace hashes below.
+            #   https://github.com/newrelic/newrelic-php-agent/releases
+            #   https://github.com/DataDog/dd-trace-php/releases
+            NEWRELIC_VERSION: "12.9.0.38"
+            NEWRELIC_SHA256: "65cc8abdb4a1b07f8fea3d3279e78063f147994817385103eedf29c30d2f0a64"
+            DDTRACE_VERSION: "1.24.2"
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
               with: { persist-credentials: false }
@@ -24,7 +30,7 @@ jobs:
               with:
                   php-version: ${{ matrix.php }}
                   coverage: none
-                  extensions: calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, mbstring, opcache, openssl, pdo_sqlite, phar, posix, session, shmop, simplexml, sockets, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib
+                  extensions: calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, imap, mbstring, opcache, openssl, pdo_sqlite, phar, posix, session, shmop, simplexml, sockets, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib
               env:
                   phpts: nts
                   fail-fast: true # a missing extension fails the job instead of warning
@@ -51,6 +57,62 @@ jobs:
                   ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
                   echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
                   echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
+
+            # The APM agents go into the extension dir and stay out of conf.d, so the suite boots agent-free; the e2e tests load them through their own php.ini (crates/tests/tests/e2e/apm.rs).
+            - name: Resolve the PHP ABI (Linux)
+              if: runner.os == 'Linux'
+              run: |
+                  set -euo pipefail
+                  # ZEND_MODULE_API_NO: the extension dir and both vendor asset names key on it; a divergence fails at the download
+                  echo "PHP_API=$(php -i | awk -F'=> ' '/^PHP Extension =>/{print $2; exit}')" >> "$GITHUB_ENV"
+                  # the same oracle build.rs and the e2e harness read
+                  echo "EXT_DIR=$(php-config --extension-dir)" >> "$GITHUB_ENV"
+
+            - name: Install the New Relic PHP agent (Linux, CI only)
+              if: runner.os == 'Linux'
+              run: |
+                  set -euo pipefail
+                  case "$(uname -m)" in
+                    x86_64)  NR_ARCH=x64 ;;
+                    aarch64) NR_ARCH=aarch64 ;;
+                    *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;;
+                  esac
+                  url="https://download.newrelic.com/php_agent/archive/${NEWRELIC_VERSION}/newrelic-php5-${NEWRELIC_VERSION}-linux.tar.gz"
+                  curl -fsSL --retry 3 --retry-all-errors "$url" -o "$RUNNER_TEMP/newrelic.tar.gz"
+                  echo "${NEWRELIC_SHA256}  $RUNNER_TEMP/newrelic.tar.gz" | sha256sum -c -
+                  # layout: newrelic-php5-<ver>-linux/agent/{x64,aarch64}/newrelic-<api>.so; tar fails when the wildcard matches nothing
+                  mkdir -p "$RUNNER_TEMP/newrelic"
+                  tar -xzf "$RUNNER_TEMP/newrelic.tar.gz" -C "$RUNNER_TEMP/newrelic" \
+                      --strip-components=1 --wildcards "*/agent/${NR_ARCH}/newrelic-${PHP_API}.so"
+                  sudo install -m 0644 "$RUNNER_TEMP/newrelic/agent/${NR_ARCH}/newrelic-${PHP_API}.so" \
+                      "$EXT_DIR/newrelic.so"
+                  grep -qix newrelic <<<"$(php -d "extension=$EXT_DIR/newrelic.so" \
+                      -d newrelic.daemon.dont_launch=3 -d newrelic.logfile=/dev/null -m)"
+
+            - name: Install the Datadog PHP tracer (Linux, CI only)
+              if: runner.os == 'Linux'
+              run: |
+                  set -euo pipefail
+                  ARCH=$(uname -m) # x86_64 / aarch64 match the asset names verbatim
+                  # release assets are publisher-mutable; the digests come from the release API and pin each asset exactly
+                  case "${ARCH}-${PHP_API}" in
+                    x86_64-20240924)  SHA=e76d211c15c3b73c164e9ae403304f65670c064219ec713e2e96a3296342ab77 ;;
+                    x86_64-20250925)  SHA=7ccd7b973865fd1bf7b26a0c93eda8908af1118cece281ec74b5a14b3be1f743 ;;
+                    aarch64-20240924) SHA=1428fc057944728d7a417e3a7e7f6d9c1c5d03b73cc60ea186cb14c8437be9ed ;;
+                    aarch64-20250925) SHA=9e62f3f21062b1720a3da538a5ea270278559941533feabb27f3fc2936d4cb04 ;;
+                    *) echo "::error::no ddtrace sha256 pinned for ${ARCH}-${PHP_API}"; exit 1 ;;
+                  esac
+                  url="https://github.com/DataDog/dd-trace-php/releases/download/${DDTRACE_VERSION}/dd-library-php-${DDTRACE_VERSION}-${ARCH}-linux-gnu-${PHP_API}.tar.gz"
+                  curl -fsSL --retry 3 --retry-all-errors "$url" -o "$RUNNER_TEMP/ddtrace.tar.gz"
+                  echo "${SHA}  $RUNNER_TEMP/ddtrace.tar.gz" | sha256sum -c -
+                  # per-ABI NTS bundle; a bare ddtrace.so carries the native surface only (trace/src loads via datadog.trace.sources_path), and the tests touch only that
+                  mkdir -p "$RUNNER_TEMP/ddtrace"
+                  tar -xzf "$RUNNER_TEMP/ddtrace.tar.gz" -C "$RUNNER_TEMP/ddtrace" \
+                      --wildcards "*/trace/ext/${PHP_API}/ddtrace.so"
+                  sudo install -m 0644 "$RUNNER_TEMP/ddtrace/dd-library-php/trace/ext/${PHP_API}/ddtrace.so" \
+                      "$EXT_DIR/ddtrace.so"
+                  grep -qix ddtrace <<<"$(DD_TRACE_ENABLED=0 DD_INSTRUMENTATION_TELEMETRY_ENABLED=0 \
+                      DD_TRACE_STARTUP_LOGS=0 php -d "extension=$EXT_DIR/ddtrace.so" -m)"
 
             - name: Install build deps (macOS)
               if: runner.os == 'macOS'
@@ -113,5 +175,10 @@ jobs:
                   cache-on-failure: true
             - run: cargo clippy --workspace --all-targets -- -D warnings
             - run: cargo build --workspace
+            # On Linux a skip in a gated suite means a broken install, not a pass.
             - run: cargo test --workspace
+              env:
+                  RAPIRA_REQUIRE_EXTS: ${{ runner.os == 'Linux' && 'imap,newrelic,ddtrace,openssl' || '' }}
             - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --test-threads=1
+              env:
+                  RAPIRA_REQUIRE_EXTS: ${{ runner.os == 'Linux' && 'imap,newrelic,ddtrace,openssl' || '' }}

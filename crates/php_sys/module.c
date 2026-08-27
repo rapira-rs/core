@@ -100,7 +100,8 @@ zend_module_entry rapira_module_entry = {
     STANDARD_MODULE_PROPERTIES};
 
 // ext/filter frees its cached raw input only in RSHUTDOWN (filter.c:190-196).
-static const char *RELOAD_MODULES[] = {"filter", NULL};
+// PECL imap frees its error and alert stacks only in RSHUTDOWN; without the reload a resident worker leaks and request N reads request N-1's errors.
+static const char *RELOAD_MODULES[] = {"filter", "imap", NULL};
 
 static void rapira_modules_request(bool startup) {
     zend_module_entry *module = NULL;

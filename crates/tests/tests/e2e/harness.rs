@@ -120,13 +120,18 @@ pub fn spawn_in_cwd(fixture: &str, processes: usize, php_ini: &str) -> Server {
     spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
 }
 
-/// [`spawn_in_cwd`] with PHPRC pointing at the same directory: the control showing that same file does apply.
-pub fn spawn_in_cwd_with_phprc(fixture: &str, processes: usize, php_ini: &str) -> Server {
+/// [`spawn_in_cwd`] with PHPRC pointing at the same directory; `extra_toml` is appended inside `[pool]`, so any other section needs its own header and must come last.
+pub fn spawn_with_phprc_and_config(
+    fixture: &str,
+    processes: usize,
+    php_ini: &str,
+    extra_toml: &str,
+) -> Server {
     let ini = CwdIni {
         contents: php_ini,
         via_phprc: true,
     };
-    spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
+    spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), Some(ini))
 }
 
 fn spawn_with_extras(
@@ -552,10 +557,110 @@ fn scratch_dir() -> PathBuf {
     dir
 }
 
-fn fixture_path(name: &str) -> PathBuf {
+pub fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/e2e/fixtures")
         .join(name)
+}
+
+/// `extension_dir` of the linked PHP, from the same `php-config` the build script uses (crates/php_sys/build.rs).
+fn php_extension_dir() -> Option<PathBuf> {
+    let bin = std::env::var("PHP_CONFIG").unwrap_or_else(|_| "php-config".into());
+    let out = Command::new(bin).arg("--extension-dir").output().ok()?;
+    out.status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+/// The shared object for `name`, or None when this PHP build lacks it; RAPIRA_REQUIRE_EXTS turns a demanded skip into a panic.
+pub fn php_extension(name: &str) -> Option<PathBuf> {
+    let p = php_extension_dir().map(|d| d.join(name));
+    if let Some(p) = &p
+        && p.exists()
+    {
+        return p.clone().into();
+    }
+    if let Ok(required) = std::env::var("RAPIRA_REQUIRE_EXTS") {
+        let stem = name.trim_end_matches(".so");
+        assert!(
+            !required.split(',').any(|e| e.trim() == stem),
+            "RAPIRA_REQUIRE_EXTS demands {stem}, but {name} is not at {p:?}"
+        );
+    }
+    None
+}
+
+/// `threads` clients each issue `each` sequential `GET {path}`; returns `pick(body)` for every response.
+pub fn fan_out<T: Send + 'static>(
+    addr: SocketAddr,
+    path: &'static str,
+    threads: usize,
+    each: usize,
+    pick: fn(&str) -> T,
+) -> Vec<T> {
+    let handles: Vec<_> = (0..threads)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let mut out = Vec::with_capacity(each);
+                for _ in 0..each {
+                    let (code, body) =
+                        http_get(addr, path, Duration::from_secs(10)).expect("fan_out GET");
+                    let body = String::from_utf8_lossy(&body);
+                    assert_eq!(code, 200, "got {body:?}");
+                    out.push(pick(&body));
+                }
+                out
+            })
+        })
+        .collect();
+    let mut all = Vec::new();
+    for h in handles {
+        match h.join() {
+            Ok(v) => all.extend(v),
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    }
+    all
+}
+
+/// The master's children must be exactly `workers`, and no worker may have a child.
+pub fn assert_only_workers(srv: &Server, workers: &[u32]) {
+    assert_eq!(
+        worker_pids(srv.pid()),
+        workers,
+        "the master's children must be the workers only\n{}",
+        diagnostics(srv)
+    );
+    for &w in workers {
+        assert!(
+            worker_pids(w).is_empty(),
+            "worker {w} must not have child processes\n{}",
+            diagnostics(srv)
+        );
+    }
+}
+
+/// Poll `path` until every needle appears; on deadline Err carries the file state.
+pub fn wait_file_contains_all(
+    path: &Path,
+    needles: &[String],
+    deadline: Duration,
+) -> Result<(), String> {
+    let end = Instant::now() + deadline;
+    loop {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        if needles.iter().all(|n| content.contains(n.as_str())) {
+            return Ok(());
+        }
+        if Instant::now() >= end {
+            return Err(format!(
+                "missing needles in {} (exists: {})\n{content}",
+                path.display(),
+                path.exists()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn free_port() -> u16 {
