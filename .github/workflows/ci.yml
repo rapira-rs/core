@@ -15,7 +15,7 @@ jobs:
                 php: ["8.4", "8.5"]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
-            # CI-only APM agents for the Linux legs. They are not part of the source-built
+            # CI-only APM agents for the Linux. They are not part of the source-built
             # libphp (.github/php-configure-flags.txt does not change). The pins are manual:
             # dependabot has no ecosystem for vendor tarballs.
             #   https://github.com/newrelic/newrelic-php-agent/releases
