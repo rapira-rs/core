@@ -293,11 +293,12 @@ impl extension_api::Backend for RapiraBackend {
 struct FrameSource(tokio::sync::mpsc::Receiver<php_sys::Frame>);
 
 impl extension_api::ReplySource for FrameSource {
-    fn next(
+    fn poll_next(
         &mut self,
-    ) -> Pin<Box<dyn Future<Output = Option<extension_api::ReplyEvent>> + Send + '_>> {
-        Box::pin(async move {
-            self.0.recv().await.map(|frame| match frame {
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<extension_api::ReplyEvent>> {
+        self.0.poll_recv(cx).map(|opt| {
+            opt.map(|frame| match frame {
                 php_sys::Frame::Interim(h) => extension_api::ReplyEvent::Interim {
                     status: h.status,
                     headers: h.headers,
@@ -461,9 +462,11 @@ mod tests {
     struct VecSource(std::collections::VecDeque<ReplyEvent>);
 
     impl ReplySource for VecSource {
-        fn next(&mut self) -> Pin<Box<dyn Future<Output = Option<ReplyEvent>> + Send + '_>> {
-            let ev = self.0.pop_front();
-            Box::pin(async move { ev })
+        fn poll_next(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<ReplyEvent>> {
+            std::task::Poll::Ready(self.0.pop_front())
         }
     }
 

@@ -60,23 +60,20 @@ fn chunked_stream_preserves_keepalive() {
     assert_eq!(status, 200);
 }
 
-/// A 103 goes out as its own head block ahead of the final 200.
+/// A PHP-committed 1xx never reaches the wire: the front drops interim heads, so the first head block is the final 200 and the response is otherwise untouched.
 #[test]
-fn interim_head_precedes_the_final_head() {
+fn interim_heads_never_reach_the_wire() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=interim HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("send");
 
-    let (status, fields) = c.read_head(T).expect("interim head");
-    assert_eq!(status, 103);
-    assert!(fields.iter().any(|(k, _)| k == "link"), "{fields:?}");
     let (status, _) = c.read_head(T).expect("final head");
-    assert_eq!(status, 200);
+    assert_eq!(status, 200, "the first head block must be the final one");
     c.read_body_until(b"hello", T).expect("body");
 }
 
-/// An HTTP/1.0 client gets neither the interim head nor chunked framing.
+/// An HTTP/1.0 client gets close-delimited framing, never chunked.
 #[test]
 fn http10_gets_no_interim_and_no_chunked() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
@@ -92,6 +89,31 @@ fn http10_gets_no_interim_and_no_chunked() {
     );
     let rest = c.read_remaining(T).expect("close-delimited body");
     assert_eq!(rest, b"hello");
+}
+
+/// A declared length must not hold the head hostage: the head+first-chunk coalescing window is bounded.
+#[test]
+fn declared_length_head_beats_a_slow_body() {
+    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let mut c = Conn::open(srv.addr, T).expect("connect");
+    c.send(b"GET /?probe=cl-slow-body HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
+        .expect("send");
+
+    let started = Instant::now();
+    let (status, fields) = c.read_head(T).expect("head");
+    assert_eq!(status, 200);
+    assert!(
+        started.elapsed() < Duration::from_millis(1000),
+        "the head must beat the 2s-late body (took {:?})",
+        started.elapsed()
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "content-length" && v == "5"),
+        "the declared length still frames the response: {fields:?}"
+    );
+    c.read_body_until(b"01234", T).expect("body");
 }
 
 /// An over-long body is cut to the declared content-length, keeping framing keepalive-safe.

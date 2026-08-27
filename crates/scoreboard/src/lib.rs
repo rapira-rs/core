@@ -28,7 +28,7 @@ pub struct SharedSlot {
 
 const _: () = assert!(size_of::<SharedSlot>() == 64 && align_of::<SharedSlot>() == 64);
 
-/// Copy view over the mapping; addresses are identical in every forked child because the mmap happens once, pre-fork.
+/// Copy view over the mapping. The mmap happens once, pre-fork, so the addresses are identical in every forked child.
 #[derive(Clone, Copy)]
 pub struct Scoreboard {
     slots: &'static [SharedSlot],
@@ -47,7 +47,7 @@ pub struct SlotSnapshot {
     pub last_activity_ms: u64,
 }
 
-/// Milliseconds on `CLOCK_MONOTONIC`: cross-process comparable within one boot and immune to wall-clock steps.
+/// Milliseconds on `CLOCK_MONOTONIC`. The values compare across processes within one boot. Wall-clock steps do not move them.
 pub fn now_millis() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -59,7 +59,7 @@ pub fn now_millis() -> u64 {
 }
 
 impl Scoreboard {
-    /// Master-side, pre-fork: the mapping must exist before any fork inherits it.
+    /// Master-side, pre-fork. The mapping must exist before a fork can inherit it.
     pub fn create(nslots: usize) -> anyhow::Result<Scoreboard> {
         anyhow::ensure!(
             (1..=SB_MAX_SLOTS).contains(&nslots),
@@ -99,7 +99,7 @@ impl Scoreboard {
         self.slots
     }
 
-    /// Master-side at fork time: reserves the slot so scaling math sees the in-flight fork.
+    /// Master-side at fork time. It reserves the slot so the scaling math sees the in-flight fork.
     pub fn set_starting(&self, i: usize) {
         if let Some(s) = self.slots.get(i) {
             s.last_activity_ms.store(now_millis(), Relaxed);
@@ -107,7 +107,7 @@ impl Scoreboard {
         }
     }
 
-    /// Master-side, after reaping the slot's worker; the slot may be handed to a new fork afterwards.
+    /// Master-side, after the slot's worker is reaped. The slot can then go to a new fork.
     pub fn clear(&self, i: usize) {
         if let Some(s) = self.slots.get(i) {
             s.pid.store(0, Relaxed);
@@ -136,7 +136,7 @@ impl Scoreboard {
 }
 
 impl SharedSlot {
-    /// Worker-side claim + reset, exactly once per process before requests flow.
+    /// Worker-side claim and reset. It runs exactly once per process before requests flow.
     pub fn bind(&'static self, pid: u32) {
         self.handled.store(0, Relaxed);
         self.errors.store(0, Relaxed);

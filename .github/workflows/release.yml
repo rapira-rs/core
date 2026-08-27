@@ -130,7 +130,7 @@ jobs:
                   dnf -y install dnf-plugins-core
                   dnf config-manager --set-enabled crb
                   dnf -y install \
-                    gcc gcc-c++ make cmake git tar gzip xz findutils python3 \
+                    gcc gcc-c++ make git tar gzip xz findutils python3 \
                     pkgconf-pkg-config clang-devel llvm-devel \
                     openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel libffi-devel gettext-devel
 

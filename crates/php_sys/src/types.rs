@@ -6,7 +6,6 @@ use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::Sender;
 
-/// One entry per field line, wire order, values raw bytes (latin1/binary-safe).
 pub type FieldLines = Vec<(String, Vec<u8>)>;
 
 #[derive(Debug, Clone)]
@@ -143,7 +142,7 @@ pub enum Body {
 pub struct Request {
     pub method: String,
     pub uri: String,
-    /// Raw request-target bytes; None falls back to `uri`'s bytes.
+    /// Request-target bytes; a front can reconstruct them from its parsed URI. None falls back to `uri`'s bytes.
     pub target: Option<Vec<u8>>,
     /// Byte-for-byte as the client named it; None = the client named none.
     pub authority: Option<Vec<u8>>,

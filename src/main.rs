@@ -1,14 +1,14 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use extension_api::PrepareCtx;
+use extension_api::{ListenAddr, PrepareCtx};
 use php_sys::{Mode, Rapira};
 use rapira_config::{Listen, Overrides, RunMode, Scaling, Settings, UnsafeFieldNames};
-use rapira_pingora::{
-    Config as HttpConfig, HttpServer, Listen as HttpListen,
-    UnsafeFieldNames as HttpUnsafeFieldNames,
-};
 use rapira_runtime::ExtensionRuntime;
 use rapira_scoreboard::Scoreboard;
-use std::path::PathBuf;
+use rapira_tower::{Config as HttpConfig, HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames};
+use std::{
+    fs::{OpenOptions, read_dir, remove_file},
+    path::PathBuf,
+};
 use tracing::info;
 
 mod logging;
@@ -47,10 +47,6 @@ struct ServeArgs {
     #[arg(long, value_name = "MODE")]
     mode: Option<RunMode>,
 
-    /// Deprecated alias for `--mode classic`.
-    #[arg(long)]
-    classic: bool,
-
     /// Listen address: `host:port`, `:port` (all interfaces), or `unix:<path>`.
     #[arg(long, value_name = "ADDR")]
     listen: Option<Listen>,
@@ -87,18 +83,13 @@ fn spool_dir_reclaimable(name: &str) -> bool {
     gone && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
-/// PHP MINIT runs once in the still-single-threaded master before any fork: the opcache SHM it creates is what every worker inherits.
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
-    if args.classic && args.mode.is_some_and(|m| m != RunMode::Classic) {
-        anyhow::bail!("--classic conflicts with --mode; use --mode classic");
-    }
-
     let settings: Settings = rapira_config::resolve(
         args.config.as_deref(),
         Overrides {
             listen: args.listen,
             processes: args.processes,
-            mode: args.mode.or(args.classic.then_some(RunMode::Classic)),
+            mode: args.mode,
             entrypoint: args.script,
         },
     )?;
@@ -106,27 +97,33 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     logging::init(&settings.log)?;
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
-    let script: PathBuf = settings.pool.entrypoint.clone();
-
     let mode: Mode = match settings.pool.mode {
         RunMode::Classic => Mode::Classic,
-        RunMode::Worker => Mode::Worker(script.clone()),
-        RunMode::Dispatcher => Mode::Dispatcher(script.clone()),
+        RunMode::Worker => Mode::Worker(settings.pool.entrypoint.clone()),
+        RunMode::Dispatcher => Mode::Dispatcher(settings.pool.entrypoint.clone()),
     };
 
+    // set sendfileroot + make it canonical (std::fs)
     php_sys::set_sendfile_root(
         settings
             .http
             .sendfile_root
             .clone()
-            .or_else(|| script.parent().map(std::path::Path::to_path_buf))
+            .or_else(|| {
+                settings
+                    .pool
+                    .entrypoint
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
             .unwrap_or_else(|| PathBuf::from("/")),
     );
 
+    // parse HTTP configuration -------------------------------------
     let http_cfg: HttpConfig = HttpConfig {
         listen: match settings.http.listen {
-            Listen::Tcp(addr) => HttpListen::Tcp(addr),
-            Listen::Unix(path) => HttpListen::Unix(path),
+            Listen::Tcp(addr) => ListenAddr::Tcp(addr),
+            Listen::Unix(path) => ListenAddr::Unix(path),
         },
         server_name: settings.http.server_name,
         server_port: settings.http.server_port,
@@ -138,29 +135,37 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
         },
         superglobals: !matches!(mode, Mode::Dispatcher(_)),
+        keepalive_timeout: settings.http.keepalive_timeout,
+        middleware: Vec::new(),
     };
+    //----------------------------------------------------------------
 
-    let uploads = &settings.http.uploads;
+    // uploads -------------------------------------------------------
     if matches!(mode, Mode::Dispatcher(_)) {
-        std::fs::create_dir_all(&uploads.dir).map_err(|e| {
-            anyhow::anyhow!("creating http.uploads.dir {}: {e}", uploads.dir.display())
+        std::fs::create_dir_all(&settings.http.uploads.dir).map_err(|e| {
+            anyhow::anyhow!(
+                "creating http.uploads.dir {}: {e}",
+                settings.http.uploads.dir.display()
+            )
         })?;
-        let probe = uploads
+        let probe = settings
+            .http
+            .uploads
             .dir
             .join(format!(".rapira-probe-{}", std::process::id()));
-        let _ = std::fs::remove_file(&probe);
-        std::fs::OpenOptions::new()
+        let _ = remove_file(&probe);
+        OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&probe)
             .map_err(|e| {
                 anyhow::anyhow!(
                     "http.uploads.dir {} is not writable: {e}",
-                    uploads.dir.display()
+                    settings.http.uploads.dir.display()
                 )
             })?;
-        let _ = std::fs::remove_file(&probe);
-        match std::fs::read_dir(&uploads.dir) {
+        let _ = remove_file(&probe);
+        match read_dir(&settings.http.uploads.dir) {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     if !spool_dir_reclaimable(&entry.file_name().to_string_lossy()) {
@@ -173,18 +178,20 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 }
             }
             Err(e) => {
-                tracing::warn!(target: "rapira", "listing {} for the spool sweep: {e}", uploads.dir.display());
+                tracing::warn!(target: "rapira", "listing {} for the spool sweep: {e}", settings.http.uploads.dir.display());
             }
         }
     }
     let upload_limits = rapira_runtime::multipart::Limits {
-        dir: uploads.dir.clone(),
-        max_file_size: uploads.max_file_size,
-        max_field_size: uploads.max_field_size,
-        max_files: uploads.max_files,
-        max_parts: uploads.max_parts,
-        max_part_headers: uploads.max_part_headers,
+        dir: settings.http.uploads.dir.clone(),
+        max_file_size: settings.http.uploads.max_file_size,
+        max_field_size: settings.http.uploads.max_field_size,
+        max_files: settings.http.uploads.max_files,
+        max_parts: settings.http.uploads.max_parts,
+        max_part_headers: settings.http.uploads.max_part_headers,
     };
+
+    // ---------------------------------------------------------------------
 
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
     host.register::<HttpServer>(http_cfg)?;
@@ -203,6 +210,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     );
     let scoreboard: Scoreboard = Scoreboard::create(settings.pool.processes * 2)?;
 
+    // forks ------------------------------------------------------------------
     let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {
         processes: settings.pool.processes,
         scaling: match settings.pool.scaling {
@@ -222,8 +230,6 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         pidfile: settings.supervisor.pidfile.clone(),
         listeners,
     };
-    let max_requests: u64 = settings.pool.max_requests;
-    let grace: std::time::Duration = settings.supervisor.process_control_timeout;
 
     let mut host_cell: Option<ExtensionRuntime> = Some(host);
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
@@ -233,10 +239,10 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 env,
                 host,
                 mode.clone(),
-                script.clone(),
-                max_requests,
+                settings.pool.entrypoint.clone(),
+                settings.pool.max_requests,
                 upload_limits.clone(),
-                grace,
+                settings.supervisor.process_control_timeout,
             )
         });
 

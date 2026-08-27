@@ -6,10 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-/// Matches pingora-core's LISTENER_BACKLOG: pingora re-listens with its own value on adoption, so any other default is silently rewritten in-worker.
+/// The backlog every master-bound listener gets: the master binds pre-fork and workers inherit the queue without re-listening. The value is a request the kernel clamps to net.core.somaxconn, so over-asking costs nothing while under-asking drops SYNs during a fork storm. https://man7.org/linux/man-pages/man2/listen.2.html
 pub const LISTEN_BACKLOG: i32 = 65535;
 
-/// `addr_string()` must feed both pingora's endpoint and its `Fds` key: adoption needs an exact match, a mismatch silently rebinds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ListenAddr {
     Tcp(SocketAddr),
@@ -84,7 +83,7 @@ impl PrepareCtx {
         self.fds.iter().map(|fd| fd.as_raw_fd()).collect()
     }
 
-    /// Nonblocking is set here because pingora's adoption path hands the fd straight to tokio, which requires it.
+    /// Nonblocking is set here because the adopting extension hands the fd to tokio's `from_std`, which requires O_NONBLOCK and does not set it.
     pub fn bind_tcp(&mut self, addr: SocketAddr) -> anyhow::Result<PreparedListener> {
         let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
             .with_context(|| format!("socket for {addr}"))?;
@@ -109,7 +108,7 @@ impl PrepareCtx {
         })
     }
 
-    /// The connect probe guards against unlinking a live socket: WouldBlock means a full backlog on a live peer, not an absent one. Mode 0o666 matches pingora's fresh-bind default and its adopt-branch re-chmod.
+    /// The connect probe guards against unlinking a live socket: WouldBlock means a full backlog on a live peer, not an absent one. Mode 0o666 because the containing directory is the real access gate and an unprivileged client (the reverse proxy in front of this process) must be able to connect without uid/gid matching.
     pub fn bind_unix(&mut self, path: &Path) -> anyhow::Result<PreparedListener> {
         let probe = Socket::new(Domain::UNIX, Type::STREAM, None)?;
         probe.set_nonblocking(true)?;

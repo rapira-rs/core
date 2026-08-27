@@ -1,6 +1,14 @@
 # CLAUDE.md - rapira/core
 
-PHP application server in Rust: rapira embeds PHP behind its own SAPI and a pre-fork process pool. A single-threaded master binds listeners and forks workers; each worker owns one PHP interpreter and one resident PHP thread. Extensions reach PHP through the `extension_api` `Php` bridge.
+PHP application server in Rust: rapira embeds PHP behind its own SAPI and a pre-fork process pool.
+A single-threaded master binds listeners and forks workers; each worker owns one PHP interpreter and one resident PHP thread.
+Extensions reach PHP through the `extension_api` `Php` bridge.
+
+## All text:
+
+- Write all English using ASD-STE100 Simplified Technical English (STE).
+  Use short sentences, active voice, approved vocabulary, and one instruction per sentence.
+  Avoid idioms, slang, and unnecessary synonyms. Don't write poems in the code comments.
 
 ## Settled, do not reopen
 
@@ -67,3 +75,5 @@ Delete dead code and defenses against threat models that cannot occur. Already w
 - Validate every automated finding against the code. A confident tone is not evidence.
 - Judge the underlying case, not the proposed diff.
 - Smallest safe fix, local to the finding. No speculative hardening, no unrelated cleanup.
+- If you see other's bots comments: triage them, add to your review if they're relevant and resolve all threads.
+- Keep review comments (in GitHub, when you creating/editing response on the @claude review command or when review triggered automatically) short and technical.

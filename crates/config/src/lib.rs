@@ -105,6 +105,13 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
     }
     let write_timeout = capped_timeout("http", "write_timeout_secs", write_timeout_secs)?;
 
+    let keepalive_timeout_secs = file.http.keepalive_timeout_secs.unwrap_or(60);
+    if keepalive_timeout_secs == 0 {
+        bail!("http.keepalive_timeout_secs must be at least 1");
+    }
+    let keepalive_timeout =
+        capped_timeout("http", "keepalive_timeout_secs", keepalive_timeout_secs)?;
+
     let sendfile_root = match file.http.sendfile.root.filter(|r| !r.is_empty()) {
         Some(r) => Some(config_relative(config_dir, &r)?),
         None => None,
@@ -131,6 +138,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
             server_port,
             max_body_size,
             write_timeout,
+            keepalive_timeout,
             unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
             uploads,
             sendfile_root,
@@ -296,6 +304,10 @@ mod tests {
             (
                 "[http]\nwrite_timeout_secs = 100000\n[pool]\nentrypoint = \"a.php\"\n",
                 "http.write_timeout_secs",
+            ),
+            (
+                "[http]\nkeepalive_timeout_secs = 100000\n[pool]\nentrypoint = \"a.php\"\n",
+                "http.keepalive_timeout_secs",
             ),
         ] {
             let err = merge(

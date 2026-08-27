@@ -3,12 +3,14 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+mod middleware;
 mod prepare;
+pub use middleware::{
+    Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Protocol,
+};
 pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
-
-/// One entry per field line: repeats stay separate, wire order, names as received, values raw bytes (latin1/binary-safe).
 pub type FieldLines = Vec<(String, Vec<u8>)>;
 
 /// Lifecycle: `init` → `prepare` (master-side, pre-fork) → `run` → `shutdown`; the host drops the in-flight `run` future before it calls `shutdown`.
@@ -18,17 +20,12 @@ pub trait Extension: Send + 'static {
     fn init(config: Self::Config) -> Self
     where
         Self: Sized;
-
     fn name(&self) -> &str;
-
-    /// Master-side pre-fork hook: synchronous, no runtime exists; resources stored in `self` cross the fork and `run` consumes them in the worker.
+    /// Master-side pre-fork hook: synchronous, no runtime exists
     fn prepare(&mut self, _ctx: &mut PrepareCtx) -> Result<()> {
         Ok(())
     }
-
-    /// Must reach `.await` points regularly: the host stops `run` only by cancelling it.
     fn run(&mut self, php: Php) -> impl Future<Output = Result<()>> + Send;
-
     fn shutdown(&mut self) -> impl Future<Output = Result<()>> + Send {
         async { Ok(()) }
     }
@@ -39,7 +36,6 @@ pub trait Backend: Send + Sync + 'static {
     fn exec(&self, req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>>;
 }
 
-/// Wire order `Interim* Head? (Chunk|File)* End?`: a stream ending without `End` means the worker died, without `Head` that it produced no response at all.
 pub enum ReplyEvent {
     Interim {
         status: u16,
@@ -48,11 +44,8 @@ pub enum ReplyEvent {
     Head {
         status: u16,
         headers: FieldLines,
-        /// None means the extension chooses the framing (chunked on HTTP/1.1).
         content_length: Option<u64>,
-        /// Send no body bytes and no framing fields, whatever else the stream carries.
         bodiless: bool,
-        /// The body is already content-coded; compression must leave it alone.
         body_coded: bool,
     },
     Chunk(bytes::Bytes),
@@ -67,28 +60,32 @@ pub enum ReplyEvent {
     },
 }
 
-#[doc(hidden)]
 pub trait ReplySource: Send + 'static {
-    fn next(&mut self) -> Pin<Box<dyn Future<Output = Option<ReplyEvent>> + Send + '_>>;
+    fn poll_next(&mut self, cx: &mut std::task::Context<'_>)
+    -> std::task::Poll<Option<ReplyEvent>>;
 }
 
-/// Dropping it tells the host the client is gone: the worker's next write raises `WorkDiscardedException`.
 pub struct Reply(Box<dyn ReplySource>);
-
 impl Reply {
-    #[doc(hidden)]
     pub fn new(source: Box<dyn ReplySource>) -> Self {
         Self(source)
     }
 
+    pub fn poll_next(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<ReplyEvent>> {
+        self.0.poll_next(cx)
+    }
+
     pub async fn next(&mut self) -> Option<ReplyEvent> {
-        self.0.next().await
+        std::future::poll_fn(|cx| self.0.poll_next(cx)).await
     }
 
     pub async fn collect(mut self) -> Result<Response> {
         let mut response: Option<Response> = None;
         let mut end: Option<bool> = None;
-        while let Some(ev) = self.0.next().await {
+        while let Some(ev) = self.next().await {
             match ev {
                 ReplyEvent::Interim { .. } => {}
                 ReplyEvent::Head {
@@ -165,7 +162,6 @@ impl Php {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Addr {
     Inet(std::net::SocketAddr),
-    /// None is an unnamed endpoint: the usual case for a peer on a unix listener, which binds no path of its own.
     Unix(Option<PathBuf>),
 }
 
@@ -173,7 +169,6 @@ pub enum Addr {
 pub struct ClientCert {
     pub serial: String,
     pub organization: Option<String>,
-    /// SHA-256 over the DER form, lowercase hex.
     pub fingerprint: String,
 }
 
@@ -181,9 +176,9 @@ pub struct ClientCert {
 pub struct Tls {
     pub version: String,
     pub cipher: String,
-    /// Maps to `Tls::$negotiatedProtocol`; None when the client offered no ALPN list.
+    /// Tls::$negotiatedProtocol`
     pub alpn: Option<String>,
-    /// Maps to `Tls::$requestedServerName`; None when the client sent no SNI.
+    /// Tls::$requestedServerName`
     pub server_name: Option<String>,
     pub cert: Option<ClientCert>,
 }
@@ -206,22 +201,15 @@ impl std::error::Error for Rejected {}
 pub struct Request {
     pub method: String,
     pub uri: String,
-    /// The request-target byte-for-byte (h1 request line, `:path` on h2/h3); None makes the host fall back to `uri`'s bytes.
     pub target: Option<Vec<u8>>,
-    /// None = the client named no authority, never `Some(b"")`; rejecting a Host-less HTTP/1.1 request is the extension's job (RFC 9112 §3.2).
-    /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2
     pub authority: Option<Vec<u8>>,
     pub https: bool,
     pub protocol: String,
     pub remote: Addr,
-    /// The accepting socket: which listener took the call, not configuration.
     pub server: Addr,
-    /// Configured CGI facts (`SERVER_NAME`/`SERVER_PORT`, RFC 3875), distinct from the socket-derived `server`.
     pub server_name: String,
     pub server_port: u16,
-    /// None on a plaintext listener: `https` may still be true behind a terminating front.
     pub tls: Option<Tls>,
-    /// Unix seconds stamped at accept, head parsed and body not yet read; None makes the host stamp at intake.
     pub received_at: Option<f64>,
     pub headers: FieldLines,
     pub body: Vec<u8>,
