@@ -832,7 +832,11 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/boot-global-worker.php")))?;
     let h = r.handle();
-    for want in ["kernel=ok calls=1", "kernel=ok calls=2", "kernel=ok calls=3"] {
+    for want in [
+        "kernel=ok calls=1",
+        "kernel=ok calls=2",
+        "kernel=ok calls=3",
+    ] {
         let (status, body) = drain(h.handle_blocking(req(
             "/boot-global-worker.php",
             "ported_tests/boot-global-worker.php",
