@@ -24,7 +24,7 @@ namespace Rapira\Exception {
     }
 
     /** get_dispatcher() outside dispatcher mode. */
-    class NotInDispatcherModeError extends \Error implements RapiraThrowable
+    class NoDispatcherError extends \Error implements RapiraThrowable
     {
     }
 

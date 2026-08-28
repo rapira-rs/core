@@ -20,7 +20,7 @@ pub(crate) use crate::{
     rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_tls,
     rapira_ce_http_uploaded_file, rapira_ce_inet_address, rapira_ce_internal_http_dispatcher,
     rapira_ce_internal_http_dispatcher_info, rapira_ce_internal_http_exchange,
-    rapira_ce_not_in_dispatcher_mode_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
+    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
     rapira_ce_work_discarded_exception, rapira_dispatcher_info_obj, rapira_eg, rapira_exchange_obj,
     rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},

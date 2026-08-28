@@ -3,7 +3,7 @@ edition = "2024"
 
 [package]
 name = "rapira_core"
-version = "0.7.0"
+version = "0.8.0"
 edition.workspace = true
 description = "PHP application server: embeds NTS PHP via the embed SAPI and serves HTTP directly"
 homepage = "https://rapira.rs"
@@ -18,10 +18,6 @@ path = "src/main.rs"
 
 
 [workspace]
-# Every member is spelled out and carries a literal version. release-please
-# resolves each member as <member>/Cargo.toml and rewrites its [package] version,
-# so a glob member or a version.workspace = true keeps a stale version.
-# https://github.com/googleapis/release-please/blob/v17.11.2/src/strategies/rust.ts#L64-L72
 members = [
     "crates/config",
     "crates/runtime",

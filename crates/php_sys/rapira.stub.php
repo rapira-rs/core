@@ -21,6 +21,14 @@ namespace Rapira {
         case Trace;
     }
 
+    /** The mode the host launched this process in: the `[pool] mode` of rapira.toml. */
+    enum Mode
+    {
+        case Classic;
+        case Worker;
+        case Dispatcher;
+    }
+
     /**
      * A unit of work from a dispatcher. Host-created; the finalizing verbs live on the
      * concrete type.
@@ -99,10 +107,13 @@ namespace Rapira {
         public function __construct(?string $path) {}
     }
 
+    /** The mode of this process. The same case for the life of the process. */
+    function get_mode(): Mode {}
+
     /**
      * The same instance for the life of the process.
      *
-     * @throws Exception\NotInDispatcherModeError Called outside dispatcher mode.
+     * @throws Exception\NoDispatcherError Called outside dispatcher mode.
      */
     function get_dispatcher(): Dispatcher {}
 
