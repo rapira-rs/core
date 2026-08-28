@@ -74,13 +74,13 @@ jobs:
             IMAGE: ghcr.io/${{ github.repository }}
             V: ${{ needs.release-please.outputs.version }}
         steps:
-            # A prerelease version, from a Release-As footer, must not become the
-            # latest release.
+            # A prerelease version, from a Release-As footer, gets the prerelease
+            # mark and must not become the latest release.
             - shell: bash
               run: |
                   set -euo pipefail
                   case "$V" in
-                    *-*) gh release edit "$TAG" --draft=false ;;
+                    *-*) gh release edit "$TAG" --draft=false --prerelease ;;
                     *) gh release edit "$TAG" --draft=false --latest ;;
                   esac
             - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
