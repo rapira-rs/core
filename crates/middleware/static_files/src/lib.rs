@@ -94,7 +94,7 @@ impl Middleware for StaticFiles {
                     tracing::error!(target: "http", "static probe failed for {}: {e}", req.uri().path());
                     http::Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Empty::new().map_err(|e| match e {}).boxed_unsync())
+                        .body(empty_body())
                         .unwrap()
                 }
             }
