@@ -74,7 +74,15 @@ jobs:
             IMAGE: ghcr.io/${{ github.repository }}
             V: ${{ needs.release-please.outputs.version }}
         steps:
-            - run: gh release edit "$TAG" --draft=false --latest
+            # A prerelease version, from a Release-As footer, must not become the
+            # latest release.
+            - shell: bash
+              run: |
+                  set -euo pipefail
+                  case "$V" in
+                    *-*) gh release edit "$TAG" --draft=false ;;
+                    *) gh release edit "$TAG" --draft=false --latest ;;
+                  esac
             - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
             - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
               with:
@@ -85,6 +93,8 @@ jobs:
               shell: bash
               run: |
                   set -euo pipefail
+                  # A prerelease version stays off the moving aliases.
+                  case "$V" in *-*) exit 0 ;; esac
                   for PHP in 8.4 8.5; do
                       docker buildx imagetools create \
                         -t "$IMAGE:${V%.*}-php$PHP" -t "$IMAGE:php$PHP" \
