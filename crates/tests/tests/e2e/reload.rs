@@ -29,7 +29,7 @@ fn usr2_reload_replaces_workers_while_serving() {
     assert_eq!(
         tally.failed,
         0,
-        "every served response must be a 200; last error: {:?}\n{}",
+        "requests failed beyond tolerated connection drops; last error: {:?}\n{}",
         tally.last_err,
         diagnostics(&srv),
     );

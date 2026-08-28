@@ -398,7 +398,7 @@ pub fn signal(pid: u32, sig: i32) {
     }
 }
 
-/// Per-thread outcome counters: `refused` means the listener closed, `failed` means a served non-200 response; connection drops only record `last_err` (the balancer retries those).
+/// Per-thread outcome counters: `refused` means the listener closed, `failed` means a non-200 response, a hang, or a corrupt reply; connection drops only record `last_err` (the balancer retries those).
 pub struct Tally {
     pub ok: u64,
     pub refused: u64,
@@ -442,7 +442,20 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
                             tally.refused += 1;
                             tally.last_err = Some(e.to_string());
                         }
+                        // tolerated connection drops: reset, zero-byte close, abort, closed write side
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                io::ErrorKind::ConnectionReset
+                                    | io::ErrorKind::ConnectionAborted
+                                    | io::ErrorKind::UnexpectedEof
+                                    | io::ErrorKind::BrokenPipe
+                            ) =>
+                        {
+                            tally.last_err = Some(e.to_string());
+                        }
                         Err(e) => {
+                            tally.failed += 1;
                             tally.last_err = Some(e.to_string());
                         }
                     }
