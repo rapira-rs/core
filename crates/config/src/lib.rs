@@ -572,6 +572,14 @@ mod tests {
         let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
         assert!(s.http.static_files.is_none());
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"/srv/pub\"\n")
+            .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        assert_eq!(
+            s.http.static_files.expect("section present").root,
+            Path::new("/srv/pub")
+        );
     }
 
     #[test]
@@ -591,16 +599,16 @@ mod tests {
         }
     }
 
-    /// Extensions compare case-insensitively at request time, so entries normalize to lowercase here.
+    /// The resolver validates shape only. The middleware constructor normalizes the case.
     #[test]
-    fn http_static_forbid_validates_and_lowercases() {
+    fn http_static_forbid_validates() {
         let file = load_str(
             "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"p\"\nforbid = [\".PHP\", \".Phtml\"]\n",
         )
         .unwrap();
         let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
         let st = s.http.static_files.expect("section present");
-        assert_eq!(st.forbid, vec![".php".to_owned(), ".phtml".to_owned()]);
+        assert_eq!(st.forbid, vec![".PHP".to_owned(), ".Phtml".to_owned()]);
 
         let file =
             load_str("[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"p\"\nforbid = []\n")
@@ -614,7 +622,7 @@ mod tests {
                 .is_empty()
         );
 
-        for entry in ["php", ""] {
+        for entry in ["php", "", ".", ".php ", "./php"] {
             let file = load_str(&format!(
                 "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"p\"\nforbid = [\"{entry}\"]\n"
             ))

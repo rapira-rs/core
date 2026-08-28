@@ -123,11 +123,19 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // static files --------------------------------------------------
     let mut middleware: Vec<Arc<dyn Middleware>> = Vec::new();
     if let Some(st) = &settings.http.static_files {
+        // is_dir() folds every stat error into false; metadata keeps the errno visible.
+        let meta = std::fs::metadata(&st.root).map_err(|e| {
+            anyhow::anyhow!(
+                "http.static.root {} is not readable: {e}",
+                st.root.display()
+            )
+        })?;
         anyhow::ensure!(
-            st.root.is_dir(),
+            meta.is_dir(),
             "http.static.root {} is not a directory",
             st.root.display()
         );
+        info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
         middleware.push(Arc::new(rapira_static_files::StaticFiles::new(
             st.root.clone(),
             st.forbid.clone(),

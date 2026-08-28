@@ -1,15 +1,13 @@
 use crate::harness::{
-    diagnostics, http_get, http_get_raw, spawn_boot_failure, spawn_with_http_extra,
+    diagnostics, http_get, http_get_raw, http_post, scratch_dir, spawn_boot_failure,
+    spawn_with_http_extra,
 };
 use std::time::Duration;
 
 const T: Duration = Duration::from_secs(10);
 
 fn static_root(files: &[(&str, &str)]) -> std::path::PathBuf {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("rapira-static-{}-{seq}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create static root");
+    let dir = scratch_dir();
     for (name, contents) in files {
         std::fs::write(dir.join(name), contents).expect("write static file");
     }
@@ -31,17 +29,26 @@ fn static_files_serve_over_the_wire() {
         &format!("[http.static]\nroot = \"{}\"\n", root.display()),
     );
 
-    let (code, body) = http_get(srv.addr, "/app.css", T).expect("GET /app.css");
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    assert_eq!(body, b"body{color:red}");
-    let raw = http_get_raw(srv.addr, "/app.css", &[], T).expect("raw GET /app.css");
-    let head = String::from_utf8_lossy(&raw).to_lowercase();
-    assert!(head.contains("content-type: text/css"), "{head}");
-    assert!(head.contains("content-length: 15"), "{head}");
+    let raw = http_get_raw(srv.addr, "/app.css", &[], T).expect("GET /app.css");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "{text}\n{}",
+        diagnostics(&srv)
+    );
+    let head = text.split("\r\n\r\n").next().expect("head").to_lowercase();
+    assert!(head.contains("\r\ncontent-type: text/css\r\n"), "{head}");
+    assert!(head.contains("\r\ncontent-length: 15\r\n"), "{head}");
+    assert!(text.ends_with("body{color:red}"), "{text}");
 
     let (code, body) = http_get(srv.addr, "/nope", T).expect("GET /nope");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert!(body.starts_with(b"ok:"), "a miss must reach php");
+
+    let (code, body) =
+        http_post(srv.addr, "/nope", b"text/plain", b"payload", T).expect("POST /nope");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    assert!(body.starts_with(b"ok:"), "a post must reach php");
 
     for path in ["/index.php", "/.env"] {
         let (_, body) = http_get(srv.addr, path, T).expect(path);
@@ -70,6 +77,23 @@ fn a_missing_static_root_refuses_to_boot() {
         "shared/echo-worker.php",
         "[http.static]\nroot = \"/nonexistent-rapira-static-root\"\n",
     );
-    assert!(!status.success(), "{log}");
-    assert!(log.contains("http.static.root"), "{log}");
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(
+        log.contains("http.static.root") && log.contains("is not readable"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_static_root_that_is_not_a_directory_refuses_to_boot() {
+    let dir = scratch_dir();
+    let file = dir.join("root");
+    std::fs::write(&file, "x").expect("write file root");
+    let (status, log) = spawn_boot_failure(
+        "shared/echo-worker.php",
+        &format!("[http.static]\nroot = \"{}\"\n", file.display()),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.contains("is not a directory"), "{log}");
 }

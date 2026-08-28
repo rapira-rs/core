@@ -1,12 +1,5 @@
-use extension_api::{BoxError, FieldLines, HttpResponse};
+use extension_api::{FieldLines, HttpResponse, empty_body};
 use http::header::{CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue};
-use http_body_util::BodyExt;
-
-pub(crate) fn empty_body() -> extension_api::Body {
-    http_body_util::Empty::<bytes::Bytes>::new()
-        .map_err(BoxError::from)
-        .boxed_unsync()
-}
 
 pub(crate) fn error_response(status: http::StatusCode) -> HttpResponse {
     let mut res = http::Response::new(empty_body());

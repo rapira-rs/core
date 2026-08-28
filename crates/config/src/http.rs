@@ -25,7 +25,8 @@ pub struct HttpSettings {
 #[derive(Debug)]
 pub struct StaticSettings {
     pub root: PathBuf,
-    /// Extensions never served from the root, lowercase with a leading dot.
+    /// Extensions the middleware never serves from the root, with a leading dot.
+    /// The middleware normalizes the case.
     pub forbid: Vec<String>,
 }
 
@@ -65,7 +66,7 @@ pub(crate) struct HttpSection {
     pub(crate) r#static: Option<StaticSection>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StaticSection {
     pub(crate) root: Option<String>,
@@ -80,12 +81,17 @@ pub(crate) fn resolve_static(
         Some(r) => config_relative(config_dir, &r)?,
         None => bail!("http.static.root is required"),
     };
-    let mut forbid = section.forbid.unwrap_or_else(|| vec![".php".to_owned()]);
-    for entry in &mut forbid {
-        if entry.len() < 2 || !entry.starts_with('.') {
+    let forbid = section.forbid.unwrap_or_else(|| vec![".php".to_owned()]);
+    for entry in &forbid {
+        // A separator or whitespace can never suffix-match a file name. Such an entry would
+        // silently make the guard useless.
+        if entry.len() < 2
+            || !entry.starts_with('.')
+            || entry.contains('/')
+            || entry.chars().any(char::is_whitespace)
+        {
             bail!("http.static.forbid entries must be extensions with a leading dot (`{entry}`)");
         }
-        entry.make_ascii_lowercase();
     }
     Ok(StaticSettings { root, forbid })
 }

@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_static_files"
-version = "0.8.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "extension_api",

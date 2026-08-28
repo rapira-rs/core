@@ -6,7 +6,8 @@ use std::sync::Arc;
 mod middleware;
 mod prepare;
 pub use middleware::{
-    Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Protocol,
+    Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer,
+    Protocol, empty_body,
 };
 pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
 

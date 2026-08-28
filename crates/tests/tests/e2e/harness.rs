@@ -142,44 +142,21 @@ fn spawn_with_extras(
     rust_log: Option<&str>,
     cwd_ini: Option<CwdIni<'_>>,
 ) -> Server {
-    let dir = scratch_dir();
-    let name = Path::new(fixture)
-        .file_name()
-        .unwrap_or_else(|| panic!("fixture {fixture} has no file name"));
-    std::fs::copy(fixture_path(fixture), dir.join(name))
-        .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
-    let entrypoint = name.to_str().expect("fixture name is utf-8");
+    let (dir, entrypoint) = stage_fixture(fixture);
     if let Some(ini) = &cwd_ini {
         std::fs::write(dir.join("php.ini"), ini.contents).expect("write php.ini");
     }
     let mut last_log = String::new();
     for _ in 0..3 {
-        let port = free_port();
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        std::fs::write(
-            dir.join("rapira.toml"),
-            render_config(port, processes, entrypoint, http_extra, extra_toml),
-        )
-        .expect("write config");
-        let log = File::create(dir.join("server.log")).expect("create server.log");
-        let mut cmd = Command::new(rapira_bin());
-        cmd.args(["serve", "--config"]).arg(dir.join("rapira.toml"));
-        cmd.env_remove("PHPRC");
-        if let Some(ini) = &cwd_ini {
-            cmd.current_dir(&dir);
-            if ini.via_phprc {
-                cmd.env("PHPRC", &dir);
-            }
-        }
-        match rust_log {
-            Some(v) => cmd.env("RUST_LOG", v),
-            None => cmd.env_remove("RUST_LOG"),
-        };
-        let mut child = cmd
-            .stdout(Stdio::from(log.try_clone().expect("clone log fd")))
-            .stderr(Stdio::from(log))
-            .spawn()
-            .expect("spawn rapira");
+        let (mut child, addr) = spawn_attempt(
+            &dir,
+            processes,
+            &entrypoint,
+            http_extra,
+            extra_toml,
+            rust_log,
+            cwd_ini.as_ref(),
+        );
         if wait_for_port(&addr, &mut child, BOOT) {
             return Server { child, addr, dir };
         }
@@ -191,45 +168,69 @@ fn spawn_with_extras(
     panic!("rapira never accepted a connection after 3 attempts\n{last_log}");
 }
 
-/// Boots expecting a startup failure: waits for the exit and returns the status with the log tail.
-pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (std::process::ExitStatus, String) {
+/// A scratch dir holding a copy of the fixture, plus the entrypoint name for the config.
+fn stage_fixture(fixture: &str) -> (PathBuf, String) {
     let dir = scratch_dir();
     let name = Path::new(fixture)
         .file_name()
         .unwrap_or_else(|| panic!("fixture {fixture} has no file name"));
     std::fs::copy(fixture_path(fixture), dir.join(name))
         .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
-    let entrypoint = name.to_str().expect("fixture name is utf-8");
+    let entrypoint = name.to_str().expect("fixture name is utf-8").to_owned();
+    (dir, entrypoint)
+}
+
+/// One spawn on a fresh port; the caller decides how to wait.
+fn spawn_attempt(
+    dir: &Path,
+    processes: usize,
+    entrypoint: &str,
+    http_extra: &str,
+    extra_toml: &str,
+    rust_log: Option<&str>,
+    cwd_ini: Option<&CwdIni<'_>>,
+) -> (Child, SocketAddr) {
+    let port = free_port();
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     std::fs::write(
         dir.join("rapira.toml"),
-        render_config(free_port(), 1, entrypoint, http_extra, ""),
+        render_config(port, processes, entrypoint, http_extra, extra_toml),
     )
     .expect("write config");
     let log = File::create(dir.join("server.log")).expect("create server.log");
     let mut cmd = Command::new(rapira_bin());
     cmd.args(["serve", "--config"]).arg(dir.join("rapira.toml"));
     cmd.env_remove("PHPRC");
-    cmd.env("RUST_LOG", "info");
-    let mut child = cmd
+    if let Some(ini) = cwd_ini {
+        cmd.current_dir(dir);
+        if ini.via_phprc {
+            cmd.env("PHPRC", dir);
+        }
+    }
+    match rust_log {
+        Some(v) => cmd.env("RUST_LOG", v),
+        None => cmd.env_remove("RUST_LOG"),
+    };
+    let child = cmd
         .stdout(Stdio::from(log.try_clone().expect("clone log fd")))
         .stderr(Stdio::from(log))
         .spawn()
         .expect("spawn rapira");
-    let end = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        if let Some(st) = child.try_wait().expect("try_wait") {
-            break st;
-        }
-        if Instant::now() >= end {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("rapira did not exit\n{}", log_tail(&dir));
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    (child, addr)
+}
+
+/// Boots expecting a startup failure: waits for the exit and returns the status with the log.
+/// The function returns the whole log, not the tail: with `RUST_BACKTRACE` set, the backtrace
+/// after the error line is longer than the tail window.
+pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (ExitStatus, String) {
+    let (dir, entrypoint) = stage_fixture(fixture);
+    let (child, addr) = spawn_attempt(&dir, 1, &entrypoint, http_extra, "", Some("info"), None);
+    let mut srv = Server { child, addr, dir };
+    let Some(status) = srv.wait_exit(BOOT) else {
+        panic!("rapira did not exit");
     };
-    let tail = log_tail(&dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    (status, tail)
+    let log = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
+    (status, log)
 }
 
 fn render_config(
@@ -602,7 +603,7 @@ fn log_tail(dir: &Path) -> String {
     )
 }
 
-fn scratch_dir() -> PathBuf {
+pub fn scratch_dir() -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("rapira-e2e-{}-{seq}", std::process::id()));

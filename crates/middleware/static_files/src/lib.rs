@@ -1,28 +1,34 @@
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use extension_api::{BoxError, BoxFuture, HttpRequest, HttpResponse, Middleware, Next};
+use extension_api::{BoxError, BoxFuture, HttpRequest, HttpResponse, Middleware, Next, empty_body};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty};
 use tower_http::services::ServeDir;
 
 /// Serves files from a directory and hands every miss to the next middleware.
+/// A read failure answers 500. The request does not reach the next middleware.
 pub struct StaticFiles {
     dir: ServeDir,
     forbid: Vec<String>,
 }
 
 impl StaticFiles {
-    /// `root` must be absolute; `forbid` holds lowercase extensions with a leading dot.
-    pub fn new(root: PathBuf, forbid: Vec<String>) -> Self {
+    /// A relative `root` resolves against the process working directory.
+    /// `forbid` holds file-name suffixes with a leading dot.
+    /// The constructor lowercases them, so an uppercase entry still matches in `eligible`.
+    pub fn new(root: PathBuf, mut forbid: Vec<String>) -> Self {
+        for entry in &mut forbid {
+            entry.make_ascii_lowercase();
+        }
         Self {
             dir: ServeDir::new(root),
             forbid,
         }
     }
 
-    /// The check runs on the decoded path because ServeDir percent-decodes before it touches
-    /// the filesystem; matching the raw path would let `%2Ephp` through.
+    /// The check runs on the decoded path because ServeDir percent-decodes before it reads
+    /// the filesystem. A match on the raw path would accept `%2Ephp`.
     fn eligible(&self, path: &str) -> bool {
         let Ok(decoded) = percent_encoding::percent_decode_str(path).decode_utf8() else {
             return false;
@@ -30,11 +36,11 @@ impl StaticFiles {
         if decoded.split('/').any(|segment| segment.starts_with('.')) {
             return false;
         }
-        // file_name() drops trailing separators the way ServeDir's component walk does, so
-        // `/index.php%2F` still names index.php here.
-        let file = std::path::Path::new(decoded.as_ref())
-            .file_name()
-            .and_then(|f| f.to_str())
+        // The last non-empty segment is the file ServeDir resolves: its component walk drops
+        // trailing separators, so `/index.php%2F` still names index.php here.
+        let file = decoded
+            .rsplit('/')
+            .find(|s| !s.is_empty())
             .unwrap_or_default();
         let file = file.to_ascii_lowercase();
         !self.forbid.iter().any(|ext| file.ends_with(ext.as_str()))
@@ -51,8 +57,8 @@ impl Middleware for StaticFiles {
                 return next.run(req).await;
             }
 
-            // The probe carries only the head; the original request stays intact for the
-            // miss path, so the Peer and Protocol extensions reach the handler untouched.
+            // The probe carries only the head. The original request stays unchanged for the
+            // miss path, so the Peer and Protocol extensions reach the handler.
             let mut probe = http::Request::new(Empty::<Bytes>::new());
             *probe.method_mut() = req.method().clone();
             *probe.uri_mut() = req.uri().clone();
@@ -60,16 +66,20 @@ impl Middleware for StaticFiles {
 
             let mut dir = self.dir.clone();
             match dir.try_call(probe).await {
-                // A 307 names a directory, not a servable file; it falls through so PHP owns
-                // the URL shape.
+                // A 307 names a directory, not a file this middleware can serve. It falls
+                // through so PHP owns the URL shape.
                 Ok(res)
                     if res.status() != StatusCode::NOT_FOUND
                         && res.status() != StatusCode::TEMPORARY_REDIRECT =>
                 {
                     res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync())
                 }
+                // ServeDir folds NotFound, PermissionDenied and ENOTDIR into Ok(404), so an
+                // unreadable file is indistinguishable from a missing one and reaches PHP.
                 Ok(_) => next.run(req).await,
-                // A name-shaped error (segment over NAME_MAX, NUL byte) is a miss, not a failure.
+                // An error about the file name is a miss. A segment over NAME_MAX returns
+                // InvalidFilename. A HEAD probe returns InvalidInput for a NUL byte; a GET
+                // answers 404 for it.
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -78,8 +88,8 @@ impl Middleware for StaticFiles {
                 {
                     next.run(req).await
                 }
-                // try_call answers Ok(404) for a missing or unreadable file, so an Err here is
-                // a real read failure and must not reach PHP. https://docs.rs/tower-http/0.7.0/tower_http/services/struct.ServeDir.html#method.try_call
+                // An Err outside the file-name kinds is a read failure and must not reach
+                // PHP. https://docs.rs/tower-http/0.7.0/tower_http/services/struct.ServeDir.html#method.try_call
                 Err(e) => {
                     tracing::error!(target: "http", "static probe failed for {}: {e}", req.uri().path());
                     http::Response::builder()
@@ -95,9 +105,8 @@ impl Middleware for StaticFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use extension_api::{Addr, BoxFuture, Handler, Middleware, Peer, Protocol};
-    use http_body_util::{BodyExt, Full};
+    use extension_api::{Addr, Handler, Peer, Protocol};
+    use http_body_util::Full;
     use std::net::SocketAddr;
     use std::sync::Arc;
 
@@ -221,7 +230,6 @@ mod tests {
         let dir = root();
         for path in [
             "/index.php",
-            "/INDEX.PHP",
             "/index%2Ephp",
             "/Upper.PHP",
             "/index.php%2F",
@@ -231,6 +239,15 @@ mod tests {
             let res = run(static_files(&dir), request("GET", path, "")).await;
             assert_eq!(header(&res, "x-handler"), "php", "{path}");
         }
+    }
+
+    /// The constructor lowercases the entries, so an uppercase entry still blocks the PHP source.
+    #[tokio::test(flavor = "current_thread")]
+    async fn uppercase_forbid_needles_are_normalized() {
+        let dir = root();
+        let st = StaticFiles::new(dir.path().to_path_buf(), vec![".PHP".to_owned()]);
+        let res = run(st, request("GET", "/index.php", "")).await;
+        assert_eq!(header(&res, "x-handler"), "php");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -246,36 +263,98 @@ mod tests {
         assert_eq!(body(res).await, "a{}");
     }
 
-    /// A segment over NAME_MAX surfaces from try_call as an Err with a name-shaped kind, not as a 404.
+    /// A trailing slash resolves to the directory's index.html. Without that file the request is a miss.
     #[tokio::test(flavor = "current_thread")]
-    async fn overlong_and_undecodable_paths_fall_through() {
+    async fn directory_paths_with_a_trailing_slash_fall_through_without_an_index() {
         let dir = root();
-        let long = format!("/{}", "a".repeat(300));
-        for path in [long.as_str(), "/%FF.css"] {
+        for path in ["/assets/", "/sub/"] {
             let res = run(static_files(&dir), request("GET", path, "")).await;
             assert_eq!(header(&res, "x-handler"), "php", "{path}");
         }
     }
 
+    /// An empty forbid list is explicit: the middleware serves every file in the root.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_empty_forbid_list_serves_php_sources() {
+        let dir = root();
+        let st = StaticFiles::new(dir.path().to_path_buf(), Vec::new());
+        let res = run(st, request("GET", "/index.php", "")).await;
+        assert_eq!(res.status(), 200);
+        assert!(res.headers().get("x-handler").is_none());
+        assert_eq!(body(res).await, "<?php secret();");
+    }
+
+    /// An unsatisfiable byte range answers 416 (RFC 9110 section 15.5.17, https://www.rfc-editor.org/rfc/rfc9110#section-15.5.17).
+    /// The response carries unsatisfied-range `"*/" complete-length` (section 14.4, https://www.rfc-editor.org/rfc/rfc9110#section-14.4).
+    /// The file exists, so the middleware answers and PHP does not see the request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unsatisfiable_range_answers_416_without_reaching_php() {
+        let dir = root();
+        let mut req = request("GET", "/data.bin", "");
+        req.headers_mut()
+            .insert("range", "bytes=100-200".parse().unwrap());
+        let res = run(static_files(&dir), req).await;
+        assert_eq!(res.status(), 416);
+        assert_eq!(header(&res, "content-range"), "bytes */10");
+        assert!(res.headers().get("x-handler").is_none());
+    }
+
+    /// A symlink loop fails with ELOOP. That kind is not in ServeDir's miss set (NotFound,
+    /// PermissionDenied, ENOTDIR) and is not a file-name error, so it is a read failure.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_real_read_failure_answers_500() {
+        let dir = root();
+        std::os::unix::fs::symlink("loop.css", dir.path().join("loop.css")).unwrap();
+        let res = run(static_files(&dir), request("GET", "/loop.css", "")).await;
+        assert_eq!(res.status(), 500);
+        assert!(res.headers().get("x-handler").is_none());
+        assert_eq!(body(res).await, "");
+    }
+
+    /// A segment over NAME_MAX surfaces from try_call as an Err with a file-name kind, not as a 404.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_overlong_segment_falls_through() {
+        let dir = root();
+        let long = format!("/{}", "a".repeat(300));
+        let res = run(static_files(&dir), request("GET", &long, "")).await;
+        assert_eq!(header(&res, "x-handler"), "php");
+    }
+
+    /// A NUL byte reaches the file-name arm on HEAD only. A GET already folds it into a 404.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_nul_byte_in_the_path_falls_through() {
+        let dir = root();
+        for method in ["GET", "HEAD"] {
+            let res = run(static_files(&dir), request(method, "/a%00.css", "")).await;
+            assert_eq!(header(&res, "x-handler"), "php", "{method}");
+        }
+    }
+
+    /// The middleware cannot check an undecodable path against the dot and forbid rules, so the path is never eligible.
+    #[test]
+    fn an_undecodable_path_is_never_eligible() {
+        let dir = root();
+        assert!(!static_files(&dir).eligible("/%FF.css"));
+    }
+
+    /// Parent-dir segments land on the same guard: `..` starts with a dot.
     #[tokio::test(flavor = "current_thread")]
     async fn dotfile_segments_fall_through() {
         let dir = root();
-        for path in ["/.env", "/.git/config", "/%2Eenv"] {
+        for path in [
+            "/.env",
+            "/.git/config",
+            "/%2Eenv",
+            "/../outside.txt",
+            "/%2e%2e/outside.txt",
+        ] {
             let res = run(static_files(&dir), request("GET", path, "")).await;
             assert_eq!(header(&res, "x-handler"), "php", "{path}");
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn traversal_attempts_fall_through() {
-        let dir = root();
-        for path in ["/../outside.txt", "/%2e%2e/outside.txt"] {
-            let res = run(static_files(&dir), request("GET", path, "")).await;
-            assert_eq!(header(&res, "x-handler"), "php", "{path}");
-        }
-    }
-
-    /// Byte positions are inclusive (RFC 9110 section 14.1.2, https://www.rfc-editor.org/rfc/rfc9110#section-14.1.2); Content-Range carries first-pos "-" last-pos "/" complete-length (section 14.4, https://www.rfc-editor.org/rfc/rfc9110#section-14.4).
+    /// Byte positions are inclusive (RFC 9110 section 14.1.2, https://www.rfc-editor.org/rfc/rfc9110#section-14.1.2).
+    /// Content-Range carries first-pos "-" last-pos "/" complete-length (section 14.4, https://www.rfc-editor.org/rfc/rfc9110#section-14.4).
     #[tokio::test(flavor = "current_thread")]
     async fn a_range_request_answers_the_named_bytes() {
         let dir = root();
