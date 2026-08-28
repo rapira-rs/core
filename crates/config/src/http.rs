@@ -18,6 +18,15 @@ pub struct HttpSettings {
     pub uploads: UploadSettings,
     /// `[http.sendfile].root`; None = the entrypoint's directory.
     pub sendfile_root: Option<PathBuf>,
+    /// `[http.static]`; None = static file serving off.
+    pub static_files: Option<StaticSettings>,
+}
+
+#[derive(Debug)]
+pub struct StaticSettings {
+    pub root: PathBuf,
+    /// Extensions never served from the root, lowercase with a leading dot.
+    pub forbid: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -53,6 +62,32 @@ pub(crate) struct HttpSection {
     pub(crate) uploads: Option<UploadsSection>,
     #[serde(default)]
     pub(crate) sendfile: SendfileSection,
+    pub(crate) r#static: Option<StaticSection>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StaticSection {
+    pub(crate) root: Option<String>,
+    pub(crate) forbid: Option<Vec<String>>,
+}
+
+pub(crate) fn resolve_static(
+    section: StaticSection,
+    config_dir: Option<&Path>,
+) -> anyhow::Result<StaticSettings> {
+    let root = match section.root.filter(|r| !r.is_empty()) {
+        Some(r) => config_relative(config_dir, &r)?,
+        None => bail!("http.static.root is required"),
+    };
+    let mut forbid = section.forbid.unwrap_or_else(|| vec![".php".to_owned()]);
+    for entry in &mut forbid {
+        if entry.len() < 2 || !entry.starts_with('.') {
+            bail!("http.static.forbid entries must be extensions with a leading dot (`{entry}`)");
+        }
+        entry.make_ascii_lowercase();
+    }
+    Ok(StaticSettings { root, forbid })
 }
 
 #[derive(Debug, Default, Deserialize)]

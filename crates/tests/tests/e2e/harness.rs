@@ -191,6 +191,47 @@ fn spawn_with_extras(
     panic!("rapira never accepted a connection after 3 attempts\n{last_log}");
 }
 
+/// Boots expecting a startup failure: waits for the exit and returns the status with the log tail.
+pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (std::process::ExitStatus, String) {
+    let dir = scratch_dir();
+    let name = Path::new(fixture)
+        .file_name()
+        .unwrap_or_else(|| panic!("fixture {fixture} has no file name"));
+    std::fs::copy(fixture_path(fixture), dir.join(name))
+        .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
+    let entrypoint = name.to_str().expect("fixture name is utf-8");
+    std::fs::write(
+        dir.join("rapira.toml"),
+        render_config(free_port(), 1, entrypoint, http_extra, ""),
+    )
+    .expect("write config");
+    let log = File::create(dir.join("server.log")).expect("create server.log");
+    let mut cmd = Command::new(rapira_bin());
+    cmd.args(["serve", "--config"]).arg(dir.join("rapira.toml"));
+    cmd.env_remove("PHPRC");
+    cmd.env("RUST_LOG", "info");
+    let mut child = cmd
+        .stdout(Stdio::from(log.try_clone().expect("clone log fd")))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .expect("spawn rapira");
+    let end = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(st) = child.try_wait().expect("try_wait") {
+            break st;
+        }
+        if Instant::now() >= end {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("rapira did not exit\n{}", log_tail(&dir));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let tail = log_tail(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    (status, tail)
+}
+
 fn render_config(
     port: u16,
     processes: usize,

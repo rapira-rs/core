@@ -10,13 +10,13 @@ mod log;
 mod pool;
 mod supervisor;
 
-pub use http::{HttpSettings, UnsafeFieldNames, UploadSettings};
+pub use http::{HttpSettings, StaticSettings, UnsafeFieldNames, UploadSettings};
 pub use listen::{Listen, ListenParseError};
 pub use log::{LogFormat, LogLevel, LogSettings};
 pub use pool::{PoolSettings, RunMode, Scaling};
 pub use supervisor::SupervisorSettings;
 
-use http::{HttpSection, resolve_uploads};
+use http::{HttpSection, resolve_static, resolve_uploads};
 use log::{LogSection, resolve_log};
 use pool::{PoolSection, resolve_pool};
 use supervisor::{SupervisorSection, resolve_supervisor};
@@ -117,6 +117,11 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         None => None,
     };
 
+    let static_files = match file.http.r#static {
+        Some(section) => Some(resolve_static(section, config_dir)?),
+        None => None,
+    };
+
     let pool = resolve_pool(file.pool, &cli, config_dir, "pool")?;
     if file.http.uploads.is_some() && pool.mode != RunMode::Dispatcher {
         bail!(
@@ -142,6 +147,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
             unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
             uploads,
             sendfile_root,
+            static_files,
         },
         pool,
         supervisor,
@@ -284,6 +290,7 @@ mod tests {
         assert!(load_str("[log]\nbogus = 1\n").is_err());
         assert!(load_str("[log]\nlevel = \"verbose\"\n").is_err());
         assert!(load_str("[log]\nformat = \"pretty\"\n").is_err());
+        assert!(load_str("[http.static]\nbogus = 1\n").is_err());
     }
 
     #[test]
@@ -550,6 +557,73 @@ mod tests {
             s.supervisor.pidfile.as_deref(),
             Some(Path::new("/etc/rapira/rapira.pid"))
         );
+    }
+
+    /// The root resolves config-relative like every other path key; forbid defaults to the PHP source guard.
+    #[test]
+    fn http_static_resolves_with_defaults() {
+        let file =
+            load_str("[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"public\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let st = s.http.static_files.expect("section present");
+        assert_eq!(st.root, Path::new("/w/public"));
+        assert_eq!(st.forbid, vec![".php".to_owned()]);
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        assert!(s.http.static_files.is_none());
+    }
+
+    #[test]
+    fn http_static_requires_root() {
+        for toml in [
+            "[pool]\nentrypoint = \"a.php\"\n[http.static]\n",
+            "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"\"\n",
+        ] {
+            let err = merge(
+                load_str(toml).unwrap(),
+                Overrides::default(),
+                Some(Path::new("/w")),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("http.static.root"), "{err}");
+        }
+    }
+
+    /// Extensions compare case-insensitively at request time, so entries normalize to lowercase here.
+    #[test]
+    fn http_static_forbid_validates_and_lowercases() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"p\"\nforbid = [\".PHP\", \".Phtml\"]\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let st = s.http.static_files.expect("section present");
+        assert_eq!(st.forbid, vec![".php".to_owned(), ".phtml".to_owned()]);
+
+        let file =
+            load_str("[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"p\"\nforbid = []\n")
+                .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        assert!(
+            s.http
+                .static_files
+                .expect("section present")
+                .forbid
+                .is_empty()
+        );
+
+        for entry in ["php", ""] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"p\"\nforbid = [\"{entry}\"]\n"
+            ))
+            .unwrap();
+            let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("http.static.forbid"), "{entry}: {err}");
+        }
     }
 
     /// The filter string is assembled from these keys, so a key carrying filter syntax would inject directives (`"php=trace,tokio" = "debug"` reads as two).

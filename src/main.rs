@@ -1,5 +1,5 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use extension_api::{ListenAddr, PrepareCtx};
+use extension_api::{ListenAddr, Middleware, PrepareCtx};
 use php_sys::{Mode, Rapira};
 use rapira_config::{Listen, Overrides, RunMode, Scaling, Settings, UnsafeFieldNames};
 use rapira_runtime::ExtensionRuntime;
@@ -8,6 +8,7 @@ use rapira_tower::{Config as HttpConfig, HttpServer, UnsafeFieldNames as HttpUns
 use std::{
     fs::{OpenOptions, read_dir, remove_file},
     path::PathBuf,
+    sync::Arc,
 };
 use tracing::info;
 
@@ -119,6 +120,21 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             .unwrap_or_else(|| PathBuf::from("/")),
     );
 
+    // static files --------------------------------------------------
+    let mut middleware: Vec<Arc<dyn Middleware>> = Vec::new();
+    if let Some(st) = &settings.http.static_files {
+        anyhow::ensure!(
+            st.root.is_dir(),
+            "http.static.root {} is not a directory",
+            st.root.display()
+        );
+        middleware.push(Arc::new(rapira_static_files::StaticFiles::new(
+            st.root.clone(),
+            st.forbid.clone(),
+        )));
+    }
+    //----------------------------------------------------------------
+
     // parse HTTP configuration -------------------------------------
     let http_cfg: HttpConfig = HttpConfig {
         listen: match settings.http.listen {
@@ -136,7 +152,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         },
         superglobals: !matches!(mode, Mode::Dispatcher(_)),
         keepalive_timeout: settings.http.keepalive_timeout,
-        middleware: Vec::new(),
+        middleware,
     };
     //----------------------------------------------------------------
 

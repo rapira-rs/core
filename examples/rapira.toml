@@ -20,6 +20,11 @@ listen = "127.0.0.1:8000"    # host:port, ":port" (all interfaces), or "unix:/pa
 # [http.sendfile]
 # root = "public"            # sendFile() containment; defaults to the entrypoint's directory
 
+# Serve files from a directory before PHP; a miss falls through to PHP.
+# [http.static]
+# root = "public"            # required; relative paths resolve against this file's directory
+# forbid = [".php"]          # extensions never served; dotfiles always fall through to PHP
+
 [pool]
 entrypoint = "dispatcher.php" # relative paths resolve against this file's directory
 mode = "dispatcher"           # "classic" | "worker" | "dispatcher" (the default)

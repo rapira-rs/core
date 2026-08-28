@@ -164,8 +164,6 @@ where
         received_at,
     };
 
-    // future middleware are here -----------
-    // TODO: so/dylib vs code?
     if shared.chain.is_empty() {
         return serve_php(
             &shared,

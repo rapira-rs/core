@@ -12,6 +12,8 @@ Connections are served by hyper's http1 builder. Each request runs through admis
 
 `Config.middleware` holds an `extension_api::Middleware` chain, outermost first, shared by every protocol this plugin serves. A middleware sees `http::Request<Body>`/`http::Response<Body>` with `Protocol` and `Peer` in the request extensions, and either calls `next.run(req)` or answers on its own. Admission checks run before the chain, so middleware never sees a request that was refused at the door.
 
+Built-in middleware lives under `crates/middleware`, one crate per middleware. `rapira_static_files::StaticFiles` serves files from `[http.static].root` and hands every miss to PHP. Only file hits answer: a directory path without a trailing slash falls through as well.
+
 ## Request handling
 
 - The request body is buffered before dispatch and capped by `max_body_size`: a declared `Content-Length` over the cap answers 413 before the body is read, an over-long streamed body answers 413 when the cap is crossed.
