@@ -19,5 +19,5 @@ By submitting this pull request, I confirm that my contribution is made under th
 - [ ] The reason for this PR is clearly provided (issue no. or explanation).
 - [ ] The description of changes is clear and encompassing.
 - [ ] Any required documentation changes (code and docs) are included in this PR.
-- [ ] Any user-facing changes are mentioned in `CHANGELOG.md`.
+- [ ] The PR title is a conventional commit (`feat:`, `fix:`, `chore:`, ...), issue no. at the end.
 - [ ] All added/changed functionality is tested.

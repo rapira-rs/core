@@ -69,4 +69,6 @@ Sign off your commits (`git commit -s`) and fill in the PR template. Bug reports
 
 ## Releases
 
-Pushing a `v*` tag triggers the release pipeline: it verifies the tag matches `Cargo.toml`'s version, builds Linux x86_64/aarch64 and macOS aarch64 artifacts for PHP 8.4 and 8.5, and publishes tarballs, `.deb`/`.rpm` packages and checksums to GitHub Releases.
+Releases run through [release-please](https://github.com/googleapis/release-please). Every merge to `main` updates a release pull request with the next version and the changelog. When a maintainer merges that PR, the pipeline tags the release, builds Linux x86_64/aarch64 and macOS aarch64 artifacts for PHP 8.4 and 8.5, builds the docker images, and publishes tarballs, `.deb`/`.rpm` packages and checksums to GitHub Releases. Each merge to `main` also refreshes the rolling `nightly` prerelease with tarballs and the `nightly-php*` docker tags.
+
+The version bump and the changelog come from the titles of the commits on `main`. A squash merge turns the PR title into that commit title, so PR titles follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/): `feat:` for a minor bump, `fix:` for a patch, `!` or a `BREAKING CHANGE:` footer for a breaking change (a minor bump while the version is below 1.0.0). Put the issue reference at the end, `fix: register shutdown functions once (#84)`. A `[#84]:` prefix hides the commit from release-please, which needs the type at the start of the title.

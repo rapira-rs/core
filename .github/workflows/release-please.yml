@@ -1,0 +1,75 @@
+name: Release
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+# One release run at a time. A push that lands during a release build waits for it.
+concurrency:
+    group: release-please
+    cancel-in-progress: false
+
+jobs:
+    release-please:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+            contents: write
+            pull-requests: write
+            # release-please creates the autorelease labels through the issues API.
+            issues: write
+        outputs:
+            release_created: ${{ steps.rp.outputs.release_created }}
+            tag_name: ${{ steps.rp.outputs.tag_name }}
+            version: ${{ steps.rp.outputs.version }}
+        steps:
+            # The config file is only read when release-type is absent from the inputs.
+            # https://github.com/googleapis/release-please-action/blob/v5.0.0/src/index.ts
+            - id: rp
+              uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+              with:
+                  config-file: release-please-config.json
+                  manifest-file: .release-please-manifest.json
+
+    # The tag and the draft release come from the default GITHUB_TOKEN, which fires no
+    # other workflows, so the builds chain here through workflow_call.
+    # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow
+    binaries:
+        needs: release-please
+        if: needs.release-please.outputs.release_created == 'true'
+        permissions:
+            contents: write
+        uses: ./.github/workflows/build-binaries.yml
+        with:
+            ref: ${{ needs.release-please.outputs.tag_name }}
+            version: ${{ needs.release-please.outputs.version }}
+            upload_to: ${{ needs.release-please.outputs.tag_name }}
+
+    images:
+        needs: release-please
+        if: needs.release-please.outputs.release_created == 'true'
+        permissions:
+            contents: read
+            packages: write
+        uses: ./.github/workflows/docker.yml
+        with:
+            ref: ${{ needs.release-please.outputs.tag_name }}
+            version: ${{ needs.release-please.outputs.version }}
+
+    # The release stays a draft until every asset is attached.
+    publish:
+        needs: [release-please, binaries, images]
+        if: needs.release-please.outputs.release_created == 'true'
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        permissions:
+            contents: write
+        env:
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
+            TAG: ${{ needs.release-please.outputs.tag_name }}
+        steps:
+            - run: gh release edit "$TAG" --draft=false --latest

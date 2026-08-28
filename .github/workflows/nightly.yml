@@ -27,6 +27,7 @@ jobs:
         outputs:
             version: ${{ steps.v.outputs.version }}
             sha: ${{ steps.v.outputs.sha }}
+            release_commit: ${{ steps.v.outputs.release_commit }}
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
               with:
@@ -35,12 +36,17 @@ jobs:
             - id: v
               env:
                   SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
                   set -euo pipefail
-                  CARGO_VER=$(awk -F'"' '/^\[workspace\.package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
-                  test -n "$CARGO_VER"
+                  CARGO_VER=$(jq -er '.["."]' .release-please-manifest.json)
                   echo "version=${CARGO_VER}-nightly.${SHA:0:7}" >> "$GITHUB_OUTPUT"
                   echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+                  # A commit that already carries a release tag is built by release-please.yml.
+                  TAGGED=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" --jq '.[].object.sha')
+                  if grep -qx "$SHA" <<< "$TAGGED"; then
+                      echo "release_commit=true" >> "$GITHUB_OUTPUT"
+                  fi
 
     build:
         needs: guard
@@ -152,3 +158,18 @@ jobs:
                       gh api --silent -X DELETE "${API}/${id}" || { echo "::warning::failed to delete ${id} (${build})"; continue; }
                       echo "deleted ${id} (${build}, ${created})"
                   done < candidates.tsv
+
+    # Independent of the docker chain: a failed native build does not block the
+    # docker nightlies, and the reverse holds.
+    binaries:
+        needs: guard
+        if: needs.guard.outputs.release_commit != 'true'
+        permissions:
+            contents: write
+        uses: ./.github/workflows/build-binaries.yml
+        with:
+            ref: ${{ needs.guard.outputs.sha }}
+            version: ${{ needs.guard.outputs.version }}
+            packages: false
+            upload_to: nightly
+            rolling: true
