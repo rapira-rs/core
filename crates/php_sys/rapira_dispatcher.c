@@ -3,6 +3,7 @@
 #include "wrapper.h"
 #include "zend.h"
 #include "zend_API.h"
+#include "zend_enum.h"
 #include "zend_exceptions.h"
 
 // rust glue; the verbs throw from Rust and report false with the throw pending
@@ -24,6 +25,27 @@ ZEND_FUNCTION(Rapira_get_version) {
     size_t len = 0;
     const char *version = rapira_rs_version(&len);
     RETURN_STRINGL(version, len);
+}
+
+// rapira_mode is set once before the PHP thread starts (start.rs), so the case is stable for the process
+ZEND_FUNCTION(Rapira_get_mode) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    const char *name;
+    switch (rapira_mode) {
+    case RAPIRA_MODE_WORKER:
+        name = "Worker";
+        break;
+    case RAPIRA_MODE_DISPATCHER:
+        name = "Dispatcher";
+        break;
+    default:
+        name = "Classic";
+        break;
+    }
+
+    // the case object belongs to the per-request class constant; the copy takes a reference
+    RETURN_OBJ_COPY(zend_enum_get_case_cstr(rapira_ce_mode, name));
 }
 
 ZEND_FUNCTION(Rapira_get_dispatcher) {

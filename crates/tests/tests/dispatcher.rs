@@ -1,7 +1,7 @@
 use php_sys::{Mode, Rapira};
 use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 
-/// Outside dispatcher mode the call throws `NotInDispatcherModeError`, catchable by its own name and by its stock parent.
+/// Outside dispatcher mode the call throws `NoDispatcherError`, catchable by its own name and by its stock parent.
 #[test]
 fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -17,7 +17,7 @@ fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
         "every throw in the script must be caught (body: {body:?})"
     );
     for line in [
-        "class: Rapira\\Exception\\NotInDispatcherModeError",
+        "class: Rapira\\Exception\\NoDispatcherError",
         "rapira: yes",
         "timeout-as-runtime: yes",
         "done",

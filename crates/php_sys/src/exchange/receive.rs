@@ -125,7 +125,7 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
     guard(false, || unsafe {
         if crate::rapira_mode != RAPIRA_MODE_DISPATCHER as c_int {
             zend::throw_exception(
-                rapira_ce_not_in_dispatcher_mode_error,
+                rapira_ce_no_dispatcher_error,
                 c"nothing dispatches work to this process outside dispatcher mode",
             );
             return false;

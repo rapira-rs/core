@@ -18,7 +18,7 @@ bind! {
     rapira_ce_http_head_already_written_error, rapira_ce_internal_http_exchange,
     rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,
     rapira_ce_timeout_exception, rapira_ce_closed_exception,
-    rapira_ce_not_in_dispatcher_mode_error,
+    rapira_ce_no_dispatcher_error,
     zend_argument_value_error, zend_argument_type_error,
     rapira_ce_work_discarded_exception, rapira_ce_http_content_length_exceeded_error,
     rapira_ce_http_head_not_written_error, rapira_ce_http_file_not_sendable_exception,

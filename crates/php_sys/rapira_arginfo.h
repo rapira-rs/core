@@ -1,7 +1,10 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 568157ea008b5dacec069af49c3838733cfca13a */
+ * Stub hash: 4c5e1c45335237cc2df3d11d2bc9b78ccf66b0d9 */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_finish_request, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_Rapira_get_mode, 0, 0, Rapira\\Mode, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_Rapira_get_dispatcher, 0, 0, Rapira\\Dispatcher, 0)
@@ -54,6 +57,7 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_UnixAddress___construct, 0, 0, 1)
 ZEND_END_ARG_INFO()
 
 ZEND_FUNCTION(rapira_finish_request);
+ZEND_FUNCTION(Rapira_get_mode);
 ZEND_FUNCTION(Rapira_get_dispatcher);
 ZEND_FUNCTION(Rapira_handle_request);
 ZEND_FUNCTION(Rapira_get_version);
@@ -63,6 +67,7 @@ ZEND_METHOD(Rapira_UnixAddress, __construct);
 
 static const zend_function_entry ext_functions[] = {
 	ZEND_FE(rapira_finish_request, arginfo_rapira_finish_request)
+	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "get_mode"), zif_Rapira_get_mode, arginfo_Rapira_get_mode, 0, NULL, NULL)
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "get_dispatcher"), zif_Rapira_get_dispatcher, arginfo_Rapira_get_dispatcher, 0, NULL, NULL)
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "handle_request"), zif_Rapira_handle_request, arginfo_Rapira_handle_request, 0, NULL, NULL)
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "get_version"), zif_Rapira_get_version, arginfo_Rapira_get_version, 0, NULL, NULL)
@@ -114,6 +119,19 @@ static zend_class_entry *register_class_Rapira_LogLevel(void)
 	zend_enum_add_case_cstr(class_entry, "Debug", NULL);
 
 	zend_enum_add_case_cstr(class_entry, "Trace", NULL);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Rapira_Mode(void)
+{
+	zend_class_entry *class_entry = zend_register_internal_enum("Rapira\\Mode", IS_UNDEF, NULL);
+
+	zend_enum_add_case_cstr(class_entry, "Classic", NULL);
+
+	zend_enum_add_case_cstr(class_entry, "Worker", NULL);
+
+	zend_enum_add_case_cstr(class_entry, "Dispatcher", NULL);
 
 	return class_entry;
 }

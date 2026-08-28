@@ -13,6 +13,7 @@
 #include "zend_types.h"
 
 zend_class_entry *rapira_ce_log_level;
+zend_class_entry *rapira_ce_mode;
 zend_class_entry *rapira_ce_work;
 zend_class_entry *rapira_ce_dispatcher_info;
 zend_class_entry *rapira_ce_dispatcher;
@@ -20,7 +21,7 @@ zend_class_entry *rapira_ce_dispatcher;
 zend_class_entry *rapira_ce_closed_exception;
 zend_class_entry *rapira_ce_timeout_exception;
 zend_class_entry *rapira_ce_work_discarded_exception;
-zend_class_entry *rapira_ce_not_in_dispatcher_mode_error;
+zend_class_entry *rapira_ce_no_dispatcher_error;
 zend_class_entry *rapira_ce_not_in_worker_mode_error;
 zend_class_entry *rapira_ce_already_finalized_error;
 
@@ -90,9 +91,9 @@ void rapira_register_classes(void) {
     rapira_ce_work_discarded_exception =
         register_class_Rapira_Exception_WorkDiscardedException(
             spl_ce_RuntimeException, throwable);
-    rapira_ce_not_in_dispatcher_mode_error =
-        register_class_Rapira_Exception_NotInDispatcherModeError(zend_ce_error,
-                                                                 throwable);
+    rapira_ce_no_dispatcher_error =
+        register_class_Rapira_Exception_NoDispatcherError(zend_ce_error,
+                                                          throwable);
     rapira_ce_not_in_worker_mode_error =
         register_class_Rapira_Exception_NotInWorkerModeError(zend_ce_error,
                                                              throwable);
@@ -101,6 +102,7 @@ void rapira_register_classes(void) {
                                                               throwable);
 
     rapira_ce_log_level = register_class_Rapira_LogLevel();
+    rapira_ce_mode = register_class_Rapira_Mode();
     rapira_ce_work = register_class_Rapira_Work();
     rapira_ce_dispatcher_info = register_class_Rapira_DispatcherInfo();
     rapira_ce_dispatcher = register_class_Rapira_Dispatcher();
