@@ -18,9 +18,10 @@ path = "src/main.rs"
 
 
 [workspace]
-# Every member is spelled out. release-please resolves each member string as
-# <member>/Cargo.toml, so a glob member finds no manifest and keeps a stale version.
-# https://github.com/googleapis/release-please/blob/main/src/strategies/rust.ts
+# Every member is spelled out and carries a literal version. release-please
+# resolves each member as <member>/Cargo.toml and rewrites its [package] version,
+# so a glob member or a version.workspace = true keeps a stale version.
+# https://github.com/googleapis/release-please/blob/v17.11.2/src/strategies/rust.ts#L64-L72
 members = [
     "crates/config",
     "crates/runtime",

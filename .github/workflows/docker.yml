@@ -12,6 +12,10 @@ on:
                 description: "Image version tag, without the v prefix"
                 type: string
                 required: true
+            alias:
+                description: "Extra moving alias prefix for the merged tags, such as nightly"
+                type: string
+                default: ""
     workflow_dispatch:
         inputs:
             ref:
@@ -92,23 +96,18 @@ jobs:
                   registry: ghcr.io
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
-            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-              with:
-                  ref: ${{ inputs.ref }}
-                  persist-credentials: false
+            # The release aliases (X.Y-phpN.M, phpN.M) are re-pointed by the publish
+            # job in release-please.yml after the release is published, so a failed
+            # release run cannot move them early. The alias input adds a caller-owned
+            # moving alias instead (nightly).
             - shell: bash
               env:
                   PHP: ${{ matrix.php }}
                   V: ${{ inputs.version }}
+                  ALIAS: ${{ inputs.alias }}
               run: |
                   set -euo pipefail
                   TAGS=(-t "$IMAGE:$V-php$PHP")
-                  # The moving aliases follow only the version the built source declares:
-                  # a manual dispatch with a test version cannot re-point them.
-                  MANIFEST=$(jq -er '.["."]' .release-please-manifest.json)
-                  case "$V" in
-                    *-*) ;;
-                    "$MANIFEST") TAGS+=(-t "$IMAGE:${V%.*}-php$PHP" -t "$IMAGE:php$PHP") ;;
-                  esac
+                  [ -z "$ALIAS" ] || TAGS+=(-t "$IMAGE:$ALIAS-php$PHP")
                   docker buildx imagetools create "${TAGS[@]}" \
                     "$IMAGE:$V-php$PHP-amd64" "$IMAGE:$V-php$PHP-arm64"
