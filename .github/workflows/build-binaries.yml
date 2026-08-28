@@ -1,8 +1,7 @@
 name: Build binaries
 # Reusable build for the stable release path (release-please.yml) and the nightly
-# path (nightly.yml). No concurrency group here: the jobs run inside the caller's
-# run, a group that matches the caller's is cancelled as a deadlock, and both
-# callers already serialize at their own workflow level.
+# path (nightly.yml). The jobs run inside the caller's run, under the caller's
+# concurrency group. A callee group that matches it is cancelled as a deadlock.
 on:
     workflow_call:
         inputs:
@@ -97,9 +96,9 @@ jobs:
     build:
         needs: prepare
         runs-on: ${{ matrix.runner }}
-        # Bounds the release-please concurrency group: the caller job cannot carry a
-        # timeout for a reusable workflow, so a wedged leg would hold the group for
-        # the 360-minute default and strand the release as a draft.
+        # A caller job cannot carry a timeout for a reusable workflow. Without one
+        # here a wedged leg holds the release-please concurrency group for the
+        # 360-minute default and strands the release as a draft.
         timeout-minutes: 90
         # Linux legs build inside rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the artifacts serve RHEL 9 as well as Ubuntu 22.04+/Debian 12, pinned to the multi-arch manifest-list digest; non-Linux legs leave `container` unset (empty expression = no container).
         container: ${{ matrix.container }}
@@ -375,8 +374,7 @@ jobs:
                       bash -ec "dnf install -yq /dist/$(basename "$rpm") && rapira --help"
                   done
 
-            # Keeps a dry run inspectable: without a target release the deb/rpm and
-            # checksums would otherwise end with the runner.
+            # A dry run keeps the deb/rpm and checksums as run artifacts.
             - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
               if: inputs.upload_to == ''
               with:
@@ -400,9 +398,9 @@ jobs:
               shell: bash
               run: gh release upload "$TAG" dist/* --clobber
 
-            # Runs after the upload so an existing rolling tag is never moved ahead of
-            # its assets. The initial release create above is the one point where the
-            # tag exists before them.
+            # Runs after the upload: an existing rolling tag never moves ahead of its
+            # assets. The first run's release create is the one case where the tag
+            # exists before them.
             - name: Move the rolling tag and drop old assets
               if: inputs.rolling
               shell: bash
@@ -417,9 +415,9 @@ jobs:
                   fi
                   gh release edit "$TAG" --prerelease --notes "Rolling build. Version $VERSION. Commit $SHA."
                   # A caller that combines rolling with packages puts nfpm names on the
-                  # rolling release, where the prerelease separator becomes ~ and then .
-                  # on upload, so names are compared as substrings with every separator
-                  # stripped.
+                  # rolling release. nfpm and the upload rewrite the prerelease separator
+                  # (0.7.0-x, 0.7.0~x, 0.7.0.x), so names are compared as substrings
+                  # with every separator stripped.
                   KEEP=$(tr -cd '[:alnum:]' <<< "$VERSION")
                   ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
                   # self-check: this run's uploads must pass the keep filter, otherwise the

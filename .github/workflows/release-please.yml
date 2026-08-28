@@ -20,6 +20,9 @@ jobs:
         permissions:
             contents: write
             pull-requests: write
+            # Upstream requires it: the autorelease labels go through the issues API.
+            # https://github.com/googleapis/release-please-action#workflow-permissions
+            issues: write
         outputs:
             release_created: ${{ steps.rp.outputs.release_created }}
             tag_name: ${{ steps.rp.outputs.tag_name }}
@@ -33,9 +36,12 @@ jobs:
                   config-file: release-please-config.json
                   manifest-file: .release-please-manifest.json
 
-    # The tag and the draft release come from the default GITHUB_TOKEN, which fires no
-    # other workflows, so the builds chain here through workflow_call.
+    # The tag and the draft release come from the default GITHUB_TOKEN, which fires
+    # no other workflows. The builds chain here through workflow_call.
     # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow
+    # If the action fails after it creates the tag, later runs report no release
+    # and the draft keeps no assets. Recovery: dispatch build-binaries and docker
+    # with the tag, then undraft and move the aliases by hand.
     binaries:
         needs: release-please
         if: needs.release-please.outputs.release_created == 'true'
