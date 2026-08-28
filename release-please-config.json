@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "rust",
+  "bump-minor-pre-major": true,
+  "include-component-in-tag": false,
+  "draft": true,
+  "force-tag-creation": true,
+  "pull-request-header": "Release pull request. Merge it to tag the release and to publish the artifacts.",
+  "packages": {
+    ".": {}
+  }
+}

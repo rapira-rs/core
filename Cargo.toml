@@ -1,10 +1,9 @@
 [workspace.package]
 edition = "2024"
-version = "0.7.0"
 
 [package]
 name = "rapira_core"
-version.workspace = true
+version = "0.7.0"
 edition.workspace = true
 description = "PHP application server: embeds NTS PHP via the embed SAPI and serves HTTP directly"
 homepage = "https://rapira.rs"
@@ -19,8 +18,10 @@ path = "src/main.rs"
 
 
 [workspace]
-# crates/* cannot stay a glob: it would match the plugins parent dir, which is
-# not a package. Top-level crates are explicit; plugins keep the glob.
+# Every member is spelled out and carries a literal version. release-please
+# resolves each member as <member>/Cargo.toml and rewrites its [package] version,
+# so a glob member or a version.workspace = true keeps a stale version.
+# https://github.com/googleapis/release-please/blob/v17.11.2/src/strategies/rust.ts#L64-L72
 members = [
     "crates/config",
     "crates/runtime",
@@ -29,7 +30,7 @@ members = [
     "crates/master",
     "crates/php_sys",
     "crates/scoreboard",
-    "crates/plugins/*",
+    "crates/plugins/tower",
 ]
 
 [workspace.dependencies]

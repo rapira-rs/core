@@ -1,13 +1,48 @@
-name: Release
+name: Build binaries
+# Reusable build for the stable release path (release-please.yml) and the nightly
+# path (nightly.yml). The jobs run inside the caller's run, under the caller's
+# concurrency group. A callee group that matches it is cancelled as a deadlock.
 on:
-    push:
-        tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
-    workflow_dispatch:
+    workflow_call:
         inputs:
-            publish:
-                description: "Create a draft GitHub release from this run"
+            ref:
+                description: "Tag or commit to build"
+                type: string
+                required: true
+            version:
+                description: "Version stem for the asset names, such as 0.8.0 or 0.7.0-nightly.abc1234"
+                type: string
+                required: true
+            packages:
+                description: "Build and validate the deb and rpm packages"
+                type: boolean
+                default: true
+            upload_to:
+                description: "Release tag that gets the assets. Empty keeps them as run artifacts."
+                type: string
+                default: ""
+            rolling:
+                description: "Move the upload_to tag to the built commit and drop assets of older builds. The caller passes a commit sha as ref."
                 type: boolean
                 default: false
+    workflow_dispatch:
+        inputs:
+            ref:
+                description: "Tag or commit to build"
+                type: string
+                default: main
+            version:
+                description: "Version stem for the asset names, such as 0.8.0"
+                type: string
+                required: true
+            packages:
+                description: "Build and validate the deb and rpm packages"
+                type: boolean
+                default: true
+            upload_to:
+                description: "Release tag that gets the assets. Empty keeps them as run artifacts."
+                type: string
+                default: ""
             php_84:
                 description: "Override PHP 8.4 patch version (blank = latest)"
                 type: string
@@ -20,37 +55,51 @@ on:
 permissions:
     contents: read
 
-concurrency:
-    group: release-${{ github.ref }}
-    cancel-in-progress: false
-
 env:
     CARGO_TERM_COLOR: always
 
 jobs:
-    # Separate job so a tag that disagrees with Cargo.toml fails before the six expensive builds.
-    guard:
+    # One resolve per run: the legs must not split across a php.net patch release
+    # that lands while the matrix runs.
+    prepare:
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         outputs:
-            version: ${{ steps.v.outputs.version }}
+            php_84: ${{ steps.php.outputs.php_84 }}
+            php_85: ${{ steps.php.outputs.php_85 }}
         steps:
-            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-              with: { persist-credentials: false }
-            - id: v
+            - id: php
               shell: bash
+              env:
+                  PHP_84_OVERRIDE: ${{ inputs.php_84 }}
+                  PHP_85_OVERRIDE: ${{ inputs.php_85 }}
               run: |
                   set -euo pipefail
-                  CARGO_VER=$(awk -F'"' '/^\[workspace\.package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
-                  test -n "$CARGO_VER"
-                  if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-                    TAG_VER="${GITHUB_REF#refs/tags/v}"
-                    [[ "$TAG_VER" == "$CARGO_VER" ]] || { echo "::error::tag v$TAG_VER != Cargo.toml version $CARGO_VER"; exit 1; }
-                  fi
-                  echo "version=$CARGO_VER" >> "$GITHUB_OUTPUT"
+                  resolve() {
+                      local branch="$1" override="$2"
+                      if [ -n "$override" ]; then
+                          if [[ ! "$override" =~ ^8\.[45]\.[0-9]+$ ]] || [ "${override%.*}" != "$branch" ]; then
+                              echo "::error::invalid PHP override '$override' for branch $branch" >&2; exit 1
+                          fi
+                          echo "$override"
+                      else
+                          curl -fsSL "https://www.php.net/releases/index.php?json&version=$branch" \
+                            | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])'
+                      fi
+                  }
+                  PHP_84=$(resolve 8.4 "$PHP_84_OVERRIDE")
+                  PHP_85=$(resolve 8.5 "$PHP_85_OVERRIDE")
+                  echo "php_84=$PHP_84" >> "$GITHUB_OUTPUT"
+                  echo "php_85=$PHP_85" >> "$GITHUB_OUTPUT"
+                  echo "PHP $PHP_84 / $PHP_85"
 
     build:
-        needs: guard
+        needs: prepare
         runs-on: ${{ matrix.runner }}
+        # A caller job cannot carry a timeout for a reusable workflow. Without one
+        # here a wedged leg holds the release-please concurrency group for the
+        # 360-minute default and strands the release as a draft.
+        timeout-minutes: 90
         # Linux legs build inside rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the artifacts serve RHEL 9 as well as Ubuntu 22.04+/Debian 12, pinned to the multi-arch manifest-list digest; non-Linux legs leave `container` unset (empty expression = no container).
         container: ${{ matrix.container }}
         permissions:
@@ -67,7 +116,6 @@ jobs:
                           arch: x86_64,
                           nfpm_arch: amd64,
                           php_branch: "8.4",
-                          provision: source-unix,
                       }
                     - {
                           name: linux-x86_64-php8.5,
@@ -77,7 +125,6 @@ jobs:
                           arch: x86_64,
                           nfpm_arch: amd64,
                           php_branch: "8.5",
-                          provision: source-unix,
                       }
                     - {
                           name: linux-aarch64-php8.4,
@@ -87,7 +134,6 @@ jobs:
                           arch: aarch64,
                           nfpm_arch: arm64,
                           php_branch: "8.4",
-                          provision: source-unix,
                       }
                     - {
                           name: linux-aarch64-php8.5,
@@ -97,7 +143,6 @@ jobs:
                           arch: aarch64,
                           nfpm_arch: arm64,
                           php_branch: "8.5",
-                          provision: source-unix,
                       }
                     - {
                           name: macos-aarch64-php8.4,
@@ -105,7 +150,6 @@ jobs:
                           target_os: macos,
                           arch: aarch64,
                           php_branch: "8.4",
-                          provision: source-unix,
                       }
                     - {
                           name: macos-aarch64-php8.5,
@@ -113,72 +157,48 @@ jobs:
                           target_os: macos,
                           arch: aarch64,
                           php_branch: "8.5",
-                          provision: source-unix,
                       }
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
-            VERSION: ${{ needs.guard.outputs.version }}
-            STEM: rapira-v${{ needs.guard.outputs.version }}-php${{ matrix.php_branch }}-${{ matrix.target_os }}-${{ matrix.arch }}
+            VERSION: ${{ inputs.version }}
+            STEM: rapira-v${{ inputs.version }}-php${{ matrix.php_branch }}-${{ matrix.target_os }}-${{ matrix.arch }}
+            PHP_FULL: ${{ matrix.php_branch == '8.4' && needs.prepare.outputs.php_84 || needs.prepare.outputs.php_85 }}
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-              with: { persist-credentials: false }
+              with:
+                  ref: ${{ inputs.ref }}
+                  persist-credentials: false
 
-            # Runs before the resolve step because the rocky container has no python3/curl; oniguruma-devel only exists in the CRB repo.
+            # oniguruma-devel only exists in the CRB repo.
             - name: Install build deps (Linux container)
-              if: matrix.provision == 'source-unix' && runner.os == 'Linux'
+              if: runner.os == 'Linux'
               run: |
                   dnf -y install dnf-plugins-core
                   dnf config-manager --set-enabled crb
                   dnf -y install \
-                    gcc gcc-c++ make git tar gzip xz findutils python3 \
+                    gcc gcc-c++ make git tar gzip xz findutils \
                     pkgconf-pkg-config clang-devel llvm-devel \
                     openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel libffi-devel gettext-devel
 
-            - name: Resolve PHP patch version
-              id: php
-              shell: bash
-              env:
-                  PHP_84_OVERRIDE: ${{ inputs.php_84 }}
-                  PHP_85_OVERRIDE: ${{ inputs.php_85 }}
-              run: |
-                  set -euo pipefail
-                  override=""
-                  [ "${{ matrix.php_branch }}" = "8.4" ] && override="$PHP_84_OVERRIDE"
-                  [ "${{ matrix.php_branch }}" = "8.5" ] && override="$PHP_85_OVERRIDE"
-                  if [ -n "$override" ]; then
-                    if [[ ! "$override" =~ ^8\.[45]\.[0-9]+$ ]] || [ "${override%.*}" != "${{ matrix.php_branch }}" ]; then
-                      echo "::error::invalid PHP override '$override' for branch ${{ matrix.php_branch }}"; exit 1
-                    fi
-                    FULL="$override"
-                    echo "overridden=true" >> "$GITHUB_OUTPUT"
-                  else
-                    FULL=$(curl -fsSL "https://www.php.net/releases/index.php?json&version=${{ matrix.php_branch }}" \
-                            | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])')
-                    echo "overridden=false" >> "$GITHUB_OUTPUT"
-                  fi
-                  echo "full=$FULL" >> "$GITHUB_OUTPUT"
-                  echo "PHP $FULL"
-
             - name: Install build deps (macOS)
-              if: matrix.provision == 'source-unix' && runner.os == 'macOS'
+              if: runner.os == 'macOS'
               run: brew install pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext
 
             # Split restore/save (as master.yml): the PHP build survives later failures.
             - name: Restore PHP embed runtime
               id: phpcache
-              if: matrix.provision == 'source-unix'
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('.github/php-configure-flags.txt') }}-v2
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt') }}-v2
 
             - name: Build PHP embed from release tarball (Unix)
-              if: matrix.provision == 'source-unix' && steps.phpcache.outputs.cache-hit != 'true'
+              if: steps.phpcache.outputs.cache-hit != 'true'
               shell: bash
               run: |
                   set -euo pipefail
-                  curl -fsSL "https://www.php.net/distributions/php-${{ steps.php.outputs.full }}.tar.gz" -o php.tar.gz
-                  tar xf php.tar.gz && cd "php-${{ steps.php.outputs.full }}"
+                  curl -fsSL "https://www.php.net/distributions/php-${PHP_FULL}.tar.gz" -o php.tar.gz
+                  tar xf php.tar.gz && cd "php-${PHP_FULL}"
                   export CFLAGS="-O2"
                   EXTRA=""
                   if [ "$RUNNER_OS" = "macOS" ]; then
@@ -190,11 +210,11 @@ jobs:
                   make install
 
             - name: Save PHP embed runtime
-              if: matrix.provision == 'source-unix' && steps.phpcache.outputs.cache-hit != 'true'
+              if: steps.phpcache.outputs.cache-hit != 'true'
               uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('.github/php-configure-flags.txt') }}-v2
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt') }}-v2
 
             - name: Expose PHP + rpath (Linux)
               if: runner.os == 'Linux'
@@ -225,7 +245,7 @@ jobs:
                   ROOT="dist/$STEM"; mkdir -p "$ROOT/bin" "$ROOT/lib/rapira" "$ROOT/share/php"
                   cp target/release/rapira "$ROOT/bin/rapira"
                   cp README.md LICENSE "$ROOT/"
-                  echo "${{ steps.php.outputs.full }}" > "$ROOT/share/php/PHP_VERSION.txt"
+                  echo "$PHP_FULL" > "$ROOT/share/php/PHP_VERSION.txt"
                   if [ "$RUNNER_OS" = "Linux" ]; then
                     LP=$(find "$PHP_PREFIX" -name 'libphp*.so' | head -1)
                     cp "$LP" "$ROOT/lib/rapira/libphp.so"
@@ -261,7 +281,7 @@ jobs:
                   tar czf "$STEM.tar.gz" "$STEM"
 
             - name: Stage pkgroot for nFPM (Linux)
-              if: runner.os == 'Linux'
+              if: runner.os == 'Linux' && inputs.packages
               shell: bash
               run: |
                   set -euo pipefail
@@ -279,27 +299,43 @@ jobs:
                   if-no-files-found: error
                   retention-days: 7
 
-    release:
-        needs: [guard, build]
+    package:
+        needs: build
         runs-on: ubuntu-latest
+        timeout-minutes: 30
         permissions:
             contents: write
         env:
-            VERSION: ${{ needs.guard.outputs.version }}
+            VERSION: ${{ inputs.version }}
+            TAG: ${{ inputs.upload_to }}
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
             NFPM_VERSION: "2.47.0"
             NFPM_SHA256: "3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97"
         steps:
+            # Only nfpm reads the working tree here.
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-              with: { persist-credentials: false }
+              if: inputs.packages
+              with:
+                  ref: ${{ inputs.ref }}
+                  persist-credentials: false
+            # The pattern scopes the download to this workflow's build artifacts: a
+            # called workflow shares the caller's run artifact namespace.
             - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-              with: { path: incoming, merge-multiple: true }
+              with: { path: incoming, pattern: "art-*", merge-multiple: true }
 
-            - name: Build deb/rpm + checksums
+            - name: Collect tarballs
               shell: bash
               run: |
                   set -euo pipefail
                   mkdir -p dist
                   cp incoming/*.tar.gz dist/
+
+            - name: Build deb/rpm
+              if: inputs.packages
+              shell: bash
+              run: |
+                  set -euo pipefail
                   cp -r incoming/pkgroot-* dist/
                   curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" -o /tmp/nfpm.deb
                   echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c -
@@ -315,11 +351,17 @@ jobs:
                     done
                   done
                   rm -rf dist/pkgroot-*
+
+            - name: Checksums
+              shell: bash
+              run: |
+                  set -euo pipefail
                   ( cd dist && sha256sum rapira-* > "rapira-v${VERSION}-SHA256SUMS.txt" )
                   ls -l dist
 
             # Installing every amd64 package in a real container catches wrong dependency names and broken RUNPATH before anything is published; arm64 is skipped (no qemu).
             - name: Validate packages (amd64)
+              if: inputs.packages
               shell: bash
               run: |
                   set -euo pipefail
@@ -332,17 +374,57 @@ jobs:
                       bash -ec "dnf install -yq /dist/$(basename "$rpm") && rapira --help"
                   done
 
-            - name: Publish GitHub release
-              if: startsWith(github.ref, 'refs/tags/') || inputs.publish
-              uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+            # A dry run keeps the deb/rpm and checksums as run artifacts.
+            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              if: inputs.upload_to == ''
               with:
-                  tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', env.VERSION) }}
-                  draft: ${{ !startsWith(github.ref, 'refs/tags/') }}
-                  prerelease: ${{ contains(github.ref_name, '-') }}
-                  generate_release_notes: true
-                  fail_on_unmatched_files: true
-                  files: |
-                      dist/*.tar.gz
-                      dist/*.deb
-                      dist/*.rpm
-                      dist/*SHA256SUMS.txt
+                  name: dist
+                  path: dist/*
+                  if-no-files-found: error
+                  retention-days: 7
+
+            - name: Prepare the rolling release
+              if: inputs.rolling
+              shell: bash
+              env:
+                  SHA: ${{ inputs.ref }}
+              run: |
+                  set -euo pipefail
+                  gh release view "$TAG" >/dev/null \
+                    || gh release create "$TAG" --prerelease --target "$SHA" --title "$TAG" --notes "Rolling build."
+
+            - name: Upload assets
+              if: inputs.upload_to != ''
+              shell: bash
+              run: gh release upload "$TAG" dist/* --clobber
+
+            # Runs after the upload: an existing rolling tag never moves ahead of its
+            # assets. The first run's release create is the one case where the tag
+            # exists before them.
+            - name: Move the rolling tag and drop old assets
+              if: inputs.rolling
+              shell: bash
+              env:
+                  SHA: ${{ inputs.ref }}
+              run: |
+                  set -euo pipefail
+                  # gh release edit --target does not move an existing tag, the ref has to be forced.
+                  # https://docs.github.com/en/rest/git/refs#update-a-reference
+                  if ! gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$SHA" -F force=true >/dev/null; then
+                      gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
+                  fi
+                  gh release edit "$TAG" --prerelease --notes "Rolling build. Version $VERSION. Commit $SHA."
+                  # A caller that combines rolling with packages puts nfpm names on the
+                  # rolling release. nfpm and the upload rewrite the prerelease separator
+                  # (0.7.0-x, 0.7.0~x, 0.7.0.x), so names are compared as substrings
+                  # with every separator stripped.
+                  KEEP=$(tr -cd '[:alnum:]' <<< "$VERSION")
+                  ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+                  # self-check: this run's uploads must pass the keep filter, otherwise the
+                  # filter no longer matches the upload names and the prune would drop them
+                  tr -cd '[:alnum:]\n' <<< "$ASSETS" | grep -qF "$KEEP" \
+                    || { echo "::error::no asset matches $KEEP - the prune filter does not match the upload names"; exit 1; }
+                  while read -r name; do
+                      case "$(tr -cd '[:alnum:]' <<< "$name")" in *"$KEEP"*) continue ;; esac
+                      gh release delete-asset "$TAG" "$name" --yes
+                  done <<< "$ASSETS"

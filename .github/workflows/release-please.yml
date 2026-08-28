@@ -1,0 +1,108 @@
+name: Release
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+# One release run at a time. Pushes during a release build queue and only the newest
+# queued run survives; release-please rescans all commits, so nothing is lost.
+concurrency:
+    group: release-please
+    cancel-in-progress: false
+
+jobs:
+    release-please:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        permissions:
+            contents: write
+            pull-requests: write
+            # Upstream requires it: the autorelease labels go through the issues API.
+            # https://github.com/googleapis/release-please-action#workflow-permissions
+            issues: write
+        outputs:
+            release_created: ${{ steps.rp.outputs.release_created }}
+            tag_name: ${{ steps.rp.outputs.tag_name }}
+            version: ${{ steps.rp.outputs.version }}
+        steps:
+            # The config file is only read when release-type is absent from the inputs.
+            # https://github.com/googleapis/release-please-action/blob/v5.0.0/src/index.ts
+            - id: rp
+              uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+              with:
+                  config-file: release-please-config.json
+                  manifest-file: .release-please-manifest.json
+
+    # The tag and the draft release come from the default GITHUB_TOKEN, which fires
+    # no other workflows. The builds chain here through workflow_call.
+    # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow
+    # If the action fails after it creates the tag, later runs report no release
+    # and the draft keeps no assets. Recovery: dispatch build-binaries and docker
+    # with the tag, then undraft and move the aliases by hand.
+    binaries:
+        needs: release-please
+        if: needs.release-please.outputs.release_created == 'true'
+        permissions:
+            contents: write
+        uses: ./.github/workflows/build-binaries.yml
+        with:
+            ref: ${{ needs.release-please.outputs.tag_name }}
+            version: ${{ needs.release-please.outputs.version }}
+            upload_to: ${{ needs.release-please.outputs.tag_name }}
+
+    images:
+        needs: release-please
+        if: needs.release-please.outputs.release_created == 'true'
+        permissions:
+            contents: read
+            packages: write
+        uses: ./.github/workflows/docker.yml
+        with:
+            ref: ${{ needs.release-please.outputs.tag_name }}
+            version: ${{ needs.release-please.outputs.version }}
+
+    # The release stays a draft until the binaries and the images are published;
+    # the moving docker aliases follow after the release is out.
+    publish:
+        needs: [release-please, binaries, images]
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        permissions:
+            contents: write
+            packages: write
+        env:
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
+            TAG: ${{ needs.release-please.outputs.tag_name }}
+            IMAGE: ghcr.io/${{ github.repository }}
+            V: ${{ needs.release-please.outputs.version }}
+        steps:
+            # A prerelease version, from a Release-As footer, gets the prerelease
+            # mark and must not become the latest release.
+            - shell: bash
+              run: |
+                  set -euo pipefail
+                  case "$V" in
+                    *-*) gh release edit "$TAG" --draft=false --prerelease ;;
+                    *) gh release edit "$TAG" --draft=false --latest ;;
+                  esac
+            - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+            - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - name: Move the php minor aliases
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  # A prerelease version stays off the moving aliases.
+                  case "$V" in *-*) exit 0 ;; esac
+                  for PHP in 8.4 8.5; do
+                      docker buildx imagetools create \
+                        -t "$IMAGE:${V%.*}-php$PHP" -t "$IMAGE:php$PHP" \
+                        "$IMAGE:$V-php$PHP"
+                  done

@@ -1,9 +1,3 @@
-# CLAUDE.md - rapira/core
-
-PHP application server in Rust: rapira embeds PHP behind its own SAPI and a pre-fork process pool.
-A single-threaded master binds listeners and forks workers; each worker owns one PHP interpreter and one resident PHP thread.
-Extensions reach PHP through the `extension_api` `Php` bridge.
-
 ## All text:
 
 - Write all English using ASD-STE100 Simplified Technical English (STE).
@@ -22,7 +16,7 @@ Extensions reach PHP through the `extension_api` `Php` bridge.
 - MINIT runs once in the master pre-fork so opcache SHM is inherited. Workers exit rather than tear the module down.
 - Foreground only, no daemonize. Pidfile stays.
 - Allocator is mimalloc v3.
-- New host logic in Rust via ZEND_API. C only for ZPP shells, longjmp isolation, macro shims.
+- New host logic in Rust via ZEND_API if that is reasonable. C only for ZPP shells, longjmp isolation, macro shims.
 - Pre 1.0 - do not preserve backwards compatibility.
 
 ## Git
@@ -46,9 +40,10 @@ Extensions reach PHP through the `extension_api` `Php` bridge.
 
 - Unit tests in-crate under `#[cfg(test)]`. Integration and e2e in `crates/tests`, never the root package's `tests/`.
 - E2E lives in `crates/tests/tests/e2e/` behind the `e2e` feature, so a workspace run skips it.
-- Derive expected values from the RFC, php-src, or the decided requirement, and write them down before reading the implementation. Never backfill an assertion from observed output.
+- Derive expected values from the RFC, php-src, or the decided requirement, and write them down before reading the implementation.
+  Never backfill an assertion from observed output.
 - No trivial tests, such as asserting a field equals its default. Test edge cases, config precedence, derived values, validation failures.
-- New integration tests use worker or dispatcher mode, not classic.
+- New tests use worker or dispatcher mode, not classic.
 - Check PHP behavior against php-src or a short script rather than guessing.
 
 `make test` (test_nts then test_e2e), `make test_nts`, `make test_e2e`, `make coverage`, `make stubs`. All derived from `php-config`, no hardcoded distro paths.
@@ -63,6 +58,7 @@ Delete dead code and defenses against threat models that cannot occur. Already w
 
 ## Docs
 
+- For the docs the rule about 'All text' is applicable as well.
 - Pre-1.0: no migration framing, no old-to-new tables, no deprecation notes. Docs describe only the current design.
 - Never hard-wrap prose. One paragraph is one line, one bullet is one line.
 - No em-dashes or en-dashes. Use a dash or a colon.
@@ -81,4 +77,4 @@ Delete dead code and defenses against threat models that cannot occur. Already w
 - Judge the underlying case, not the proposed diff.
 - Smallest safe fix, local to the finding. No speculative hardening, no unrelated cleanup.
 - If you see other's bots comments: triage them, add to your review if they're relevant and resolve all threads.
-- Keep review comments (in GitHub, when you creating/editing response on the @claude review command or when review triggered automatically) short and technical.
+- Do not respond to the bots' comments.

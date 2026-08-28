@@ -40,7 +40,7 @@ All options, tarballs, checksums and what exactly is bundled: [rapira.rs/docs/in
 
 ```dockerfile
 FROM php:8.5-cli-trixie
-COPY --from=ghcr.io/rapira-rs/rapira:0.7.0-php8.5 / /
+COPY --from=ghcr.io/rapira-rs/rapira:php8.5 / /
 COPY . /app
 CMD ["rapira", "serve", "--listen", ":8000", "--mode", "classic", "/app/public/index.php"]
 ```
@@ -49,9 +49,9 @@ The image is `FROM scratch` - it holds `/usr/local/bin/rapira`, `/usr/local/lib/
 
 ```dockerfile
 FROM debian:trixie-slim
-COPY --from=ghcr.io/rapira-rs/rapira:0.7.0-php8.5 /usr/local/share/rapira/debian-packages.txt /tmp/
+COPY --from=ghcr.io/rapira-rs/rapira:php8.5 /usr/local/share/rapira/debian-packages.txt /tmp/
 RUN apt-get update && xargs -a /tmp/debian-packages.txt apt-get install -y --no-install-recommends
-COPY --from=ghcr.io/rapira-rs/rapira:0.7.0-php8.5 / /
+COPY --from=ghcr.io/rapira-rs/rapira:php8.5 / /
 ```
 
 Extensions are the consumer's to add - adding one rebuilds neither `libphp.so` nor rapira. On a PHP base, `RUN docker-php-ext-install …` is enough. On a base without PHP, build them in a stage on the matching minor and copy them across:
@@ -61,7 +61,7 @@ FROM php:8.5-cli-trixie AS ext
 RUN docker-php-ext-install -j"$(nproc)" pdo_mysql
 
 FROM debian:trixie-slim
-COPY --from=ghcr.io/rapira-rs/rapira:0.7.0-php8.5 / /
+COPY --from=ghcr.io/rapira-rs/rapira:php8.5 / /
 COPY --from=ext /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 COPY --from=ext /usr/local/etc/php/conf.d/ /usr/local/etc/php/conf.d/
 ```

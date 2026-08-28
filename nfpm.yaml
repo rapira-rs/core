@@ -1,5 +1,5 @@
 # deb/rpm packaging config for nFPM (https://nfpm.goreleaser.com).
-# Invoked once per {NFPM_ARCH} x {PHP_MINOR} combination by release.yml;
+# Invoked once per {NFPM_ARCH} x {PHP_MINOR} combination by build-binaries.yml;
 # nfpm expands ${VAR} from the environment. arch amd64/arm64 maps to
 # rpm x86_64/aarch64 automatically.
 name: "rapira-php${PHP_MINOR}"

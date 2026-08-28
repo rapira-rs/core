@@ -14,10 +14,6 @@ concurrency:
     group: nightly-${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'publish' || github.run_id }}
     cancel-in-progress: true
 
-# Same tag policy as docker.yml (every tag names its PHP minor): an immutable <version>-nightly.<shortsha>-phpN.M tag plus a moving nightly-phpN.M alias.
-env:
-    IMAGE: ghcr.io/${{ github.repository }}
-
 jobs:
     guard:
         # the branches filter alone also admits CI runs of fork PRs whose branch is named main, so the run must additionally come from a push event
@@ -27,6 +23,7 @@ jobs:
         outputs:
             version: ${{ steps.v.outputs.version }}
             sha: ${{ steps.v.outputs.sha }}
+            release_commit: ${{ steps.v.outputs.release_commit }}
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
               with:
@@ -35,88 +32,36 @@ jobs:
             - id: v
               env:
                   SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
                   set -euo pipefail
-                  CARGO_VER=$(awk -F'"' '/^\[workspace\.package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
-                  test -n "$CARGO_VER"
+                  CARGO_VER=$(jq -er '.["."]' .release-please-manifest.json)
                   echo "version=${CARGO_VER}-nightly.${SHA:0:7}" >> "$GITHUB_OUTPUT"
                   echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+                  # The binaries job skips a commit that already carries a release tag:
+                  # release-please.yml builds it. The docker jobs still run. The tag
+                  # for a release commit is v<manifest version>; an absent tag or an
+                  # API error counts as not a release commit.
+                  TAGGED=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${CARGO_VER}" --jq '.object.sha' 2>/dev/null || true)
+                  if [ "$TAGGED" = "$SHA" ]; then
+                      echo "release_commit=true" >> "$GITHUB_OUTPUT"
+                  fi
 
-    build:
+    # Same tag policy as docker.yml (every tag names its PHP minor): an immutable
+    # <version>-nightly.<shortsha>-phpN.M tag plus the moving nightly-phpN.M alias.
+    images:
         needs: guard
-        runs-on: ${{ matrix.runner }}
-        timeout-minutes: 45
         permissions:
             contents: read
             packages: write
-        strategy:
-            fail-fast: false
-            matrix:
-                php: ["8.4", "8.5"]
-                arch: [amd64, arm64]
-                include:
-                    - { arch: amd64, runner: ubuntu-latest }
-                    - { arch: arm64, runner: ubuntu-24.04-arm }
-                    - {
-                          php: "8.4",
-                          base: "php:8.4-cli-trixie@sha256:f78661b492226388a7057679cc731c3e43bc92ba66cd49a8cfe12374a56bee9f",
-                      }
-                    - {
-                          php: "8.5",
-                          base: "php:8.5-cli-trixie@sha256:54d82ff9be6bd198145e90c917fc9b2e24230b42e52def8deb3554baf61c451a",
-                      }
-        steps:
-            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-              with:
-                  ref: ${{ needs.guard.outputs.sha }}
-                  persist-credentials: false
-            - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-            - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-              with:
-                  registry: ghcr.io
-                  username: ${{ github.actor }}
-                  password: ${{ secrets.GITHUB_TOKEN }}
-            - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-              with:
-                  context: .
-                  target: runtime
-                  build-args: PHP_BASE=${{ matrix.base }}
-                  push: true
-                  tags: ${{ env.IMAGE }}:${{ needs.guard.outputs.version }}-php${{ matrix.php }}-${{ matrix.arch }}
-                  cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.arch }}
-                  cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.arch }}
-
-    merge:
-        needs: [guard, build]
-        runs-on: ubuntu-latest
-        timeout-minutes: 15
-        permissions:
-            contents: read
-            packages: write
-        strategy:
-            fail-fast: false
-            matrix:
-                php: ["8.4", "8.5"]
-        steps:
-            - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-            - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-              with:
-                  registry: ghcr.io
-                  username: ${{ github.actor }}
-                  password: ${{ secrets.GITHUB_TOKEN }}
-            - shell: bash
-              env:
-                  PHP: ${{ matrix.php }}
-                  V: ${{ needs.guard.outputs.version }}
-              run: |
-                  set -euo pipefail
-                  docker buildx imagetools create \
-                    -t "$IMAGE:$V-php$PHP" \
-                    -t "$IMAGE:nightly-php$PHP" \
-                    "$IMAGE:$V-php$PHP-amd64" "$IMAGE:$V-php$PHP-arm64"
+        uses: ./.github/workflows/docker.yml
+        with:
+            ref: ${{ needs.guard.outputs.sha }}
+            version: ${{ needs.guard.outputs.version }}
+            alias: nightly
 
     cleanup:
-        needs: [guard, merge]
+        needs: [guard, images]
         runs-on: ubuntu-latest
         timeout-minutes: 10
         permissions:
@@ -152,3 +97,18 @@ jobs:
                       gh api --silent -X DELETE "${API}/${id}" || { echo "::warning::failed to delete ${id} (${build})"; continue; }
                       echo "deleted ${id} (${build}, ${created})"
                   done < candidates.tsv
+
+    # Independent of the docker chain: a failed native build does not block the
+    # docker nightlies, and the reverse holds.
+    binaries:
+        needs: guard
+        if: needs.guard.outputs.release_commit != 'true'
+        permissions:
+            contents: write
+        uses: ./.github/workflows/build-binaries.yml
+        with:
+            ref: ${{ needs.guard.outputs.sha }}
+            version: ${{ needs.guard.outputs.version }}
+            packages: false
+            upload_to: nightly
+            rolling: true
