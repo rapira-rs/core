@@ -61,6 +61,7 @@ C sources (`crates/php_sys/*.c`, `*.h`) follow `.clang-format`.
 | `crates/api`           | the native extension contract                                                       |
 | `crates/scoreboard`    | shared per-worker counters                                                          |
 | `crates/plugins/tower` | the HTTP front                                                                      |
+| `crates/middleware`    | built-in HTTP middleware, one crate per middleware                                  |
 | `crates/tests`         | integration and e2e suites                                                          |
 
 ## Pull requests

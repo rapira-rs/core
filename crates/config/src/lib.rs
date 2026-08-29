@@ -10,13 +10,15 @@ mod log;
 mod pool;
 mod supervisor;
 
-pub use http::{HttpSettings, UnsafeFieldNames, UploadSettings};
+pub use http::{
+    HttpSettings, MiddlewareSettings, StaticSettings, UnsafeFieldNames, UploadSettings,
+};
 pub use listen::{Listen, ListenParseError};
 pub use log::{LogFormat, LogLevel, LogSettings};
 pub use pool::{PoolSettings, RunMode, Scaling};
 pub use supervisor::SupervisorSettings;
 
-use http::{HttpSection, resolve_uploads};
+use http::{HttpSection, resolve_middleware, resolve_static, resolve_uploads};
 use log::{LogSection, resolve_log};
 use pool::{PoolSection, resolve_pool};
 use supervisor::{SupervisorSection, resolve_supervisor};
@@ -117,6 +119,11 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         None => None,
     };
 
+    let static_files = match file.http.r#static {
+        Some(section) => Some(resolve_static(section, config_dir)?),
+        None => None,
+    };
+
     let pool = resolve_pool(file.pool, &cli, config_dir, "pool")?;
     if file.http.uploads.is_some() && pool.mode != RunMode::Dispatcher {
         bail!(
@@ -127,6 +134,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
     let uploads = resolve_uploads(file.http.uploads.unwrap_or_default(), config_dir)?;
     let supervisor = resolve_supervisor(file.supervisor, config_dir)?;
     let log = resolve_log(file.log)?;
+    let middleware = resolve_middleware(file.http.middleware, static_files)?;
 
     Ok(Settings {
         http: HttpSettings {
@@ -142,6 +150,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
             unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
             uploads,
             sendfile_root,
+            middleware,
         },
         pool,
         supervisor,
@@ -284,6 +293,7 @@ mod tests {
         assert!(load_str("[log]\nbogus = 1\n").is_err());
         assert!(load_str("[log]\nlevel = \"verbose\"\n").is_err());
         assert!(load_str("[log]\nformat = \"pretty\"\n").is_err());
+        assert!(load_str("[http.static]\nbogus = 1\n").is_err());
     }
 
     #[test]
@@ -550,6 +560,105 @@ mod tests {
             s.supervisor.pidfile.as_deref(),
             Some(Path::new("/etc/rapira/rapira.pid"))
         );
+    }
+
+    /// The root resolves config-relative like every other path key; forbid defaults to the PHP source guard.
+    #[test]
+    fn http_static_resolves_with_defaults() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"public\"\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        assert_eq!(st.root, Path::new("/w/public"));
+        assert_eq!(st.forbid, vec![".php".to_owned()]);
+
+        let file = load_str("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        assert!(s.http.middleware.is_empty());
+
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"/srv/pub\"\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        assert_eq!(st.root, Path::new("/srv/pub"));
+    }
+
+    /// The list is the activation switch: every configured section must be listed, every listed name must be known, configured, and unique.
+    #[test]
+    fn http_middleware_list_validates() {
+        for (toml, needle) in [
+            (
+                "[http]\nmiddleware = [\"staticc\"]\n",
+                "\"staticc\" is unknown",
+            ),
+            (
+                "[http]\nmiddleware = [\"static\"]\n",
+                "[http.static] is missing",
+            ),
+            (
+                "[http]\nmiddleware = [\"static\", \"static\"]\n[http.static]\nroot = \"p\"\n",
+                "twice",
+            ),
+            ("[http.static]\nroot = \"p\"\n", "does not list \"static\""),
+        ] {
+            let file = load_str(&format!("[pool]\nentrypoint = \"a.php\"\n{toml}")).unwrap();
+            let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(needle), "{toml}: {err}");
+        }
+    }
+
+    #[test]
+    fn http_static_requires_root() {
+        for toml in [
+            "[pool]\nentrypoint = \"a.php\"\n[http.static]\n",
+            "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"\"\n",
+        ] {
+            let err = merge(
+                load_str(toml).unwrap(),
+                Overrides::default(),
+                Some(Path::new("/w")),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("http.static.root"), "{err}");
+        }
+    }
+
+    /// The resolver validates shape only. The middleware constructor normalizes the case.
+    #[test]
+    fn http_static_forbid_validates() {
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"p\"\nforbid = [\".PHP\", \".Phtml\"]\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        assert_eq!(st.forbid, vec![".PHP".to_owned(), ".Phtml".to_owned()]);
+
+        let file = load_str(
+            "[pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"p\"\nforbid = []\n",
+        )
+        .unwrap();
+        let s = merge(file, Overrides::default(), Some(Path::new("/w"))).unwrap();
+        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        assert!(st.forbid.is_empty());
+
+        for entry in ["php", "", ".", ".php ", "./php"] {
+            let file = load_str(&format!(
+                "[pool]\nentrypoint = \"a.php\"\n[http.static]\nroot = \"p\"\nforbid = [\"{entry}\"]\n"
+            ))
+            .unwrap();
+            let err = merge(file, Overrides::default(), Some(Path::new("/w")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("http.static.forbid"), "{entry}: {err}");
+        }
     }
 
     /// The filter string is assembled from these keys, so a key carrying filter syntax would inject directives (`"php=trace,tokio" = "debug"` reads as two).

@@ -78,3 +78,4 @@ Delete dead code and defenses against threat models that cannot occur. Already w
 - Smallest safe fix, local to the finding. No speculative hardening, no unrelated cleanup.
 - If you see other's bots comments: triage them, add to your review if they're relevant and resolve all threads.
 - Do not respond to the bots' comments.
+- When you review a PR, check whether the changes or related existing code can be simpler without changing behavior.

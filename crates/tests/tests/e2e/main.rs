@@ -7,4 +7,5 @@ mod lifecycle;
 mod logging;
 mod reload;
 mod scaling;
+mod static_files;
 mod streaming;

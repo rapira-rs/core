@@ -15,6 +15,14 @@ pub type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, BoxError>;
 pub type HttpRequest = http::Request<Body>;
 pub type HttpResponse = http::Response<Body>;
 
+/// An empty [`Body`].
+pub fn empty_body() -> Body {
+    use http_body_util::BodyExt;
+    http_body_util::Empty::<Bytes>::new()
+        .map_err(BoxError::from)
+        .boxed_unsync()
+}
+
 // this will be probably only implemented in http/grpc stack
 // or more protocols will be added, like jobs, etc
 #[non_exhaustive]
@@ -75,11 +83,6 @@ impl Next {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_body_util::{BodyExt, Empty};
-
-    fn empty() -> Body {
-        Empty::new().map_err(|e| match e {}).boxed_unsync()
-    }
 
     struct Tag(&'static str);
 
@@ -100,7 +103,12 @@ mod tests {
 
     impl Middleware for Deny {
         fn handle<'a>(&'a self, _req: HttpRequest, _next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async { http::Response::builder().status(403).body(empty()).unwrap() })
+            Box::pin(async {
+                http::Response::builder()
+                    .status(403)
+                    .body(empty_body())
+                    .unwrap()
+            })
         }
     }
 
@@ -109,7 +117,10 @@ mod tests {
     impl Handler for Echo {
         fn call<'a>(&'a self, req: HttpRequest) -> BoxFuture<'a, HttpResponse> {
             Box::pin(async move {
-                let mut res = http::Response::builder().status(200).body(empty()).unwrap();
+                let mut res = http::Response::builder()
+                    .status(200)
+                    .body(empty_body())
+                    .unwrap();
                 for v in req.headers().get_all("x-trace") {
                     res.headers_mut().append("x-trace", v.clone());
                 }
@@ -133,7 +144,7 @@ mod tests {
             Arc::new(Tag("b")),
         ]);
         let next = Next::new(chain, Arc::new(Echo));
-        let res = next.run(http::Request::new(empty())).await;
+        let res = next.run(http::Request::new(empty_body())).await;
         assert_eq!(res.status(), 200);
         assert_eq!(trace(&res), ["a-in", "b-in", "b-out", "a-out"]);
     }
@@ -146,7 +157,7 @@ mod tests {
             Arc::new(Tag("never")),
         ]);
         let next = Next::new(chain, Arc::new(Echo));
-        let res = next.run(http::Request::new(empty())).await;
+        let res = next.run(http::Request::new(empty_body())).await;
         assert_eq!(res.status(), 403);
         assert_eq!(trace(&res), ["a-out"]);
     }
@@ -154,7 +165,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn empty_chain_reaches_the_handler_directly() {
         let next = Next::new(Arc::from(Vec::new()), Arc::new(Echo));
-        let mut req = http::Request::new(empty());
+        let mut req = http::Request::new(empty_body());
         req.headers_mut().append("x-trace", "solo".parse().unwrap());
         let res = next.run(req).await;
         assert_eq!(res.status(), 200);

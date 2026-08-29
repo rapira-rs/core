@@ -1,13 +1,16 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use extension_api::{ListenAddr, PrepareCtx};
+use extension_api::{ListenAddr, Middleware, PrepareCtx};
 use php_sys::{Mode, Rapira};
-use rapira_config::{Listen, Overrides, RunMode, Scaling, Settings, UnsafeFieldNames};
+use rapira_config::{
+    Listen, MiddlewareSettings, Overrides, RunMode, Scaling, Settings, UnsafeFieldNames,
+};
 use rapira_runtime::ExtensionRuntime;
 use rapira_scoreboard::Scoreboard;
 use rapira_tower::{Config as HttpConfig, HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames};
 use std::{
     fs::{OpenOptions, read_dir, remove_file},
     path::PathBuf,
+    sync::Arc,
 };
 use tracing::info;
 
@@ -119,6 +122,40 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             .unwrap_or_else(|| PathBuf::from("/")),
     );
 
+    // middleware ---------------------------------------------------
+    let mut middleware: Vec<Arc<dyn Middleware>> = Vec::new();
+    for mw in &settings.http.middleware {
+        match mw {
+            MiddlewareSettings::Static(st) => {
+                // is_dir() folds every stat error into false; metadata keeps the errno visible.
+                let meta = std::fs::metadata(&st.root).map_err(|e| {
+                    anyhow::anyhow!(
+                        "http.static.root {} is not accessible: {e}",
+                        st.root.display()
+                    )
+                })?;
+                anyhow::ensure!(
+                    meta.is_dir(),
+                    "http.static.root {} is not a directory",
+                    st.root.display()
+                );
+                // Serving needs search permission, not read; resolving `.` inside the root proves it.
+                std::fs::metadata(st.root.join(".")).map_err(|e| {
+                    anyhow::anyhow!(
+                        "http.static.root {} is not accessible: {e}",
+                        st.root.display()
+                    )
+                })?;
+                info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
+                middleware.push(Arc::new(rapira_static_files::StaticFiles::new(
+                    st.root.clone(),
+                    st.forbid.clone(),
+                )));
+            }
+        }
+    }
+    //----------------------------------------------------------------
+
     // parse HTTP configuration -------------------------------------
     let http_cfg: HttpConfig = HttpConfig {
         listen: match settings.http.listen {
@@ -136,7 +173,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         },
         superglobals: !matches!(mode, Mode::Dispatcher(_)),
         keepalive_timeout: settings.http.keepalive_timeout,
-        middleware: Vec::new(),
+        middleware,
     };
     //----------------------------------------------------------------
 
