@@ -26,7 +26,10 @@ fn static_files_serve_over_the_wire() {
     let srv = spawn_with_http_extra(
         "shared/echo-worker.php",
         1,
-        &format!("[http.static]\nroot = \"{}\"\n", root.display()),
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
+            root.display()
+        ),
     );
 
     let raw = http_get_raw(srv.addr, "/app.css", &[], T).expect("GET /app.css");
@@ -75,7 +78,7 @@ fn static_files_serve_over_the_wire() {
 fn a_missing_static_root_refuses_to_boot() {
     let (status, log) = spawn_boot_failure(
         "shared/echo-worker.php",
-        "[http.static]\nroot = \"/nonexistent-rapira-static-root\"\n",
+        "middleware = [\"static\"]\n[http.static]\nroot = \"/nonexistent-rapira-static-root\"\n",
     );
     assert_eq!(status.code(), Some(1), "{log}");
     assert!(
@@ -91,7 +94,10 @@ fn a_static_root_that_is_not_a_directory_refuses_to_boot() {
     std::fs::write(&file, "x").expect("write file root");
     let (status, log) = spawn_boot_failure(
         "shared/echo-worker.php",
-        &format!("[http.static]\nroot = \"{}\"\n", file.display()),
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
+            file.display()
+        ),
     );
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(status.code(), Some(1), "{log}");

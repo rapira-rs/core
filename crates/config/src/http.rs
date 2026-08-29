@@ -12,14 +12,12 @@ pub struct HttpSettings {
     pub server_port: u16,
     pub max_body_size: usize,
     pub write_timeout: std::time::Duration,
-    /// Bounds client read progress: one request-head read (including the keepalive idle wait) and each request-body frame.
     pub keepalive_timeout: std::time::Duration,
     pub unsafe_field_names: UnsafeFieldNames,
     pub uploads: UploadSettings,
-    /// `[http.sendfile].root`; None = the entrypoint's directory.
     pub sendfile_root: Option<PathBuf>,
-    /// `[http.static]`; None = static file serving off.
-    pub static_files: Option<StaticSettings>,
+    // [http].middleware list order
+    pub middleware: Vec<MiddlewareSettings>,
 }
 
 #[derive(Debug)]
@@ -59,12 +57,20 @@ pub(crate) struct HttpSection {
     pub(crate) write_timeout_secs: Option<u64>,
     pub(crate) keepalive_timeout_secs: Option<u64>,
     pub(crate) unsafe_field_names: Option<UnsafeFieldNames>,
-    /// Option so presence is observable: the table is rejected outside dispatcher mode.
     pub(crate) uploads: Option<UploadsSection>,
     #[serde(default)]
     pub(crate) sendfile: SendfileSection,
+    pub(crate) middleware: Option<Vec<String>>,
     pub(crate) r#static: Option<StaticSection>,
 }
+
+// ------------ middleware stuff ---------------
+// add new middleware here, with settings if needed
+#[derive(Debug)]
+pub enum MiddlewareSettings {
+    Static(StaticSettings),
+}
+// ---------------------------------------------
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +100,46 @@ pub(crate) fn resolve_static(
         }
     }
     Ok(StaticSettings { root, forbid })
+}
+
+// resolve all existing vs requested middlewares
+// TODO: think about some container, like endure in RR
+pub(crate) fn resolve_middleware(
+    list: Option<Vec<String>>,
+    mut static_files: Option<StaticSettings>,
+) -> anyhow::Result<Vec<MiddlewareSettings>> {
+    let list = list.unwrap_or_default();
+
+    for (i, name) in list.iter().enumerate() {
+        if list[..i].contains(name) {
+            bail!("http.middleware lists \"{name}\" twice")
+        }
+    }
+
+    let mut middleware: Vec<MiddlewareSettings> = Vec::new();
+    for name in &list {
+        match name.as_str() {
+            // check new middleware here
+            "static" => match static_files.take() {
+                Some(settings) => middleware.push(MiddlewareSettings::Static(settings)),
+                None => {
+                    bail!("http.middleware lists \"static\" but [http.static] is missing")
+                }
+            },
+            other => {
+                bail!("http.middleware entry \"{other}\" is unknown; known middleware: \"static\"")
+            }
+        }
+    }
+
+    // check for the configured, but not listed
+    // TODO: worth double checking
+    // some people requested some kind of enabled=false/true
+    if static_files.is_some() {
+        bail!("[http.static] is configured but http.middleware does not list \"static\"");
+    }
+
+    Ok(middleware)
 }
 
 #[derive(Debug, Default, Deserialize)]
