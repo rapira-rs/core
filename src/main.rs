@@ -139,6 +139,14 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
                     "http.static.root {} is not a directory",
                     st.root.display()
                 );
+                // A stat succeeds without read access on the directory itself; only opening
+                // the directory proves the workers can serve from it.
+                std::fs::read_dir(&st.root).map_err(|e| {
+                    anyhow::anyhow!(
+                        "http.static.root {} is not readable: {e}",
+                        st.root.display()
+                    )
+                })?;
                 info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
                 middleware.push(Arc::new(rapira_static_files::StaticFiles::new(
                     st.root.clone(),
