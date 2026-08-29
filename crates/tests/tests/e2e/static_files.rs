@@ -87,6 +87,35 @@ fn a_missing_static_root_refuses_to_boot() {
     );
 }
 
+/// An existing directory without read access passes a plain stat, so the boot check must open it.
+#[test]
+fn an_unreadable_static_root_refuses_to_boot() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch_dir();
+    let root = dir.join("root");
+    std::fs::create_dir(&root).expect("create root");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).expect("chmod root");
+    // Root bypasses permission checks; the case cannot occur for that user.
+    if std::fs::read_dir(&root).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let (status, log) = spawn_boot_failure(
+        "shared/echo-worker.php",
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
+            root.display()
+        ),
+    );
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("restore root");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(
+        log.contains("http.static.root") && log.contains("is not readable"),
+        "{log}"
+    );
+}
+
 #[test]
 fn a_static_root_that_is_not_a_directory_refuses_to_boot() {
     let dir = scratch_dir();
