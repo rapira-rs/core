@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::anyhow;
-use extension_api::{Addr, ListenAddr, Php, PrepareCtx, PreparedListener, Result};
+use extension_api::{Addr, ListenAddr, Php, PreparedListener, Result};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
@@ -12,22 +12,15 @@ use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::watch::{self, channel};
 
 use crate::Config;
-use crate::handler::{ConnInfo, RapiraService, Shared};
+use crate::handler::{RapiraService, Shared};
 
 enum Acceptor {
     Tcp(TcpListener),
     Unix(UnixListener),
 }
 
-fn create_acceptor(prepared: Option<PreparedListener>, listen: &ListenAddr) -> Result<Acceptor> {
+fn create_acceptor(prepared: PreparedListener) -> Result<Acceptor> {
     use std::os::fd::{FromRawFd, IntoRawFd};
-    let prepared = match prepared {
-        Some(p) => p,
-        None => match listen {
-            ListenAddr::Tcp(addr) => PrepareCtx::new().bind_tcp(*addr)?,
-            ListenAddr::Unix(path) => PrepareCtx::new().bind_unix(path)?,
-        },
-    };
     let tcp: bool = matches!(prepared.addr(), ListenAddr::Tcp(_));
     // SAFETY: into_raw_fd transfers sole ownership of a listening socket; prepare
     // already set O_NONBLOCK, which from_std requires but does not set.
@@ -43,10 +36,10 @@ fn create_acceptor(prepared: Option<PreparedListener>, listen: &ListenAddr) -> R
 pub(crate) async fn serve(
     php: Php,
     config: Config,
-    prepared: Option<PreparedListener>,
+    prepared: PreparedListener,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let acceptor = create_acceptor(prepared, &config.listen)?;
+    let acceptor = create_acceptor(prepared)?;
     match &config.listen {
         ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
         ListenAddr::Unix(p) => tracing::info!(target: "http", "listening on unix:{}", p.display()),
@@ -142,10 +135,12 @@ fn listen_addr(listen: &ListenAddr) -> Addr {
     }
 }
 
+// Linux accept() forwards pending network errors of the new connection, so only errnos
+// that prove listener state are fatal. https://man7.org/linux/man-pages/man2/accept.2.html
 fn is_fatal_accept(e: &std::io::Error) -> bool {
     matches!(
         e.raw_os_error(),
-        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK | libc::EOPNOTSUPP)
+        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK)
     )
 }
 
@@ -187,13 +182,7 @@ fn spawn_conn<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (closed_tx, closed_rx) = channel(false);
-    let conn = ConnInfo {
-        remote,
-        server,
-        closed: closed_rx,
-    };
-
-    let svc = RapiraService::new(Arc::clone(shared), conn);
+    let svc = RapiraService::new(Arc::clone(shared), remote, server, closed_rx);
     let io = crate::bridge::TimedIo::new(TokioIo::new(stream), shared.cfg.write_timeout);
     // connection <I, S>
     let connection = builder.serve_connection(io, svc);

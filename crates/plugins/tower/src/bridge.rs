@@ -16,7 +16,7 @@ pub(crate) struct ReplyBody {
     staged: Option<ReplyEvent>,
     file: Option<FilePump>,
     err_armed: bool,
-    _guard: Option<Arc<InflightReqCount>>,
+    _guard: Arc<InflightReqCount>,
 }
 
 type FileRead = tokio::task::JoinHandle<(std::fs::File, std::io::Result<Vec<u8>>)>;
@@ -44,7 +44,7 @@ impl ReplyBody {
     pub(crate) fn new(
         reply: Reply,
         declared_cl: Option<u64>,
-        guard: Option<Arc<InflightReqCount>>,
+        guard: Arc<InflightReqCount>,
         staged: Option<ReplyEvent>,
     ) -> Self {
         Self {
@@ -142,16 +142,10 @@ impl http_body::Body for ReplyBody {
                     return this.terminal_error(cx);
                 }
                 Some(ReplyEvent::Chunk(b)) => {
-                    if b.is_empty() {
-                        continue;
-                    }
                     this.sent += b.len() as u64;
                     return Poll::Ready(Some(Ok(http_body::Frame::data(b))));
                 }
                 Some(ReplyEvent::File { file, offset, len }) => {
-                    if len == 0 {
-                        continue;
-                    }
                     let want = std::cmp::min(64 * 1024, len) as usize;
                     this.file = Some(FilePump {
                         join: read_slice(file, offset, want),
@@ -160,13 +154,8 @@ impl http_body::Body for ReplyBody {
                         done: 0,
                     });
                 }
-                // https://www.rfc-editor.org/rfc/rfc8297#section-2
-                Some(ReplyEvent::Interim { status, .. }) => {
-                    tracing::debug!(target: "http", "dropped interim {status}");
-                }
-                Some(ReplyEvent::Head { status, .. }) => {
-                    tracing::debug!(target: "http", "dropped duplicate response head {status}");
-                }
+                // The producer latches the head, so neither event can follow it.
+                Some(ReplyEvent::Interim { .. } | ReplyEvent::Head { .. }) => {}
                 Some(ReplyEvent::End { truncated, .. }) => {
                     if truncated {
                         tracing::debug!(target: "http", "php ended the reply as truncated");
@@ -318,7 +307,7 @@ mod tests {
     use http_body_util::BodyExt;
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct Script {
         events: VecDeque<ReplyEvent>,
@@ -364,8 +353,12 @@ mod tests {
         ReplyEvent::Chunk(Bytes::copy_from_slice(s.as_bytes()))
     }
 
+    fn guard() -> Arc<InflightReqCount> {
+        Arc::new(InflightReqCount::init(&Arc::new(AtomicUsize::new(0))))
+    }
+
     fn body(events: Vec<ReplyEvent>, declared_cl: Option<u64>) -> ReplyBody {
-        ReplyBody::new(reply(events), declared_cl, None, None)
+        ReplyBody::new(reply(events), declared_cl, guard(), None)
     }
 
     /// The pre-fetched first event streams ahead of everything the source still holds.
@@ -374,7 +367,7 @@ mod tests {
         let mut b = ReplyBody::new(
             reply(vec![chunk("second"), end(false)]),
             None,
-            None,
+            guard(),
             Some(chunk("first")),
         );
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "first");
@@ -391,10 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn frames_stream_in_order_and_end_cleanly() {
-        let mut b = body(
-            vec![chunk("ab"), chunk(""), chunk("c"), end(false)],
-            Some(3),
-        );
+        let mut b = body(vec![chunk("ab"), chunk("c"), end(false)], Some(3));
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "ab");
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "c");
         assert!(data(&mut b).await.is_none());
@@ -420,32 +410,6 @@ mod tests {
         let mut b = body(vec![chunk("abc"), end(false)], Some(10));
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
         assert!(data(&mut b).await.unwrap().is_err());
-    }
-
-    #[tokio::test]
-    async fn interim_and_duplicate_heads_are_dropped_mid_stream() {
-        let mut b = body(
-            vec![
-                ReplyEvent::Interim {
-                    status: 103,
-                    headers: Vec::new(),
-                },
-                chunk("a"),
-                ReplyEvent::Head {
-                    status: 200,
-                    headers: Vec::new(),
-                    content_length: None,
-                    bodiless: false,
-                    body_coded: false,
-                },
-                chunk("b"),
-                end(false),
-            ],
-            None,
-        );
-        assert_eq!(data(&mut b).await.unwrap().unwrap(), "a");
-        assert_eq!(data(&mut b).await.unwrap().unwrap(), "b");
-        assert!(data(&mut b).await.is_none());
     }
 
     /// The terminal error must let hyper flush first: one Pending pass with a wake, then the error.
@@ -483,7 +447,7 @@ mod tests {
             dropped: Some(Arc::clone(&dropped)),
             hang: true,
         };
-        let b = ReplyBody::new(Reply::new(Box::new(source)), None, None, None);
+        let b = ReplyBody::new(Reply::new(Box::new(source)), None, guard(), None);
         drop(b);
         assert!(dropped.load(Ordering::Acquire));
     }

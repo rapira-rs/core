@@ -79,7 +79,12 @@ impl Extension for HttpServer {
             ListenAddr::Tcp(addr) => ctx.bind_tcp(*addr)?,
             ListenAddr::Unix(path) => ctx.bind_unix(path)?,
         };
-        tracing::info!(target: "http", "prepared listener on {}", prepared.addr_string()?);
+        match prepared.addr() {
+            ListenAddr::Tcp(a) => tracing::info!(target: "http", "prepared listener on {a}"),
+            ListenAddr::Unix(p) => {
+                tracing::info!(target: "http", "prepared listener on {}", p.display());
+            }
+        }
         self.prepared = Some(prepared);
         Ok(())
     }
@@ -88,7 +93,9 @@ impl Extension for HttpServer {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (done_tx, done_rx) = oneshot::channel();
         let config = self.config.clone();
-        let prepared = self.prepared.take();
+        let Some(prepared) = self.prepared.take() else {
+            return Err(anyhow!("http listener was not prepared"));
+        };
 
         let thread = std::thread::Builder::new()
             .name("rapira-tower".into())

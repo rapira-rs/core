@@ -35,11 +35,7 @@ pub(crate) fn connection_named_headers(value: &[u8], out: &mut Vec<String>) {
     }
 }
 
-pub(crate) fn response_headers(
-    headers: FieldLines,
-    content_length: Option<u64>,
-    no_body: bool,
-) -> HeaderMap {
+pub(crate) fn response_headers(headers: FieldLines, content_length: Option<u64>) -> HeaderMap {
     let mut map = HeaderMap::with_capacity(headers.len() + 1);
     let mut conn_named: Vec<String> = Vec::new();
     for (name, value) in headers {
@@ -67,7 +63,7 @@ pub(crate) fn response_headers(
             map.remove(name);
         }
     }
-    if !no_body && let Some(n) = content_length {
+    if let Some(n) = content_length {
         map.insert(CONTENT_LENGTH, HeaderValue::from(n));
     }
     map
@@ -93,20 +89,11 @@ mod tests {
                 ("X-Keep", "2"),
             ]),
             Some(7),
-            false,
         );
         assert_eq!(map.get("content-length").unwrap().as_bytes(), b"7");
         assert!(map.get("x-drop").is_none());
         assert_eq!(map.get("x-keep").unwrap().as_bytes(), b"2");
         assert!(map.get("connection").is_none());
-    }
-
-    #[test]
-    fn bodyless_statuses_get_no_content_length() {
-        let map = response_headers(hdrs(&[("X-A", "1")]), Some(0), true);
-        assert!(map.get("content-length").is_none());
-        assert!(map.get("transfer-encoding").is_none());
-        assert_eq!(map.get("x-a").unwrap().as_bytes(), b"1");
     }
 
     /// A space is not a tchar, so no front can put this name on the wire; dropping the field must not cost the rest of the response.
@@ -115,7 +102,6 @@ mod tests {
         let map = response_headers(
             hdrs(&[("Content Type", "text/html"), ("X-Keep", "2")]),
             Some(3),
-            false,
         );
         assert!(map.get("content type").is_none());
         assert_eq!(map.get("x-keep").unwrap().as_bytes(), b"2");
@@ -131,7 +117,6 @@ mod tests {
                 ("X-Keep".to_owned(), b"ok".to_vec()),
             ],
             None,
-            false,
         );
         assert!(map.get("x-ctl").is_none());
         assert_eq!(map.get("x-keep").unwrap().as_bytes(), b"ok");
@@ -142,7 +127,6 @@ mod tests {
         let map = response_headers(
             hdrs(&[("Content-Length", "999"), ("Transfer-Encoding", "chunked")]),
             Some(4),
-            false,
         );
         assert_eq!(map.get("content-length").unwrap().as_bytes(), b"4");
         assert!(map.get("transfer-encoding").is_none());
