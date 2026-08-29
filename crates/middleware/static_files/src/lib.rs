@@ -7,7 +7,8 @@ use http_body_util::{BodyExt, Empty};
 use tower_http::services::ServeDir;
 
 /// Serves files from a directory and hands every miss to the next middleware.
-/// A read failure answers 500. The request does not reach the next middleware.
+/// A permission error or a bad file name is also a miss. Any other read failure
+/// answers 500. That request does not reach the next middleware.
 pub struct StaticFiles {
     dir: ServeDir,
     forbid: Vec<String>,
@@ -22,7 +23,9 @@ impl StaticFiles {
             entry.make_ascii_lowercase();
         }
         Self {
-            dir: ServeDir::new(root),
+            // The URL space belongs to PHP: a directory URL is the app's route, not an
+            // implicit index.html.
+            dir: ServeDir::new(root).append_index_html_on_directories(false),
             forbid,
         }
     }
@@ -36,13 +39,13 @@ impl StaticFiles {
         if decoded.split('/').any(|segment| segment.starts_with('.')) {
             return false;
         }
-        // The last non-empty segment is the file ServeDir resolves: its component walk drops
-        // trailing separators, so `/index.php%2F` still names index.php here.
+        // The last non-empty segment is the served file; the component walk drops trailing
+        // separators, so `/index.php%2F` still names index.php here.
         let file = decoded
             .rsplit('/')
             .find(|s| !s.is_empty())
-            .unwrap_or_default();
-        let file = file.to_ascii_lowercase();
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         !self.forbid.iter().any(|ext| file.ends_with(ext.as_str()))
     }
 }
@@ -66,12 +69,7 @@ impl Middleware for StaticFiles {
 
             let mut dir = self.dir.clone();
             match dir.try_call(probe).await {
-                // A 307 names a directory, not a file this middleware can serve. It falls
-                // through so PHP owns the URL shape.
-                Ok(res)
-                    if res.status() != StatusCode::NOT_FOUND
-                        && res.status() != StatusCode::TEMPORARY_REDIRECT =>
-                {
+                Ok(res) if res.status() != StatusCode::NOT_FOUND => {
                     res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync())
                 }
                 // ServeDir folds NotFound, PermissionDenied and ENOTDIR into Ok(404), so an
@@ -263,10 +261,10 @@ mod tests {
         assert_eq!(body(res).await, "a{}");
     }
 
-    /// A trailing slash resolves to the directory's index.html. Without that file the request is a miss.
     #[tokio::test(flavor = "current_thread")]
-    async fn directory_paths_with_a_trailing_slash_fall_through_without_an_index() {
+    async fn directory_paths_with_a_trailing_slash_fall_through() {
         let dir = root();
+        std::fs::write(dir.path().join("sub").join("index.html"), "<h1>s</h1>").unwrap();
         for path in ["/assets/", "/sub/"] {
             let res = run(static_files(&dir), request("GET", path, "")).await;
             assert_eq!(header(&res, "x-handler"), "php", "{path}");
@@ -391,12 +389,15 @@ mod tests {
         assert_eq!(body(res).await, "");
     }
 
+    /// The URL space belongs to PHP: no implicit index resolution, only exact file paths serve.
     #[tokio::test(flavor = "current_thread")]
-    async fn the_root_serves_index_html() {
+    async fn the_root_falls_through_even_with_an_index_present() {
         let dir = root();
         let res = run(static_files(&dir), request("GET", "/", "")).await;
+        assert_eq!(header(&res, "x-handler"), "php");
+
+        let res = run(static_files(&dir), request("GET", "/index.html", "")).await;
         assert_eq!(res.status(), 200);
-        assert_eq!(header(&res, "content-type"), "text/html");
         assert_eq!(body(res).await, "<h1>hi</h1>");
     }
 

@@ -130,7 +130,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 // is_dir() folds every stat error into false; metadata keeps the errno visible.
                 let meta = std::fs::metadata(&st.root).map_err(|e| {
                     anyhow::anyhow!(
-                        "http.static.root {} is not readable: {e}",
+                        "http.static.root {} is not accessible: {e}",
                         st.root.display()
                     )
                 })?;
@@ -139,11 +139,10 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
                     "http.static.root {} is not a directory",
                     st.root.display()
                 );
-                // A stat succeeds without read access on the directory itself; only opening
-                // the directory proves the workers can serve from it.
-                std::fs::read_dir(&st.root).map_err(|e| {
+                // Serving needs search permission, not read; resolving `.` inside the root proves it.
+                std::fs::metadata(st.root.join(".")).map_err(|e| {
                     anyhow::anyhow!(
-                        "http.static.root {} is not readable: {e}",
+                        "http.static.root {} is not accessible: {e}",
                         st.root.display()
                     )
                 })?;

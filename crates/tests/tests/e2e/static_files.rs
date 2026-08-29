@@ -82,12 +82,12 @@ fn a_missing_static_root_refuses_to_boot() {
     );
     assert_eq!(status.code(), Some(1), "{log}");
     assert!(
-        log.contains("http.static.root") && log.contains("is not readable"),
+        log.contains("http.static.root") && log.contains("is not accessible"),
         "{log}"
     );
 }
 
-/// An existing directory without read access passes a plain stat, so the boot check must open it.
+/// A 000 directory passes a stat of its own path; the boot probe must resolve inside it.
 #[test]
 fn an_unreadable_static_root_refuses_to_boot() {
     use std::os::unix::fs::PermissionsExt;
@@ -111,7 +111,36 @@ fn an_unreadable_static_root_refuses_to_boot() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(status.code(), Some(1), "{log}");
     assert!(
-        log.contains("http.static.root") && log.contains("is not readable"),
+        log.contains("http.static.root") && log.contains("is not accessible"),
+        "{log}"
+    );
+}
+
+/// A 0400 root lists but cannot resolve child paths; boot must require search permission.
+#[test]
+fn a_static_root_without_search_permission_refuses_to_boot() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch_dir();
+    let root = dir.join("root");
+    std::fs::create_dir(&root).expect("create root");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o400)).expect("chmod root");
+    // Root bypasses permission checks; the case cannot occur for that user.
+    if std::fs::metadata(root.join(".")).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let (status, log) = spawn_boot_failure(
+        "shared/echo-worker.php",
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
+            root.display()
+        ),
+    );
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("restore root");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(
+        log.contains("http.static.root") && log.contains("is not accessible"),
         "{log}"
     );
 }
