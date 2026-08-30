@@ -12,8 +12,6 @@ pub(crate) fn build(
     let protocol = match parts.version {
         http::Version::HTTP_11 => "HTTP/1.1".to_owned(),
         http::Version::HTTP_10 => "HTTP/1.0".to_owned(),
-        http::Version::HTTP_2 => "HTTP/2.0".to_owned(),
-        http::Version::HTTP_3 => "HTTP/3.0".to_owned(),
         v => format!("{v:?}"),
     };
     Request {

@@ -819,6 +819,33 @@ impl Conn {
         Ok(())
     }
 
+    /// Read exactly `n` bytes: content-length framing on a connection that stays open.
+    pub fn read_n(&mut self, n: usize, deadline: Duration) -> io::Result<Vec<u8>> {
+        let end = std::time::Instant::now() + deadline;
+        while self.unread().len() < n {
+            if std::time::Instant::now() >= end {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{n} bytes not on the wire; buffered: {:?}", self.unread()),
+                ));
+            }
+            let mut chunk = [0u8; 4096];
+            match self.s.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof mid body"));
+                }
+                Ok(m) => self.buf.extend_from_slice(&chunk[..m]),
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let out = self.unread()[..n].to_vec();
+        self.consumed += n;
+        Ok(out)
+    }
+
     /// Drain to EOF and return everything unread.
     pub fn read_remaining(&mut self, deadline: Duration) -> io::Result<Vec<u8>> {
         let end = std::time::Instant::now() + deadline;

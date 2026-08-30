@@ -109,9 +109,9 @@ pub(crate) fn check_request(
             let host_port = a.rsplit_once('@').map_or(a, |(_, hp)| hp);
             // Rewrite Host to the effective authority, so HTTP_HOST cannot disagree.
             // https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
-            if let Ok(v) = http::HeaderValue::from_str(host_port) {
-                parts.headers.insert(HOST, v);
-            }
+            let v = http::HeaderValue::from_str(host_port)
+                .expect("uri authority bytes are valid header bytes");
+            parts.headers.insert(HOST, v);
             Some(host_port.as_bytes().to_vec())
         }
         None => authority,

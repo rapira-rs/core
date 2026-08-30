@@ -53,6 +53,7 @@ pub enum ReplyEvent {
     File {
         file: std::fs::File,
         offset: u64,
+        /// Never zero: a producer does not emit an empty slice.
         len: u64,
     },
     End {

@@ -1,5 +1,5 @@
 use crate::harness::{
-    diagnostics, http_get, http_get_raw, http_post, scratch_dir, spawn_boot_failure,
+    Conn, diagnostics, http_get, http_get_raw, http_post, scratch_dir, spawn_boot_failure,
     spawn_with_http_extra,
 };
 use std::time::Duration;
@@ -70,6 +70,53 @@ fn static_files_serve_over_the_wire() {
         "{text}"
     );
     assert!(text.ends_with("0123"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// One connection serves sequential requests through the middleware chain:
+/// miss to PHP, static hit, miss to PHP again.
+#[test]
+fn the_chain_serves_sequential_requests_on_one_connection() {
+    let root = static_root(&[("app.css", "body{}")]);
+    let srv = spawn_with_http_extra(
+        "shared/echo-worker.php",
+        1,
+        &format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
+            root.display()
+        ),
+    );
+    let mut c = Conn::open(srv.addr, T).expect("connect");
+
+    fn content_length(fields: &[(String, String)]) -> usize {
+        fields
+            .iter()
+            .find(|(k, _)| k == "content-length")
+            .and_then(|(_, v)| v.parse().ok())
+            .expect("content-length header")
+    }
+
+    c.send(b"GET /nope HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("first request");
+    let (status, fields) = c.read_head(T).expect("first head");
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    let body = c.read_n(content_length(&fields), T).expect("first body");
+    assert!(body.starts_with(b"ok:"), "first body must come from php");
+
+    c.send(b"GET /app.css HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("second request");
+    let (status, fields) = c.read_head(T).expect("second head");
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    let body = c.read_n(content_length(&fields), T).expect("second body");
+    assert_eq!(body.as_slice(), b"body{}", "the hit must serve the file");
+
+    c.send(b"GET /nope HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
+        .expect("third request on the same connection");
+    let (status, fields) = c.read_head(T).expect("reused connection must serve");
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    let body = c.read_n(content_length(&fields), T).expect("third body");
+    assert!(body.starts_with(b"ok:"), "third body must come from php");
 
     let _ = std::fs::remove_dir_all(&root);
 }

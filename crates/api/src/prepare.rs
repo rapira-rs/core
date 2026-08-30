@@ -15,18 +15,6 @@ pub enum ListenAddr {
     Unix(PathBuf),
 }
 
-impl ListenAddr {
-    pub fn addr_string(&self) -> anyhow::Result<String> {
-        match self {
-            ListenAddr::Tcp(a) => Ok(a.to_string()),
-            ListenAddr::Unix(p) => p
-                .to_str()
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("unix socket path must be valid UTF-8")),
-        }
-    }
-}
-
 /// Exactly one closer per process: the master holds its copy for its whole life so respawned workers keep inheriting it, a worker hands its copy to the adopter.
 #[derive(Debug)]
 pub struct PreparedListener {
@@ -37,10 +25,6 @@ pub struct PreparedListener {
 impl PreparedListener {
     pub fn addr(&self) -> &ListenAddr {
         &self.addr
-    }
-
-    pub fn addr_string(&self) -> anyhow::Result<String> {
-        self.addr.addr_string()
     }
 }
 
