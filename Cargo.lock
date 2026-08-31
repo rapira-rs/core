@@ -710,14 +710,32 @@ dependencies = [
  "mimalloc",
  "php_sys",
  "rapira_config",
+ "rapira_http",
  "rapira_master",
  "rapira_runtime",
  "rapira_scoreboard",
  "rapira_static_files",
- "rapira_tower",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rapira_http"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "extension_api",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -766,24 +784,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "rapira_tower"
-version = "0.7.0"
-dependencies = [
- "anyhow",
- "bytes",
- "extension_api",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "tempfile",
- "tokio",
  "tracing",
 ]
 

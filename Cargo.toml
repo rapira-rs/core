@@ -27,7 +27,7 @@ members = [
     "crates/middleware/static_files",
     "crates/php_sys",
     "crates/scoreboard",
-    "crates/plugins/tower",
+    "crates/plugins/http",
 ]
 
 [workspace.dependencies]
@@ -38,7 +38,7 @@ rapira_runtime = { path = "crates/runtime" }
 rapira_config = { path = "crates/config" }
 extension_api = { path = "crates/api" }
 rapira_static_files = { path = "crates/middleware/static_files" }
-rapira_tower = { path = "crates/plugins/tower" }
+rapira_http = { path = "crates/plugins/http" }
 rapira_master = { path = "crates/master" }
 rapira_scoreboard = { path = "crates/scoreboard" }
 tokio = { version = "1", features = ["sync"] }
@@ -64,7 +64,7 @@ rapira_runtime = { workspace = true }
 php_sys = { workspace = true }
 rapira_config = { workspace = true }
 rapira_static_files = { workspace = true }
-rapira_tower = { workspace = true }
+rapira_http = { workspace = true }
 libc = "0.2"
 mimalloc = "0.1"
 tracing.workspace = true

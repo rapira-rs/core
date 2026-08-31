@@ -1,10 +1,10 @@
-# rapira_tower
+# rapira_http
 
 The HTTP front built into the `rapira` binary. It terminates HTTP/1.1 on the configured listener and answers every request from PHP through the `extension_api` bridge; there is no upstream and nothing is proxied.
 
 ## How it works
 
-`HttpServer` implements `extension_api::Extension`. The host's extension runtime runs without an IO driver, so this crate serves on its own tokio runtime (two workers, thread `rapira-tower`) on a dedicated thread. The listener is bound pre-fork by the master through `PrepareCtx`; each worker inherits the fd and adopts it with `from_std`.
+`Server` implements `extension_api::Extension`. The host's extension runtime runs without an IO driver, so this crate serves on its own tokio runtime (two workers, thread `rapira-http`) on a dedicated thread. The listener is bound pre-fork by the master through `PrepareCtx`; each worker inherits the fd and adopts it with `from_std`.
 
 Connections are served by hyper's http1 builder. Each request runs through admission checks, the middleware chain, and the PHP handler: the request maps to an `extension_api::Request`, executes via `Php::exec`, and the resulting `ReplyEvent` stream is written back to the socket as it arrives.
 
@@ -58,8 +58,8 @@ On the stop signal the accept loop ends immediately, idle keepalive connections 
 ## Build
 
 ```sh
-cargo build -p rapira_tower
-cargo clippy -p rapira_tower --all-targets
+cargo build -p rapira_http
+cargo clippy -p rapira_http --all-targets
 ```
 
 ## License

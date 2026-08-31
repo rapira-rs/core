@@ -4,9 +4,11 @@ use php_sys::{Mode, Rapira};
 use rapira_config::{
     Listen, MiddlewareSettings, Overrides, RunMode, Scaling, Settings, UnsafeFieldNames,
 };
+use rapira_http::{
+    Config as HttpConfig, Server as HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames,
+};
 use rapira_runtime::ExtensionRuntime;
 use rapira_scoreboard::Scoreboard;
-use rapira_tower::{Config as HttpConfig, HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames};
 use std::{
     fs::{OpenOptions, read_dir, remove_file},
     path::PathBuf,
