@@ -14,8 +14,10 @@ fn static_root(files: &[(&str, &str)]) -> std::path::PathBuf {
     dir
 }
 
-/// Reads one field from the response head. A field name can use any letter case, so the
-/// comparison ignores the case.
+/// Reads one field from the response head. Field names are case-insensitive (RFC 9110
+/// section 5.1, https://www.rfc-editor.org/rfc/rfc9110#section-5.1). An absent field gives an
+/// empty string, so a caller that compares two fields must first check that the field is
+/// present.
 fn head_field(raw: &[u8], name: &str) -> String {
     let text = String::from_utf8_lossy(raw);
     let head = text.split("\r\n\r\n").next().unwrap_or_default();
@@ -108,6 +110,11 @@ fn cached_static_files_revalidate_over_the_wire() {
     let etag = head_field(&first, "etag");
     let modified = head_field(&first, "last-modified");
     assert!(!etag.is_empty(), "no etag\n{}", diagnostics(&srv));
+    assert!(
+        !modified.is_empty(),
+        "no last-modified\n{}",
+        diagnostics(&srv)
+    );
 
     let second = http_get_raw(srv.addr, "/app.css", &[], T).expect("second GET");
     assert_eq!(head_field(&second, "etag"), etag);
@@ -117,15 +124,18 @@ fn cached_static_files_revalidate_over_the_wire() {
     let text = String::from_utf8_lossy(&second);
     assert!(text.ends_with("body{color:red}"), "{text}");
 
-    let raw = http_get_raw(srv.addr, "/app.css", &[("If-None-Match", &etag)], T).expect("etag GET");
-    let text = String::from_utf8_lossy(&raw);
-    assert!(text.starts_with("HTTP/1.1 304"), "{text}");
-    assert!(text.ends_with("\r\n\r\n"), "a 304 has no body: {text}");
-
-    let raw = http_get_raw(srv.addr, "/app.css", &[("If-Modified-Since", &modified)], T)
-        .expect("date GET");
-    let text = String::from_utf8_lossy(&raw);
-    assert!(text.starts_with("HTTP/1.1 304"), "{text}");
+    for (name, value) in [
+        ("If-None-Match", etag.as_str()),
+        ("If-Modified-Since", modified.as_str()),
+    ] {
+        let raw = http_get_raw(srv.addr, "/app.css", &[(name, value)], T).expect("conditional GET");
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.starts_with("HTTP/1.1 304"), "{name}: {text}");
+        assert!(
+            text.ends_with("\r\n\r\n"),
+            "a 304 has no body: {name}: {text}"
+        );
+    }
 
     let head = http_raw_bytes(
         srv.addr,
@@ -141,8 +151,8 @@ fn cached_static_files_revalidate_over_the_wire() {
         "a HEAD response has no body: {text}"
     );
 
-    // The new file has a different length and a different mtime. Either one is sufficient to
-    // cause the reload.
+    // The new file has a different length and a different mtime. Either one causes the
+    // reload.
     let path = root.join("app.css");
     std::fs::write(&path, "body{color:lime}").expect("rewrite");
     std::fs::File::options()
@@ -157,7 +167,9 @@ fn cached_static_files_revalidate_over_the_wire() {
     let text = String::from_utf8_lossy(&raw);
     assert!(text.starts_with("HTTP/1.1 200"), "{text}");
     assert_eq!(head_field(&raw, "content-length"), "16");
-    assert_ne!(head_field(&raw, "etag"), etag);
+    let reloaded = head_field(&raw, "etag");
+    assert!(!reloaded.is_empty(), "no etag after the reload: {text}");
+    assert_ne!(reloaded, etag);
     assert!(text.ends_with("body{color:lime}"), "{text}");
 
     let _ = std::fs::remove_dir_all(&root);
@@ -200,7 +212,9 @@ fn the_chain_serves_sequential_requests_on_one_connection() {
     let body = c.read_n(content_length(&fields), T).expect("second body");
     assert_eq!(body.as_slice(), b"body{}", "the hit must serve the file");
 
-    // The cache answers this request. A wrong content-length breaks the connection here.
+    // Only the cache can answer this request. A wrong content-length breaks the connection
+    // here.
+    std::fs::remove_file(root.join("app.css")).expect("remove the served file");
     c.send(b"GET /app.css HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("cached request");
     let (status, fields) = c.read_head(T).expect("cached head");

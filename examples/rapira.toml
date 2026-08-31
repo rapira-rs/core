@@ -23,6 +23,9 @@ listen = "127.0.0.1:8000"    # host:port, ":port" (all interfaces), or "unix:/pa
 
 # Serve files from a directory before PHP. A miss falls through to PHP. Dotfiles always fall through to PHP.
 # Requires "static" in http.middleware.
+# The server holds served files in memory. Each worker keeps up to 16MiB and stores no file
+# above 256KiB. The cost is therefore 16MiB for each process in pool.processes. An entry stays
+# fresh for one second, so a rewritten file reaches the client after that time.
 # [http.static]
 # root = "public"            # required; the directory must exist; relative paths resolve against this file's directory
 # forbid = [".php"]          # file-name suffixes the server never serves; an explicit list replaces this default

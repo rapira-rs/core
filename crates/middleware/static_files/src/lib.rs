@@ -17,27 +17,26 @@ use cache::CachingBackend;
 pub struct StaticFiles {
     dir: ServeDir<DefaultServeDirFallback, CachingBackend>,
     forbid: Vec<String>,
-    #[cfg(test)]
-    cache: CachingBackend,
 }
 
 impl StaticFiles {
     /// A relative `root` resolves against the process working directory.
     /// `forbid` holds file-name suffixes with a leading dot.
     /// The constructor lowercases them, so an uppercase entry still matches in `eligible`.
-    pub fn new(root: PathBuf, mut forbid: Vec<String>) -> Self {
+    pub fn new(root: PathBuf, forbid: Vec<String>) -> Self {
+        Self::with_cache(root, forbid, CachingBackend::default())
+    }
+
+    /// Takes the cache from the caller, so a test can inspect it.
+    fn with_cache(root: PathBuf, mut forbid: Vec<String>, cache: CachingBackend) -> Self {
         for entry in &mut forbid {
             entry.make_ascii_lowercase();
         }
-        let cache = CachingBackend::default();
         Self {
             // The URL space belongs to PHP: a directory URL is the app's route, not an
             // implicit index.html.
-            dir: ServeDir::with_backend(root, cache.clone())
-                .append_index_html_on_directories(false),
+            dir: ServeDir::with_backend(root, cache).append_index_html_on_directories(false),
             forbid,
-            #[cfg(test)]
-            cache,
         }
     }
 
@@ -59,6 +58,23 @@ impl StaticFiles {
             .to_ascii_lowercase();
         !self.forbid.iter().any(|ext| file.ends_with(ext.as_str()))
     }
+}
+
+/// The error kinds that mean there is no file to serve. `try_call` reports a missing path and
+/// an unreadable path this way. The backend reports a directory with `IsADirectory`.
+/// https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
+///
+/// A `HEAD` probe also reports a bad file name here. A segment over `NAME_MAX` gives
+/// `InvalidFilename`. A NUL byte gives `InvalidInput`. A `GET` answers 404 for both names.
+fn is_miss(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::IsADirectory
+            | std::io::ErrorKind::InvalidFilename
+            | std::io::ErrorKind::InvalidInput
+    ) || e.raw_os_error() == Some(libc::ENOTDIR)
 }
 
 impl Middleware for StaticFiles {
@@ -83,22 +99,11 @@ impl Middleware for StaticFiles {
                 Ok(res) if res.status() != StatusCode::NOT_FOUND => {
                     res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync())
                 }
-                // ServeDir folds NotFound, PermissionDenied and ENOTDIR into Ok(404), so an
-                // unreadable file is indistinguishable from a missing one and reaches PHP.
+                // A directory URL answers 404 without a filesystem error. It then reaches PHP.
                 Ok(_) => next.run(req).await,
-                // An error about the file name is a miss. A segment over NAME_MAX returns
-                // InvalidFilename. A HEAD probe returns InvalidInput for a NUL byte; a GET
-                // answers 404 for it.
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::InvalidFilename | std::io::ErrorKind::InvalidInput
-                    ) =>
-                {
-                    next.run(req).await
-                }
-                // An Err outside the file-name kinds is a read failure and must not reach
-                // PHP. https://docs.rs/tower-http/0.7.0/tower_http/services/struct.ServeDir.html#method.try_call
+                Err(e) if is_miss(&e) => next.run(req).await,
+                // An Err outside the miss kinds is a read failure and must not reach PHP.
+                // https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
                 Err(e) => {
                     tracing::error!(target: "http", "static probe failed for {}: {e}", req.uri().path());
                     http::Response::builder()
@@ -175,8 +180,9 @@ mod tests {
         Next::new(chain, Arc::new(Fallthrough)).run(req).await
     }
 
-    /// Use whole seconds. An ext4 volume with 128-byte inodes removes the sub-second part of
-    /// the mtime.
+    /// Use whole seconds. An ext4 volume with 128-byte inodes has no nanosecond field, so it
+    /// keeps only the seconds of the mtime.
+    /// https://www.kernel.org/doc/html/latest/filesystems/ext4/inodes.html#inode-timestamps
     fn write_at(path: &std::path::Path, contents: &str, mtime_secs: u64) {
         std::fs::write(path, contents).unwrap();
         std::fs::File::options()
@@ -187,7 +193,7 @@ mod tests {
             .unwrap();
     }
 
-    /// Waits until the one second freshness window ends.
+    /// Sleeps past the one second freshness window.
     fn past_the_ttl() {
         std::thread::sleep(Duration::from_millis(1100));
     }
@@ -211,6 +217,17 @@ mod tests {
 
     fn static_files(dir: &tempfile::TempDir) -> StaticFiles {
         StaticFiles::new(dir.path().to_path_buf(), vec![".php".to_owned()])
+    }
+
+    /// A cache test needs the instance and a handle on the store behind it.
+    fn cached(dir: &tempfile::TempDir) -> (Arc<StaticFiles>, CachingBackend) {
+        let cache = CachingBackend::default();
+        let st = StaticFiles::with_cache(
+            dir.path().to_path_buf(),
+            vec![".php".to_owned()],
+            cache.clone(),
+        );
+        (Arc::new(st), cache)
     }
 
     fn header<'r>(res: &'r HttpResponse, name: &str) -> &'r str {
@@ -448,7 +465,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_second_request_serves_from_memory() {
         let dir = root();
-        let st = Arc::new(static_files(&dir));
+        let (st, _cache) = cached(&dir);
         let first = run_shared(&st, request("GET", "/styles.css", "")).await;
         let etag = header(&first, "etag").to_owned();
         let modified = header(&first, "last-modified").to_owned();
@@ -464,26 +481,29 @@ mod tests {
         assert_eq!(body(res).await, "body{}");
     }
 
+    /// The range starts past the first byte, so the answer needs a seek in the cached body.
+    /// Content-Range carries first-pos "-" last-pos "/" complete-length (RFC 9110 section
+    /// 14.4, https://www.rfc-editor.org/rfc/rfc9110#section-14.4).
     #[tokio::test(flavor = "current_thread")]
     async fn a_cached_entry_still_serves_a_range() {
         let dir = root();
-        let st = Arc::new(static_files(&dir));
+        let (st, _cache) = cached(&dir);
         run_shared(&st, request("GET", "/data.bin", "")).await;
         std::fs::remove_file(dir.path().join("data.bin")).unwrap();
 
         let mut req = request("GET", "/data.bin", "");
         req.headers_mut()
-            .insert("range", "bytes=0-3".parse().unwrap());
+            .insert("range", "bytes=6-9".parse().unwrap());
         let res = run_shared(&st, req).await;
         assert_eq!(res.status(), 206);
-        assert_eq!(header(&res, "content-range"), "bytes 0-3/10");
-        assert_eq!(body(res).await, "abcd");
+        assert_eq!(header(&res, "content-range"), "bytes 6-9/10");
+        assert_eq!(body(res).await, "ghij");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_cached_entry_still_answers_304() {
         let dir = root();
-        let st = Arc::new(static_files(&dir));
+        let (st, _cache) = cached(&dir);
         let first = run_shared(&st, request("GET", "/data.bin", "")).await;
         let etag = header(&first, "etag").to_owned();
         std::fs::remove_file(dir.path().join("data.bin")).unwrap();
@@ -499,7 +519,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn head_serves_cached_metadata() {
         let dir = root();
-        let st = Arc::new(static_files(&dir));
+        let (st, _cache) = cached(&dir);
         run_shared(&st, request("GET", "/data.bin", "")).await;
         std::fs::remove_file(dir.path().join("data.bin")).unwrap();
 
@@ -515,7 +535,7 @@ mod tests {
         let dir = root();
         let path = dir.path().join("rewrite.css");
         write_at(&path, "aaaaaa", 1_000_000);
-        let st = Arc::new(static_files(&dir));
+        let (st, _cache) = cached(&dir);
 
         let first = run_shared(&st, request("GET", "/rewrite.css", "")).await;
         let etag = header(&first, "etag").to_owned();
@@ -532,10 +552,51 @@ mod tests {
         assert_eq!(body(after).await, "bbbbbb");
     }
 
+    /// Both writes keep the mtime. Only the length shows the difference.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stale_entry_reloads_a_same_mtime_resize() {
+        let dir = root();
+        let path = dir.path().join("resize.css");
+        write_at(&path, "aaaaaa", 1_000_000);
+        let (st, _cache) = cached(&dir);
+        let first = run_shared(&st, request("GET", "/resize.css", "")).await;
+        assert_eq!(body(first).await, "aaaaaa");
+
+        write_at(&path, "aaaaaaaaa", 1_000_000);
+        past_the_ttl();
+        let after = run_shared(&st, request("GET", "/resize.css", "")).await;
+        assert_eq!(header(&after, "content-length"), "9");
+        assert_eq!(body(after).await, "aaaaaaaaa");
+    }
+
+    /// A `HEAD` revalidation reaches `Backend::metadata` and never `Backend::open`. The body
+    /// must survive it, so the request after the delete still answers from memory.
+    #[tokio::test(flavor = "current_thread")]
+    async fn revalidation_of_an_unchanged_file_keeps_the_body() {
+        let dir = root();
+        let (st, cache) = cached(&dir);
+        run_shared(&st, request("GET", "/data.bin", "")).await;
+
+        past_the_ttl();
+        let head = run_shared(&st, request("HEAD", "/data.bin", "")).await;
+        assert_eq!(head.status(), 200);
+        assert_eq!(cache.entries(), 1, "revalidation must keep the body");
+        assert_eq!(
+            cache.reads(),
+            1,
+            "revalidation must not read the file again"
+        );
+
+        std::fs::remove_file(dir.path().join("data.bin")).unwrap();
+        let res = run_shared(&st, request("GET", "/data.bin", "")).await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(body(res).await, "abcdefghij");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_deleted_file_falls_through_after_the_ttl() {
         let dir = root();
-        let st = Arc::new(static_files(&dir));
+        let (st, cache) = cached(&dir);
         assert_eq!(
             run_shared(&st, request("GET", "/styles.css", ""))
                 .await
@@ -553,49 +614,80 @@ mod tests {
         past_the_ttl();
         let res = run_shared(&st, request("GET", "/styles.css", "")).await;
         assert_eq!(header(&res, "x-handler"), "php");
-        assert_eq!(st.cache.entries(), 0);
-        assert_eq!(st.cache.accounted(), 0);
+        assert_eq!(cache.entries(), 0);
+        assert_eq!(cache.accounted(), 0);
     }
 
+    /// An empty body must still be an entry. Without the entry, the second request would
+    /// reach the filesystem.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_empty_file_is_cached() {
+        let dir = root();
+        std::fs::write(dir.path().join("empty.css"), "").unwrap();
+        let (st, cache) = cached(&dir);
+        assert_eq!(
+            run_shared(&st, request("GET", "/empty.css", ""))
+                .await
+                .status(),
+            200
+        );
+        assert_eq!(cache.entries(), 1);
+        std::fs::remove_file(dir.path().join("empty.css")).unwrap();
+
+        let res = run_shared(&st, request("GET", "/empty.css", "")).await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(header(&res, "content-length"), "0");
+        assert_eq!(body(res).await, "");
+    }
+
+    /// The file holds no entry, so `HEAD` and `GET` both read the filesystem and report the
+    /// same answer (RFC 9110 section 9.3.2,
+    /// https://www.rfc-editor.org/rfc/rfc9110#section-9.3.2).
     #[tokio::test(flavor = "current_thread")]
     async fn a_file_over_the_cap_is_streamed_and_never_stored() {
         let dir = root();
         std::fs::write(dir.path().join("big.bin"), vec![b'x'; 262_145]).unwrap();
-        let st = Arc::new(static_files(&dir));
+        let (st, cache) = cached(&dir);
 
         let res = run_shared(&st, request("GET", "/big.bin", "")).await;
         assert_eq!(res.status(), 200);
         assert_eq!(header(&res, "content-length"), "262145");
         assert_eq!(body(res).await.len(), 262_145);
-        assert_eq!(
-            st.cache.bodies(),
-            0,
-            "the cache must not store a large file"
-        );
+        assert_eq!(cache.entries(), 0, "the cache must not store a large file");
+        assert_eq!(cache.reads(), 0, "a large file must not reach the heap");
 
         std::fs::remove_file(dir.path().join("big.bin")).unwrap();
-        let res = run_shared(&st, request("GET", "/big.bin", "")).await;
-        assert_eq!(header(&res, "x-handler"), "php");
+        let head = run_shared(&st, request("HEAD", "/big.bin", "")).await;
+        let get = run_shared(&st, request("GET", "/big.bin", "")).await;
+        assert_eq!(header(&head, "x-handler"), "php");
+        assert_eq!(header(&get, "x-handler"), "php");
     }
 
-    /// A limit of 16MiB holds 63 entries of 256KiB. `ServeDir` streams the later files from
-    /// disk, and the cache stores no body for them.
+    /// A limit of 16MiB holds 63 entries of 256KiB, because a 64th entry would need a
+    /// negative path length. `ServeDir` streams the later files from disk. The cache reads
+    /// none of them into memory. Every entry then goes stale, so the last file fits.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_full_cache_serves_without_storing() {
+    async fn a_full_cache_stops_storing_and_reclaims_after_the_ttl() {
         let dir = root();
         for i in 0..70 {
             std::fs::write(dir.path().join(format!("f{i:02}.bin")), vec![b'y'; 262_144]).unwrap();
         }
-        let st = Arc::new(static_files(&dir));
+        let (st, cache) = cached(&dir);
         for i in 0..70 {
             let res = run_shared(&st, request("GET", &format!("/f{i:02}.bin"), "")).await;
             assert_eq!(res.status(), 200, "f{i:02}.bin");
             assert_eq!(body(res).await.len(), 262_144, "f{i:02}.bin");
         }
 
-        assert!(st.cache.bodies() < 70, "{} bodies", st.cache.bodies());
-        assert!(st.cache.accounted() <= 16 * 1024 * 1024);
-        assert_eq!(st.cache.accounted(), st.cache.recomputed());
+        assert_eq!(cache.entries(), 63);
+        assert_eq!(cache.reads(), 63, "a refused file must not reach the heap");
+        assert!(cache.accounted() <= 16 * 1024 * 1024);
+        assert_eq!(cache.accounted(), cache.recomputed());
+
+        past_the_ttl();
+        run_shared(&st, request("GET", "/f69.bin", "")).await;
+        assert_eq!(cache.entries(), 1, "a stale entry must release its room");
+        assert_eq!(cache.accounted(), cache.recomputed());
     }
 
     /// A replacement and a removal can both make the running total wrong. The test does one
@@ -605,10 +697,10 @@ mod tests {
         let dir = root();
         let styles = dir.path().join("styles.css");
         write_at(&styles, "body{}", 1_000_000);
-        let st = Arc::new(static_files(&dir));
+        let (st, cache) = cached(&dir);
         run_shared(&st, request("GET", "/styles.css", "")).await;
         run_shared(&st, request("GET", "/data.bin", "")).await;
-        assert_eq!(st.cache.accounted(), st.cache.recomputed());
+        assert_eq!(cache.accounted(), cache.recomputed());
 
         write_at(&styles, "body{color:red}", 1_000_002);
         std::fs::remove_file(dir.path().join("data.bin")).unwrap();
@@ -620,31 +712,36 @@ mod tests {
         let res = run_shared(&st, request("GET", "/data.bin", "")).await;
         assert_eq!(header(&res, "x-handler"), "php");
 
-        assert_eq!(st.cache.entries(), 1);
-        assert_eq!(st.cache.accounted(), st.cache.recomputed());
+        assert_eq!(cache.entries(), 1);
+        assert_eq!(cache.accounted(), cache.recomputed());
     }
 
-    /// A directory URL is a PHP route. The cache stores its metadata, so the second request
-    /// makes no syscall.
+    /// A directory URL is a PHP route. The cache holds no entry for it, so `HEAD` and `GET`
+    /// read the same filesystem state.
     #[tokio::test(flavor = "current_thread")]
-    async fn directory_metadata_is_cached() {
+    async fn a_directory_is_not_cached() {
         let dir = root();
-        let st = Arc::new(static_files(&dir));
+        let (st, cache) = cached(&dir);
         for _ in 0..2 {
             let res = run_shared(&st, request("GET", "/sub", "")).await;
             assert_eq!(header(&res, "x-handler"), "php");
         }
-        assert_eq!(st.cache.entries(), 1);
+        assert_eq!(cache.entries(), 0);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// Eight requests arrive for one cold path. One task reads the file. The other tasks
+    /// stream it from disk. Every answer matches, and the cache reads the file once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_fills_agree() {
         let dir = root();
-        let st = Arc::new(static_files(&dir));
+        let (st, cache) = cached(&dir);
+        let gate = Arc::new(tokio::sync::Barrier::new(8));
         let mut tasks = Vec::new();
         for _ in 0..8 {
             let st = Arc::clone(&st);
+            let gate = Arc::clone(&gate);
             tasks.push(tokio::spawn(async move {
+                gate.wait().await;
                 let res = run_shared(&st, request("GET", "/data.bin", "")).await;
                 let etag = header(&res, "etag").to_owned();
                 (etag, body(res).await)
@@ -659,7 +756,8 @@ mod tests {
             assert_eq!(etag, &answers[0].0);
             assert_eq!(bytes, "abcdefghij");
         }
-        assert_eq!(st.cache.entries(), 1);
-        assert_eq!(st.cache.accounted(), st.cache.recomputed());
+        assert_eq!(cache.entries(), 1);
+        assert_eq!(cache.reads(), 1, "one task reads the file into memory");
+        assert_eq!(cache.accounted(), cache.recomputed());
     }
 }

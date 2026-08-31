@@ -14,6 +14,8 @@ Connections are served by hyper's http1 builder. Each request runs through admis
 
 Built-in middleware lives under `crates/middleware`, one crate per middleware. The `middleware` list in `[http]` selects the built-in middleware and sets the chain order. `rapira_static_files::StaticFiles` serves files from `[http.static].root`. A miss falls through the chain to PHP. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
 
+`StaticFiles` holds served files in memory. An entry stays fresh for one second. A rewritten file therefore reaches the client after that time. Each worker keeps its own cache of up to 16 MiB, and the cache stores no file above 256 KiB. The memory cost is 16 MiB for each process in `pool.processes`. A permission change does not stop the cache from serving a file. To stop it, delete the file or replace it. A restart empties the cache.
+
 ## Request handling
 
 - The request body is buffered before dispatch and capped by `max_body_size`: a declared `Content-Length` over the cap answers 413 before the body is read, an over-long streamed body answers 413 when the cap is crossed.

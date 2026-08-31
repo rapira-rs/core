@@ -1,24 +1,30 @@
 //! A file cache for one worker process.
 //!
-//! `ServeDir` makes all filesystem calls through the `Backend` trait, and this module
-//! implements that trait. `ServeDir` keeps the ETag, the preconditions, Range and the header
-//! set. This module supplies only the bytes and the metadata.
+//! `ServeDir` sends every filesystem operation through the `Backend` trait. This module
+//! implements that trait. `ServeDir` builds the ETag, evaluates the preconditions, applies
+//! Range, and sets the headers. This module supplies only the bytes and the metadata.
+//! https://docs.rs/tower-http/0.7.1/tower_http/services/fs/trait.Backend.html
 //!
-//! An entry is fresh for one second. Each forked worker has its own cache.
+//! An entry is a snapshot of one file at one instant. It holds the bytes and the metadata
+//! together. The cache therefore holds no entry for a miss, for a directory, or for a file
+//! above the size cap. `ServeDir` reads the validators of a `HEAD` and of a `GET` from the
+//! same entry, so the two methods always agree.
 //!
-//! The cache does not store a miss. A new file is therefore visible on the next request.
-//! Only a change to a file that is already in the cache can give stale data.
+//! An entry is fresh for one second. Each forked worker has its own cache. Only a change to a
+//! cached file can give stale data.
 //!
 //! The cache treats a file as changed when the mtime or the length is different. The ETag
 //! encodes the same two values.
 //!
-//! A change of permissions does not make an entry stale. `stat` needs search permission on
-//! the parent directory, not read permission on the file. To withdraw a file, delete it,
-//! replace it, or remove search permission on its directory.
+//! A change of permissions does not stop the cache from serving a file. `stat` needs search
+//! permission on the parent directory, not read permission on the file. To stop the cache
+//! from serving a file, delete the file or replace it.
+//! https://pubs.opengroup.org/onlinepubs/9799919799/functions/stat.html
 //!
-//! `stat` runs on a runtime thread. The root must therefore be on local storage.
+//! The backend runs `stat` and `open` on a runtime thread. A slow filesystem therefore
+//! blocks the runtime. The root must be on local storage.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::{Ready, ready};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -35,9 +41,11 @@ use tower_http::services::fs::{Backend, File, Metadata};
 const MAX_FILE: u64 = 256 * 1024;
 /// The memory limit for one worker process. Forked workers do not share the cache.
 const MAX_TOTAL: usize = 16 * 1024 * 1024;
+/// An entry stays fresh for this time. A stat then revalidates it, so a change to a cached
+/// file reaches the client after one second.
 const TTL: Duration = Duration::from_secs(1);
 /// The cache adds this value to the size of each entry. It covers the entry and the map slot.
-/// A root of many small files needs it to keep the count near the true memory use.
+/// The bodies alone understate the memory of a root that holds many small files.
 const ENTRY_OVERHEAD: usize = 256;
 
 #[derive(Clone, Copy)]
@@ -56,8 +64,10 @@ impl CachedMeta {
         }
     }
 
-    /// `ServeDir` makes the ETag and `Last-Modified` from these two values. Equal values
-    /// therefore show that the cached body is still correct.
+    /// `ServeDir` builds the ETag from these two values, and `Last-Modified` from the mtime.
+    /// Equal values therefore give the client the same validators. The comparison holds no
+    /// device number and no inode number. The cache does not detect a replacement that keeps
+    /// the mtime and the length.
     fn same_file(&self, other: &Self) -> bool {
         self.modified == other.modified && self.len == other.len
     }
@@ -69,7 +79,8 @@ impl Metadata for CachedMeta {
     }
 
     /// `ServeDir` calls `.ok()` on this result. An absent mtime gives no ETag and no
-    /// `Last-Modified`. `std::fs::Metadata` gives the same answer for the same file.
+    /// `Last-Modified`. This result is `Err` only when `std::fs::Metadata::modified` is also
+    /// `Err` for the same file.
     fn modified(&self) -> io::Result<SystemTime> {
         self.modified
             .ok_or_else(|| io::Error::other("modification time is not available"))
@@ -80,8 +91,8 @@ impl Metadata for CachedMeta {
     }
 }
 
-/// The file keeps its own metadata. `File::metadata` therefore makes no syscall, and the
-/// bytes and the validators always come from one file descriptor.
+/// Each variant keeps its own metadata, so `File::metadata` does no syscall. The bytes and
+/// the metadata of one value always come from the same open file.
 pub(crate) enum CachedFile {
     Memory {
         cursor: Cursor<Bytes>,
@@ -135,16 +146,19 @@ impl File for CachedFile {
 }
 
 struct Entry {
-    body: Option<Bytes>,
+    body: Bytes,
     meta: CachedMeta,
     checked: Instant,
-    footprint: usize,
 }
 
 #[derive(Default)]
 struct Store {
     map: HashMap<PathBuf, Entry>,
+    /// The paths that a task reads into memory at this moment.
+    filling: HashSet<PathBuf>,
     bytes: usize,
+    #[cfg(test)]
+    reads: usize,
 }
 
 impl Store {
@@ -156,7 +170,7 @@ impl Store {
 
     fn take(&mut self, path: &Path) {
         if let Some(entry) = self.map.remove(path) {
-            self.bytes -= entry.footprint;
+            self.bytes -= Self::footprint(path, entry.body.len());
         }
     }
 
@@ -164,29 +178,91 @@ impl Store {
         body + path.as_os_str().len() + ENTRY_OVERHEAD
     }
 
-    /// A full cache continues to serve, but it stores no more entries. A replacement first
-    /// releases the size of the old entry. A reload of the same size therefore always fits.
-    fn has_room(&self, path: &Path, body: u64) -> bool {
-        let reclaimed = self.map.get(path).map_or(0, |e| e.footprint);
+    /// A replacement first releases the size of the old entry. A reload of the same size
+    /// therefore always fits.
+    fn fits(&self, path: &Path, body: u64) -> bool {
+        let reclaimed = self
+            .map
+            .get(path)
+            .map_or(0, |e| Self::footprint(path, e.body.len()));
         self.bytes - reclaimed + Self::footprint(path, body as usize) <= MAX_TOTAL
     }
 
-    fn put(&mut self, path: PathBuf, body: Option<Bytes>, meta: CachedMeta, now: Instant) {
-        self.take(&path);
-        let footprint = Self::footprint(&path, body.as_ref().map_or(0, Bytes::len));
-        if self.bytes + footprint > MAX_TOTAL {
+    /// Removes every entry outside the freshness window. `revalidate` moves `checked` forward
+    /// on each access. The entries that stay are therefore the entries that a client asked for
+    /// in the last second.
+    fn drop_expired(&mut self, now: Instant) {
+        let mut freed = 0;
+        self.map.retain(|path, entry| {
+            if now.duration_since(entry.checked) < TTL {
+                return true;
+            }
+            freed += Self::footprint(path, entry.body.len());
+            false
+        });
+        self.bytes -= freed;
+    }
+
+    /// A full cache still serves its entries. It removes the stale entries before it refuses
+    /// a new file. A cache that holds only fresh entries refuses every new file until the load
+    /// decreases.
+    fn make_room(&mut self, path: &Path, body: u64, now: Instant) -> bool {
+        if self.fits(path, body) {
+            return true;
+        }
+        self.drop_expired(now);
+        self.fits(path, body)
+    }
+
+    /// Refreshes an entry that still matches the file. Removes an entry that does not match.
+    /// A path with no entry stays out of the map until `fill` has a body for it.
+    fn revalidate(&mut self, path: &Path, meta: &CachedMeta, now: Instant) {
+        match self.map.get_mut(path) {
+            Some(entry) if entry.meta.same_file(meta) => entry.checked = now,
+            Some(_) => self.take(path),
+            None => {}
+        }
+    }
+
+    /// The capacity check runs before the removal, so a refused entry leaves the resident one
+    /// in place.
+    fn put(&mut self, path: PathBuf, body: Bytes, meta: CachedMeta, now: Instant) {
+        if !self.make_room(&path, body.len() as u64, now) {
             return;
         }
-        self.bytes += footprint;
+        self.take(&path);
+        self.bytes += Self::footprint(&path, body.len());
         self.map.insert(
             path,
             Entry {
                 body,
                 meta,
                 checked: now,
-                footprint,
             },
         );
+    }
+}
+
+/// Marks a path while one task reads it into memory. Clears the mark when the read ends.
+struct FillGuard {
+    backend: CachingBackend,
+    path: PathBuf,
+}
+
+impl FillGuard {
+    /// Returns `None` when another task already reads this path.
+    fn claim(backend: &CachingBackend, path: &Path) -> Option<Self> {
+        let claimed = backend.lock().filling.insert(path.to_path_buf());
+        claimed.then(|| Self {
+            backend: backend.clone(),
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for FillGuard {
+    fn drop(&mut self) {
+        self.backend.lock().filling.remove(&self.path);
     }
 }
 
@@ -214,26 +290,28 @@ impl CachingBackend {
                 return Err(err);
             }
         };
-        let mut store = self.lock();
-        match store.map.get_mut(path) {
-            Some(entry) if entry.meta.same_file(&meta) => entry.checked = now,
-            _ => store.put(path.to_path_buf(), None, meta, now),
-        }
+        self.lock().revalidate(path, &meta, now);
         Ok(meta)
     }
 
     fn hit(&self, path: &Path) -> Option<CachedFile> {
         let store = self.lock();
         let entry = store.fresh(path, Instant::now())?;
-        let body = entry.body.clone()?;
         Some(CachedFile::Memory {
-            cursor: Cursor::new(body),
+            cursor: Cursor::new(entry.body.clone()),
             meta: entry.meta,
         })
     }
 
+    fn stream(file: std::fs::File, meta: CachedMeta) -> CachedFile {
+        CachedFile::Disk {
+            file: tokio::fs::File::from_std(file),
+            meta,
+        }
+    }
+
     async fn fill(self, path: PathBuf) -> io::Result<CachedFile> {
-        let mut file = match std::fs::File::open(&path) {
+        let file = match std::fs::File::open(&path) {
             Ok(file) => file,
             Err(err) => {
                 self.lock().take(&path);
@@ -242,40 +320,57 @@ impl CachingBackend {
         };
         let meta = CachedMeta::new(&file.metadata()?);
 
-        // `ServeDir` streams a file that the cache cannot store. The metadata entry stays, so
-        // a later request needs no stat. `metadata` removes an entry that became stale.
-        if meta.is_dir || meta.len > MAX_FILE || !self.lock().has_room(&path, meta.len) {
-            return Ok(CachedFile::Disk {
-                file: tokio::fs::File::from_std(file),
-                meta,
-            });
+        // The path became a directory between the stat and the open. `open` on a directory
+        // succeeds on Unix, and the read then fails. The backend must therefore report an
+        // error before `ServeDir` writes a head.
+        // https://man7.org/linux/man-pages/man2/open.2.html
+        if meta.is_dir {
+            return Err(io::Error::from(io::ErrorKind::IsADirectory));
         }
 
-        // Only the body read uses the blocking pool, and only once for each change to a file.
+        // `ServeDir` streams a file that the cache cannot store.
+        if meta.len > MAX_FILE || !self.lock().make_room(&path, meta.len, Instant::now()) {
+            return Ok(Self::stream(file, meta));
+        }
+
+        // One task at a time reads a file into memory. Another task that wants the same file
+        // streams it from disk. A burst on a cold path therefore costs one read.
+        let Some(_filling) = FillGuard::claim(&self, &path) else {
+            return Ok(Self::stream(file, meta));
+        };
+        // The open and the stat above take time. Another task can complete the read in that
+        // interval.
+        if let Some(cached) = self.hit(&path) {
+            return Ok(cached);
+        }
+        #[cfg(test)]
+        {
+            self.lock().reads += 1;
+        }
+
         let (mut file, buf, reread) = tokio::task::spawn_blocking(move || {
             let mut buf = Vec::with_capacity(meta.len as usize);
-            file.read_to_end(&mut buf)?;
+            // The size check above used the stat from before the read. A bounded read stops
+            // a file that grows during the read from filling the heap. The length check below
+            // then discards that file.
+            (&file).take(meta.len + 1).read_to_end(&mut buf)?;
             let reread = file.metadata()?;
             io::Result::Ok((file, buf, CachedMeta::new(&reread)))
         })
         .await
         .map_err(io::Error::other)??;
 
-        // The second stat detects a write that occurred during the read. An entry with new
-        // metadata and old bytes stays stale: each revalidation compares the new metadata
-        // with itself, and finds no change until the file changes again.
+        // The second stat detects a write during the read. The cache must not keep the new
+        // metadata with the old bytes. A revalidation would compare the new metadata with
+        // itself and find no change. The cache would serve the old bytes until the next write.
         if !reread.same_file(&meta) || buf.len() as u64 != meta.len {
             self.lock().take(&path);
             file.seek(SeekFrom::Start(0))?;
-            return Ok(CachedFile::Disk {
-                file: tokio::fs::File::from_std(file),
-                meta: reread,
-            });
+            return Ok(Self::stream(file, reread));
         }
 
         let body = Bytes::from(buf);
-        self.lock()
-            .put(path, Some(body.clone()), meta, Instant::now());
+        self.lock().put(path, body.clone(), meta, Instant::now());
         Ok(CachedFile::Memory {
             cursor: Cursor::new(body),
             meta,
@@ -289,7 +384,8 @@ impl Backend for CachingBackend {
     type OpenFuture = Pin<Box<dyn Future<Output = io::Result<CachedFile>> + Send>>;
     type MetadataFuture = Ready<io::Result<CachedMeta>>;
 
-    /// This function is synchronous. A miss must not use the blocking pool.
+    /// A stat is short. The blocking pool would cost more than the syscall, so a miss does
+    /// the stat inline.
     fn metadata(&self, path: PathBuf) -> Self::MetadataFuture {
         ready(self.stat(&path))
     }
@@ -298,8 +394,7 @@ impl Backend for CachingBackend {
         if let Some(file) = self.hit(&path) {
             return Box::pin(ready(Ok(file)));
         }
-        let backend = self.clone();
-        Box::pin(async move { backend.fill(path).await })
+        Box::pin(self.clone().fill(path))
     }
 }
 
@@ -309,22 +404,21 @@ impl CachingBackend {
         self.lock().bytes
     }
 
-    /// Adds the size of each entry again. The result must equal the running total.
+    /// Adds the size of every entry in the map. The result must equal the running total.
     pub(crate) fn recomputed(&self) -> usize {
-        self.lock().map.values().map(|e| e.footprint).sum()
+        self.lock()
+            .map
+            .iter()
+            .map(|(path, entry)| Store::footprint(path, entry.body.len()))
+            .sum()
     }
 
     pub(crate) fn entries(&self) -> usize {
         self.lock().map.len()
     }
 
-    /// The number of entries that hold a body. A directory and a file above `MAX_FILE` store
-    /// metadata only.
-    pub(crate) fn bodies(&self) -> usize {
-        self.lock()
-            .map
-            .values()
-            .filter(|e| e.body.is_some())
-            .count()
+    /// The number of files that the cache read into memory. It does not count a refused file.
+    pub(crate) fn reads(&self) -> usize {
+        self.lock().reads
     }
 }
