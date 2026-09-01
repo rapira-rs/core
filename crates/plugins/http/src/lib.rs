@@ -51,14 +51,14 @@ impl Default for Config {
     }
 }
 
-pub struct HttpServer {
+pub struct Server {
     config: Config,
     prepared: Option<PreparedListener>,
     shutdown: Option<watch::Sender<bool>>,
     join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
-impl Extension for HttpServer {
+impl Extension for Server {
     type Config = Config;
 
     fn init(config: Config) -> Self {
@@ -71,7 +71,7 @@ impl Extension for HttpServer {
     }
 
     fn name(&self) -> &str {
-        "rapira-tower"
+        "rapira-http"
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
@@ -98,12 +98,12 @@ impl Extension for HttpServer {
         };
 
         let thread = std::thread::Builder::new()
-            .name("rapira-tower".into())
+            .name("rapira-http".into())
             .spawn(move || {
                 let rt: runtime::Runtime = match Builder::new_multi_thread()
                     .enable_all()
                     .worker_threads(2)
-                    .thread_name("rapira-tower-io")
+                    .thread_name("rapira-http-io")
                     .build()
                 {
                     Ok(rt) => rt,

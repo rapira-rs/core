@@ -1,10 +1,10 @@
-# rapira_tower
+# rapira_http
 
 The HTTP front built into the `rapira` binary. It terminates HTTP/1.1 on the configured listener and answers every request from PHP through the `extension_api` bridge; there is no upstream and nothing is proxied.
 
 ## How it works
 
-`HttpServer` implements `extension_api::Extension`. The host's extension runtime runs without an IO driver, so this crate serves on its own tokio runtime (two workers, thread `rapira-tower`) on a dedicated thread. The listener is bound pre-fork by the master through `PrepareCtx`; each worker inherits the fd and adopts it with `from_std`.
+`Server` implements `extension_api::Extension`. The host's extension runtime runs without an IO driver, so this crate serves on its own tokio runtime (two workers, thread `rapira-http`) on a dedicated thread. The listener is bound pre-fork by the master through `PrepareCtx`; each worker inherits the fd and adopts it with `from_std`.
 
 Connections are served by hyper's http1 builder. Each request runs through admission checks, the middleware chain, and the PHP handler: the request maps to an `extension_api::Request`, executes via `Php::exec`, and the resulting `ReplyEvent` stream is written back to the socket as it arrives.
 
@@ -13,6 +13,8 @@ Connections are served by hyper's http1 builder. Each request runs through admis
 `Config.middleware` holds an `extension_api::Middleware` chain, outermost first, shared by every protocol this plugin serves. A middleware sees `http::Request<Body>`/`http::Response<Body>` with `Protocol` and `Peer` in the request extensions, and either calls `next.run(req)` or answers on its own. The extensions also carry private per-request state for the handler. Keep the extensions when you rebuild a request. Do not retain them past the call. Admission checks run before the chain, so middleware never sees a request that was refused at the door.
 
 Built-in middleware lives under `crates/middleware`, one crate per middleware. The `middleware` list in `[http]` selects the built-in middleware and sets the chain order. `rapira_static_files::StaticFiles` serves files from `[http.static].root`. A miss falls through the chain to PHP. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
+
+`StaticFiles` holds served files in memory. An entry stays fresh for one second. A rewritten file therefore reaches the client after that time. Each worker keeps its own cache of up to 16 MiB, and the cache stores no file above 256 KiB. The memory cost is 16 MiB for each process in `pool.processes`. A permission change does not stop the cache from serving a file. To stop it, delete the file or replace it. A restart empties the cache.
 
 ## Request handling
 
@@ -58,8 +60,8 @@ On the stop signal the accept loop ends immediately, idle keepalive connections 
 ## Build
 
 ```sh
-cargo build -p rapira_tower
-cargo clippy -p rapira_tower --all-targets
+cargo build -p rapira_http
+cargo clippy -p rapira_http --all-targets
 ```
 
 ## License
