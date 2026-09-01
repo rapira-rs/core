@@ -68,6 +68,7 @@ impl CachedMeta {
     /// Equal values therefore give the client the same validators. The comparison holds no
     /// device number and no inode number. The cache does not detect a replacement that keeps
     /// the mtime and the length.
+    /// TODO!: probably here we need to add device and inode numbers to detect better.
     fn same_file(&self, other: &Self) -> bool {
         self.modified == other.modified && self.len == other.len
     }
