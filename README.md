@@ -114,16 +114,20 @@ For more information, see [classic mode](https://rapira.rs/docs/classic).
 ```php
 <?php
 use Rapira\Exception\ClosedException;
+use Rapira\Exception\WorkDiscardedException;
 
 $dispatcher = \Rapira\get_dispatcher();
 
 try {
     while (true) {
         $exchange = $dispatcher->receive();
-        $request = $exchange->getRequest();
 
-        $exchange->writeHead(200, ['content-type' => ['text/plain']]);
-        $exchange->writeBody("Hello, {$request->target}\n");
+        try {
+            $request = $exchange->getRequest();
+            $exchange->writeHead(200, ['content-type' => ['text/plain']]);
+            $exchange->writeBody("Hello, {$request->target}\n");
+        } catch (WorkDiscardedException) {
+        }
     }
 } catch (ClosedException) {
 }
