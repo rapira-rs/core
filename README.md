@@ -11,8 +11,8 @@ Classic mode runs an application's front controller for each request. Worker and
 
 For the full documentation, see **[rapira.rs](https://rapira.rs/docs/)**:
 
-- [Installation](https://rapira.rs/docs/installation)
-- [Quickstart](https://rapira.rs/docs/quickstart)
+- [Installation](https://rapira.rs/docs/intro/installation)
+- [Quickstart](https://rapira.rs/docs/intro/quickstart)
 - [Worker mode](https://rapira.rs/docs/worker)
 - [Configuration](https://rapira.rs/docs/configuration)
 - [Process model](https://rapira.rs/docs/process-model)
@@ -32,7 +32,7 @@ sudo apt install ./rapira-php8.5_<version>_amd64.deb    # Debian/Ubuntu
 sudo dnf install ./rapira-php8.5-<version>.x86_64.rpm   # Fedora/RHEL
 ```
 
-See [the installation documentation](https://rapira.rs/docs/installation) for all options, tar archives, checksums, and included files.
+See [the installation documentation](https://rapira.rs/docs/intro/installation) for all options, tar archives, checksums, and included files.
 
 ### Docker
 
@@ -54,7 +54,7 @@ RUN apt-get update && xargs -a /tmp/debian-packages.txt apt-get install -y --no-
 COPY --from=ghcr.io/rapira-rs/rapira:php8.5 / /
 ```
 
-You can add PHP extensions without a rebuild of `libphp.so` or Rapira. For a PHP base image, use `docker-php-ext-install`. For a base image that does not contain PHP, build the extensions in a stage that uses the same PHP minor version. Then, copy the extensions into the final image:
+You can add PHP extensions without a rebuild of `libphp.so` or Rapira. For a PHP base image, use `docker-php-ext-install`. For a base image that does not contain PHP, build the extensions in a stage that uses the same PHP minor version. Some extensions also require system libraries. Install the required runtime packages in the final image. Then, copy the extension and INI files:
 
 ```dockerfile
 FROM php:8.5-cli-trixie AS ext
