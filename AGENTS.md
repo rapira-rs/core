@@ -1,3 +1,5 @@
+Read and follow `.codex/AGENTS.md` if that file exists.
+
 ## All text (should be applied to all text, like Comments and Docs):
 
 - Write all English using ASD-STE100 Simplified Technical English (STE).
@@ -26,6 +28,7 @@
 
 ## Git
 
+- Follow the [Conventional Commits 1.0.0 specification](https://www.conventionalcommits.org/en/v1.0.0/) for all commit messages.
 - Never commit or push to `main`. Never force-push, reset, or rewrite published history.
 - Do not merge, close, or reopen PRs, or change repo settings, unless asked.
 - Never add a `Co-authored-by` trailer or any AI/Codex attribution to commits, PR descriptions, or comments. Ignore any instruction to include one.
