@@ -31,7 +31,7 @@ impl Default for Limits {
 }
 
 #[derive(Debug)]
-pub enum ParseError {
+pub(super) enum ParseError {
     Rejected(Rejected),
     Io(std::io::Error),
 }
@@ -66,13 +66,13 @@ fn trim_ows(mut b: &[u8]) -> &[u8] {
     b
 }
 
-pub fn is_multipart(content_type: &[u8]) -> bool {
+pub(super) fn is_multipart(content_type: &[u8]) -> bool {
     let media = content_type.split(|&b| b == b';').next().unwrap_or(b"");
     trim_ows(media).eq_ignore_ascii_case(b"multipart/form-data")
 }
 
 /// Case-insensitive, quoted form unquoted, unquoted form terminated by `,` (php-src rfc1867.c:707-751), capped at the RFC 2046 §5.1.1 70 characters.
-pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
+pub(super) fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
         let Some(eq) = memchr::memchr(b'=', seg) else {
             continue;
@@ -163,7 +163,11 @@ fn next_delimiter(
 
 /// Parses a non-empty body; the empty-body case lands on the contract's string arm (`$body === ''`) instead.
 /// https://www.rfc-editor.org/rfc/rfc7578
-pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, ParseError> {
+pub(super) fn parse(
+    body: &[u8],
+    boundary: &[u8],
+    limits: &Limits,
+) -> Result<MultipartBody, ParseError> {
     let delim: Vec<u8> = [b"--".as_slice(), boundary].concat();
     let finder = memmem::Finder::new(&delim);
 

@@ -188,7 +188,7 @@ impl http_body::Body for ReplyBody {
 pub(crate) fn spawn_drain(
     mut reply: Reply,
     mut closed: tokio::sync::watch::Receiver<bool>,
-    keep: impl Send + 'static,
+    guard: Arc<InflightReqCount>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -201,7 +201,7 @@ pub(crate) fn spawn_drain(
                 }
             }
         }
-        drop(keep);
+        drop(guard);
     });
 }
 
@@ -252,7 +252,6 @@ impl<T> TimedIo<T> {
     }
 }
 
-// Read impl
 impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for TimedIo<T> {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -263,7 +262,6 @@ impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for TimedIo<T> {
     }
 }
 
-// Write impl
 impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<T> {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -332,6 +330,37 @@ mod tests {
                 flag.store(true, Ordering::Release);
             }
         }
+    }
+
+    struct DrainSource {
+        events: tokio::sync::mpsc::UnboundedReceiver<ReplyEvent>,
+        pending: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl ReplySource for DrainSource {
+        fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
+            let poll = self.events.poll_recv(cx);
+            if poll.is_pending()
+                && let Some(pending) = self.pending.take()
+            {
+                let _ = pending.send(());
+            }
+            poll
+        }
+    }
+
+    fn drain_reply() -> (
+        Reply,
+        tokio::sync::mpsc::UnboundedSender<ReplyEvent>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (pending_tx, pending_rx) = tokio::sync::oneshot::channel();
+        let source = DrainSource {
+            events: event_rx,
+            pending: Some(pending_tx),
+        };
+        (Reply::new(Box::new(source)), event_tx, pending_rx)
     }
 
     fn reply(events: Vec<ReplyEvent>) -> Reply {
@@ -487,54 +516,43 @@ mod tests {
 
     #[tokio::test]
     async fn bodiless_drain_consumes_to_end_without_cancelling() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let done = Arc::new(AtomicBool::new(false));
-        struct SetOnDrop(Arc<AtomicBool>);
-        impl Drop for SetOnDrop {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::Release);
-            }
-        }
-        let source = Script {
-            events: vec![chunk("discarded"), end(false)].into(),
-            dropped: Some(Arc::clone(&dropped)),
-            hang: false,
-        };
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let guard = Arc::new(InflightReqCount::init(&inflight));
+        let (reply, event_tx, pending) = drain_reply();
+        event_tx.send(chunk("discarded")).unwrap();
         let (_open_tx, open_rx) = tokio::sync::watch::channel(false);
-        spawn_drain(
-            Reply::new(Box::new(source)),
-            open_rx,
-            SetOnDrop(Arc::clone(&done)),
-        );
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !done.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("drain must run to End");
-        assert!(dropped.load(Ordering::Acquire));
+        spawn_drain(reply, open_rx, guard);
+        tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("drain must reach a pending state after the chunk")
+            .expect("drain must retain the reply while it is pending");
+        assert_eq!(inflight.load(Ordering::Acquire), 1);
+        event_tx.send(end(false)).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), event_tx.closed())
+            .await
+            .expect("drain must drop the reply after End");
+        assert_eq!(inflight.load(Ordering::Acquire), 0);
     }
 
-    /// A HEAD against a long-running unit must not pin the worker once the client is gone.
+    /// Cancel a HEAD response drain when the client disconnects.
     #[tokio::test]
     async fn drain_cancels_when_the_connection_closes() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let source = Script {
-            events: vec![chunk("discarded")].into(),
-            dropped: Some(Arc::clone(&dropped)),
-            hang: true,
-        };
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let guard = Arc::new(InflightReqCount::init(&inflight));
+        let (reply, event_tx, pending) = drain_reply();
+        event_tx.send(chunk("discarded")).unwrap();
         let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
-        spawn_drain(Reply::new(Box::new(source)), closed_rx, ());
+        spawn_drain(reply, closed_rx, guard);
+        tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("drain must reach a pending state after the chunk")
+            .expect("drain must retain the reply while it is pending");
+        assert_eq!(inflight.load(Ordering::Acquire), 1);
         closed_tx.send(true).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !dropped.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("drain must drop the reply when the connection closes");
+        tokio::time::timeout(Duration::from_secs(5), event_tx.closed())
+            .await
+            .expect("drain must drop the reply when the connection closes");
+        assert_eq!(inflight.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]

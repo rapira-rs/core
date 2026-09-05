@@ -40,7 +40,6 @@ impl Drop for PhpModule {
 
 pub struct Rapira {
     pub(crate) intake: Option<Intake>,
-    pub(crate) superglobals: bool,
     pub(crate) dispatcher: bool,
     worker: Option<JoinHandle<()>>,
     board: Option<rapira_scoreboard::Scoreboard>,
@@ -103,7 +102,7 @@ impl Rapira {
             Some(s) => (None, s),
             None => {
                 let board = rapira_scoreboard::Scoreboard::create(1)?;
-                (Some(board), board.slot(0).expect("slot 0 exists"))
+                (Some(board), board.slot(0))
             }
         };
         slot.bind(std::process::id());
@@ -114,7 +113,6 @@ impl Rapira {
             pending: pending.clone(),
         };
 
-        let superglobals = !matches!(mode, Mode::Dispatcher(_));
         let dispatcher = matches!(mode, Mode::Dispatcher(_));
         // SAFETY: safe, trust me, I'm a developer
         unsafe {
@@ -140,7 +138,6 @@ impl Rapira {
 
         Ok(Self {
             intake: Some(intake),
-            superglobals,
             dispatcher,
             worker: Some(worker),
             board,
@@ -156,9 +153,7 @@ impl Rapira {
         Ok(rapira)
     }
 
-    pub fn shutdown(self) {
-        info!(target: "rapira", "shutdown is noop, deinitialize in Drop");
-    }
+    pub fn shutdown(self) {}
 
     pub fn scoreboard(&self) -> ScoreboardSnapshot {
         match &self.board {

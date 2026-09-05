@@ -4,9 +4,11 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result};
-use tokio::runtime::{self, Builder};
-use tokio::sync::{oneshot, watch};
+use tokio::runtime::Builder;
+use tokio::sync::watch;
 
+#[cfg(target_os = "linux")]
+mod accept_linux;
 mod bridge;
 mod check;
 mod handler;
@@ -91,7 +93,6 @@ impl Extension for Server {
 
     async fn run(&mut self, php: Php) -> Result<()> {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (done_tx, done_rx) = oneshot::channel();
         let config = self.config.clone();
         let Some(prepared) = self.prepared.take() else {
             return Err(anyhow!("http listener was not prepared"));
@@ -100,36 +101,22 @@ impl Extension for Server {
         let thread = std::thread::Builder::new()
             .name("rapira-http".into())
             .spawn(move || {
-                let rt: runtime::Runtime = match Builder::new_multi_thread()
+                let rt = Builder::new_multi_thread()
                     .enable_all()
                     .worker_threads(2)
                     .thread_name("rapira-http-io")
                     .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        let _ = done_tx.send(());
-                        return Err(anyhow!("building the http runtime: {e}"));
-                    }
-                };
-                let result = rt.block_on(serve::serve(php, config, prepared, shutdown_rx));
-                let _ = done_tx.send(());
-                result
+                    .map_err(|e| anyhow!("building the http runtime: {e}"))?;
+                rt.block_on(serve::serve(php, config, prepared, shutdown_rx))
             })?;
 
         self.shutdown = Some(shutdown_tx);
-        self.join = Some(tokio::task::spawn_blocking(move || join_thread(thread)));
-
-        let _ = done_rx.await;
-
-        let result = match self.join.as_mut() {
-            Some(join) => join
-                .await
-                .map_err(|e| anyhow!("http join task failed: {e}"))?,
-            None => Ok(()),
-        };
+        let join = self
+            .join
+            .insert(tokio::task::spawn_blocking(move || join_thread(thread)));
+        let result = join.await;
         self.join = None;
-        result
+        result.map_err(|e| anyhow!("http join task failed: {e}"))?
     }
 
     async fn shutdown(&mut self) -> Result<()> {
@@ -153,4 +140,44 @@ fn join_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
             .unwrap_or("unknown panic");
         anyhow!("http server thread panicked: {msg}")
     })?
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future as _;
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    use extension_api::{Backend, Reply, Request};
+
+    use super::*;
+
+    struct UnusedBackend;
+
+    impl Backend for UnusedBackend {
+        fn exec(&self, _req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>> {
+            unreachable!("the lifecycle test does not send a request")
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_the_server_after_run_is_cancelled() {
+        let mut server = Server::init(Config {
+            listen: ListenAddr::Tcp(([127, 0, 0, 1], 0).into()),
+            ..Config::default()
+        });
+        let mut ctx = PrepareCtx::new();
+        server.prepare(&mut ctx).unwrap();
+        let backend = Arc::new(UnusedBackend);
+        let php = Php::new(backend.clone());
+
+        let mut run = Box::pin(server.run(php));
+        assert!(std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx).is_pending())).await);
+        drop(run);
+
+        assert!(server.join.is_some());
+        server.shutdown().await.unwrap();
+        assert!(server.join.is_none());
+        assert_eq!(Arc::strong_count(&backend), 1);
+    }
 }

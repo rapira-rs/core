@@ -34,10 +34,6 @@ impl Lifeline {
             wr: unsafe { OwnedFd::from_raw_fd(fds[1]) },
         })
     }
-
-    pub fn dup_read_end(&self) -> io::Result<OwnedFd> {
-        self.rd.try_clone()
-    }
 }
 
 /// On lifeline EOF the SIGQUIT must be process-directed (`kill`, not `raise`): a thread-directed blocked signal stays in this thread's pending set where the worker's `sigwait` thread never sees it.

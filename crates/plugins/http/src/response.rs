@@ -11,7 +11,7 @@ pub(crate) fn error_response(status: http::StatusCode) -> HttpResponse {
     res
 }
 
-pub(crate) fn skip_response_header(name: &str) -> bool {
+fn skip_response_header(name: &str) -> bool {
     [
         "content-length",
         "transfer-encoding",
@@ -26,7 +26,7 @@ pub(crate) fn skip_response_header(name: &str) -> bool {
     .any(|h| name.eq_ignore_ascii_case(h))
 }
 
-pub(crate) fn connection_named_headers(value: &[u8], out: &mut Vec<String>) {
+fn connection_named_headers(value: &[u8], out: &mut Vec<String>) {
     for tok in value.split(|&b| b == b',') {
         let tok = String::from_utf8_lossy(tok).trim().to_ascii_lowercase();
         if !tok.is_empty() {
@@ -84,15 +84,19 @@ mod tests {
     fn connection_value_cannot_strip_framing() {
         let map = response_headers(
             hdrs(&[
-                ("Connection", "content-length, x-drop"),
-                ("X-Drop", "1"),
+                ("cOnNeCtIoN", "  Content-Length, ,X-Drop\t,  "),
+                ("X-DROP", "1"),
                 ("X-Keep", "2"),
+                ("PROXY-CONNECTION", "legacy"),
+                ("Content-Type", "text/plain"),
             ]),
             Some(7),
         );
         assert_eq!(map.get("content-length").unwrap().as_bytes(), b"7");
         assert!(map.get("x-drop").is_none());
         assert_eq!(map.get("x-keep").unwrap().as_bytes(), b"2");
+        assert!(map.get("proxy-connection").is_none());
+        assert_eq!(map.get("content-type").unwrap().as_bytes(), b"text/plain");
         assert!(map.get("connection").is_none());
     }
 
@@ -130,20 +134,6 @@ mod tests {
         );
         assert_eq!(map.get("content-length").unwrap().as_bytes(), b"4");
         assert!(map.get("transfer-encoding").is_none());
-    }
-
-    #[test]
-    fn connection_tokens_are_split_trimmed_and_lowercased() {
-        let mut out = Vec::new();
-        connection_named_headers(b"  Keep-Alive , ,X-Foo\t", &mut out);
-        assert_eq!(out, vec!["keep-alive".to_owned(), "x-foo".to_owned()]);
-    }
-
-    #[test]
-    fn hop_by_hop_names_match_case_insensitively() {
-        assert!(skip_response_header("Transfer-Encoding"));
-        assert!(skip_response_header("PROXY-CONNECTION"));
-        assert!(!skip_response_header("content-type"));
     }
 
     #[test]

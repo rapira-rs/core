@@ -141,9 +141,6 @@ pub(crate) unsafe extern "C" fn sapi_shutdown_cb(_sapi_module: *mut sapi_module_
     }
     SUCCESS
 }
-pub(crate) unsafe extern "C" fn sapi_deactivate_cb() -> c_int {
-    SUCCESS
-}
 
 /// # Safety
 /// `buf` must point at `len` readable bytes and `aborted` at a writable `bool`

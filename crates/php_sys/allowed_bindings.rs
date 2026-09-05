@@ -3,9 +3,9 @@ bind! {
     sapi_globals_struct, zend_executor_globals, php_core_globals, zend_compiler_globals,
     zend_file_handle, zend_module_entry, zend_string, zval, HashTable, zend_long,
     zend_fcall_info, zend_fcall_info_cache,
-    sapi_startup, sapi_shutdown, sapi_activate, php_module_startup, php_module_shutdown, php_request_startup, php_request_shutdown,
+    sapi_startup, sapi_shutdown, php_module_startup, php_module_shutdown, php_request_startup, php_request_shutdown,
     php_execute_script, zend_error, zend_stream_init_filename, zend_destroy_file_handle,
-    php_register_variable_safe, php_output_deactivate, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
+    php_register_variable_safe, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
     RAPIRA_MODE_DISPATCHER,
     // the two halves of the linked-libphp version check
     rapira_headers_php_version_id, php_version_id,
@@ -48,8 +48,8 @@ bind! {
     // zend_string_init is inline-only; the exported interner fn-pointer covers startup-time strings
     zend_hash_str_update, zend_string_init_interned,
     php_default_post_reader, php_default_treat_data, php_default_input_filter,
-    php_call_shutdown_functions, zend_observer_fcall_end_all, zend_unset_timeout, php_handle_auth_data, php_handle_aborted_connection,
-    SAPI_HEADER_SENT_SUCCESSFULLY, SAPI_HEADER_SEND_FAILED, TRACK_VARS_FILES, IS_UNDEF, IS_STRING, // E_CORE and E_FATAL_ERRORS are php-src's own groupings
+    zend_unset_timeout, php_handle_auth_data,
+    SAPI_HEADER_SENT_SUCCESSFULLY, SAPI_HEADER_SEND_FAILED, IS_UNDEF, IS_STRING, // E_CORE and E_FATAL_ERRORS are php-src's own groupings
     E_WARNING, E_CORE_WARNING, E_COMPILE_WARNING, E_USER_WARNING,
     E_NOTICE, E_USER_NOTICE, E_DEPRECATED, E_USER_DEPRECATED,
     E_CORE, E_FATAL_ERRORS,
