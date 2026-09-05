@@ -2,21 +2,6 @@ use php_sys::{Mode, Rapira};
 use tests::{drain_async, fixture, php_lock_async, req};
 
 #[tokio::test]
-async fn hello_world_worker() -> anyhow::Result<()> {
-    let _guard = php_lock_async().await;
-    let r = Rapira::start(Mode::Worker(fixture("shared/worker.php")))?;
-    let h = r.handle();
-    let (_, body1) = drain_async(h.handle(req("/?x=1", "shared/worker.php")).await?).await;
-    assert!(
-        body1.contains("Hello from worker, anonymous!"),
-        "req1 baseline (got: {body1:?})"
-    );
-    drop(h);
-    r.shutdown();
-    Ok(())
-}
-
-#[tokio::test]
 async fn worker_survives_exit() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 

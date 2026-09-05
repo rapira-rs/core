@@ -91,8 +91,8 @@ impl Scoreboard {
         self.slots.len()
     }
 
-    pub fn slot(&self, i: usize) -> Option<&'static SharedSlot> {
-        self.slots.get(i)
+    pub fn slot(&self, i: usize) -> &'static SharedSlot {
+        &self.slots[i]
     }
 
     pub fn slots(&self) -> &'static [SharedSlot] {
@@ -101,18 +101,16 @@ impl Scoreboard {
 
     /// Master-side at fork time. It reserves the slot so the scaling math sees the in-flight fork.
     pub fn set_starting(&self, i: usize) {
-        if let Some(s) = self.slots.get(i) {
-            s.last_activity_ms.store(now_millis(), Relaxed);
-            s.state.store(SLOT_STARTING, Release);
-        }
+        let s = self.slot(i);
+        s.last_activity_ms.store(now_millis(), Relaxed);
+        s.state.store(SLOT_STARTING, Release);
     }
 
     /// Master-side, after the slot's worker is reaped. The slot can then go to a new fork.
     pub fn clear(&self, i: usize) {
-        if let Some(s) = self.slots.get(i) {
-            s.pid.store(0, Relaxed);
-            s.state.store(SLOT_FREE, Relaxed);
-        }
+        let s = self.slot(i);
+        s.pid.store(0, Relaxed);
+        s.state.store(SLOT_FREE, Relaxed);
     }
 
     pub fn snapshot_slots(&self) -> Vec<SlotSnapshot> {
@@ -157,13 +155,13 @@ mod tests {
     fn create_bind_snapshot_roundtrip() {
         let sb = Scoreboard::create(3).unwrap();
         assert_eq!(sb.nslots(), 3);
-        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_FREE);
+        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_FREE);
 
         sb.set_starting(0);
-        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_STARTING);
-        assert_eq!(sb.slot(1).unwrap().state.load(Relaxed), SLOT_FREE);
+        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_STARTING);
+        assert_eq!(sb.slot(1).state.load(Relaxed), SLOT_FREE);
 
-        let slot = sb.slot(0).unwrap();
+        let slot = sb.slot(0);
         slot.bind(4242);
         slot.handled.fetch_add(2, Relaxed);
         slot.errors.fetch_add(1, Relaxed);
@@ -174,7 +172,7 @@ mod tests {
         assert_eq!(snap[0].state, SLOT_IDLE);
 
         sb.clear(0);
-        assert_eq!(sb.slot(0).unwrap().state.load(Relaxed), SLOT_FREE);
+        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_FREE);
         assert!(sb.snapshot_slots().is_empty());
     }
 

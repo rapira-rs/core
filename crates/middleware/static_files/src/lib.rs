@@ -300,25 +300,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn directory_paths_without_a_trailing_slash_fall_through() {
-        let dir = root();
-        for path in ["/assets", "/sub"] {
-            let res = run(static_files(&dir), request("GET", path, "")).await;
-            assert_eq!(header(&res, "x-handler"), "php", "{path}");
-        }
-
-        let res = run(static_files(&dir), request("GET", "/assets/a.css", "")).await;
-        assert_eq!(res.status(), 200);
-        assert_eq!(body(res).await, "a{}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn directory_paths_with_a_trailing_slash_fall_through() {
+    async fn directory_routes_fall_through_without_being_cached() {
         let dir = root();
         std::fs::write(dir.path().join("sub").join("index.html"), "<h1>s</h1>").unwrap();
-        for path in ["/assets/", "/sub/"] {
-            let res = run(static_files(&dir), request("GET", path, "")).await;
+        let (st, cache) = cached(&dir);
+        for path in ["/", "/assets", "/assets/", "/sub", "/sub/", "/sub"] {
+            let res = run_shared(&st, request("GET", path, "")).await;
             assert_eq!(header(&res, "x-handler"), "php", "{path}");
+            assert_eq!(cache.entries(), 0, "{path}");
+        }
+
+        for (path, expected) in [("/index.html", "<h1>hi</h1>"), ("/assets/a.css", "a{}")] {
+            let res = run_shared(&st, request("GET", path, "")).await;
+            assert_eq!(res.status(), 200, "{path}");
+            assert_eq!(body(res).await, expected, "{path}");
         }
     }
 
@@ -438,18 +433,6 @@ mod tests {
         assert_eq!(res.status(), 200);
         assert_eq!(header(&res, "content-length"), "10");
         assert_eq!(body(res).await, "");
-    }
-
-    /// The URL space belongs to PHP: no implicit index resolution, only exact file paths serve.
-    #[tokio::test(flavor = "current_thread")]
-    async fn the_root_falls_through_even_with_an_index_present() {
-        let dir = root();
-        let res = run(static_files(&dir), request("GET", "/", "")).await;
-        assert_eq!(header(&res, "x-handler"), "php");
-
-        let res = run(static_files(&dir), request("GET", "/index.html", "")).await;
-        assert_eq!(res.status(), 200);
-        assert_eq!(body(res).await, "<h1>hi</h1>");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -714,19 +697,6 @@ mod tests {
 
         assert_eq!(cache.entries(), 1);
         assert_eq!(cache.accounted(), cache.recomputed());
-    }
-
-    /// A directory URL is a PHP route. The cache holds no entry for it, so `HEAD` and `GET`
-    /// read the same filesystem state.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_directory_is_not_cached() {
-        let dir = root();
-        let (st, cache) = cached(&dir);
-        for _ in 0..2 {
-            let res = run_shared(&st, request("GET", "/sub", "")).await;
-            assert_eq!(header(&res, "x-handler"), "php");
-        }
-        assert_eq!(cache.entries(), 0);
     }
 
     /// Eight requests arrive for one cold path. One task reads the file. The other tasks

@@ -88,19 +88,17 @@ fn default_processes() -> usize {
         .unwrap_or(1)
 }
 
-/// `table` is the key path used in error messages; `cli` applies to the root pool only - pass `&Overrides::default()` for any other pool.
 pub(crate) fn resolve_pool(
     section: PoolSection,
     cli: &Overrides,
     config_dir: Option<&Path>,
-    table: &str,
 ) -> anyhow::Result<PoolSettings> {
     let processes = cli
         .processes
         .or(section.processes)
         .unwrap_or_else(default_processes);
     if processes == 0 {
-        bail!("{table}.processes must be at least 1");
+        bail!("pool.processes must be at least 1");
     }
 
     let mode = cli.mode.or(section.mode).unwrap_or_default();
@@ -110,19 +108,17 @@ pub(crate) fn resolve_pool(
     } else if let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) {
         config_relative(config_dir, ep)?
     } else {
-        bail!("no entrypoint: pass a SCRIPT argument or set {table}.entrypoint in the config file");
+        bail!("no entrypoint: pass a SCRIPT argument or set pool.entrypoint in the config file");
     };
 
     let scaling = match section.scaling.unwrap_or(ScalingKey::Static) {
         ScalingKey::Dynamic => {
             let (Some(min_spare), Some(max_spare)) = (section.min_spare, section.max_spare) else {
-                bail!(
-                    "{table}.scaling = \"dynamic\" requires {table}.min_spare and {table}.max_spare"
-                );
+                bail!("pool.scaling = \"dynamic\" requires pool.min_spare and pool.max_spare");
             };
             if !(1..=max_spare).contains(&min_spare) || max_spare > processes {
                 bail!(
-                    "{table} spares must satisfy 1 <= min_spare ({min_spare}) <= max_spare ({max_spare}) <= {table}.processes ({processes})"
+                    "pool spares must satisfy 1 <= min_spare ({min_spare}) <= max_spare ({max_spare}) <= pool.processes ({processes})"
                 );
             }
             Scaling::Dynamic {
@@ -133,7 +129,7 @@ pub(crate) fn resolve_pool(
         other => {
             if section.min_spare.is_some() || section.max_spare.is_some() {
                 bail!(
-                    "{table}.min_spare/{table}.max_spare are only valid with {table}.scaling = \"dynamic\""
+                    "pool.min_spare/pool.max_spare are only valid with pool.scaling = \"dynamic\""
                 );
             }
             if other == ScalingKey::Static {
@@ -151,12 +147,12 @@ pub(crate) fn resolve_pool(
         scaling,
         max_requests: section.max_requests.unwrap_or(0),
         process_idle_timeout: capped_timeout(
-            table,
+            "pool",
             "process_idle_timeout_secs",
             section.process_idle_timeout_secs.unwrap_or(10),
         )?,
         request_terminate_timeout: capped_timeout(
-            table,
+            "pool",
             "request_terminate_timeout_secs",
             section.request_terminate_timeout_secs.unwrap_or(0),
         )?,

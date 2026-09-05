@@ -237,7 +237,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     let mut prepare_ctx: PrepareCtx = PrepareCtx::new();
     host.prepare_all(&mut prepare_ctx)?;
-    let listeners: Vec<i32> = prepare_ctx.listener_fds().to_vec();
+    let listeners: Vec<i32> = prepare_ctx.listener_fds();
 
     let module: php_sys::PhpModule = Rapira::boot_master()?;
 

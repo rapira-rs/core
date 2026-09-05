@@ -1,4 +1,3 @@
-#[allow(clippy::all)]
 pub mod bindings;
 
 pub mod callbacks;

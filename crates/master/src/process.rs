@@ -153,7 +153,7 @@ pub(crate) fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
     scoreboard: &Scoreboard,
     worker: &mut F,
 ) -> std::io::Result<libc::pid_t> {
-    let lifeline_rd: std::os::fd::OwnedFd = lifeline.dup_read_end()?;
+    let lifeline_rd: std::os::fd::OwnedFd = lifeline.rd.try_clone()?;
 
     let block: libc::sigset_t = sigset(&MASTER_SIGNALS);
     // SAFETY: zeroed sigset_t is fully overwritten by sigprocmask's out-param.
@@ -196,9 +196,7 @@ pub(crate) fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
             }
 
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let slot_view = scoreboard
-                    .slot(slot)
-                    .expect("slot index within scoreboard bounds");
+                let slot_view = scoreboard.slot(slot);
                 worker(WorkerEnv {
                     lifeline: lifeline_rd,
                     slot_view,

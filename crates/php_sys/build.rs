@@ -55,7 +55,10 @@ fn main() -> anyhow::Result<()> {
         .clang_args(php.includes.iter().map(|d| format!("-I{d}")))
         .opaque_type("_zend_op");
     bindings = bindings.layout_tests(true);
-    bindings = macos_sysroot(bindings);
+    #[cfg(target_os = "macos")]
+    {
+        bindings = macos_sysroot(bindings);
+    }
 
     for binding in ALLOWED_BINDINGS {
         bindings = bindings
@@ -104,11 +107,6 @@ fn macos_sysroot(bindings: bindgen::Builder) -> bindgen::Builder {
                 .clang_arg(format!("-I{sdk}/usr/include"));
         }
     }
-    bindings
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_sysroot(bindings: bindgen::Builder) -> bindgen::Builder {
     bindings
 }
 

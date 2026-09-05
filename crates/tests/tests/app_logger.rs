@@ -135,6 +135,32 @@ fn app_logger_dateinterval_easy() {
     );
 }
 
+/// Cycles are cut at the back-edge and raise no PHP diagnostic.
+#[test]
+fn cycles_are_broken_without_a_diagnostic() {
+    let (level, _, ctx) = app_record("app_logger/limits-cycles.php");
+
+    assert_eq!(level, Level::ERROR);
+    assert!(
+        ctx.contains(r#""objects":{"bar":{"foo":null}}"#),
+        "object cycle must be cut at the back-edge: {ctx:?}"
+    );
+    assert!(
+        ctx.contains(r#""arrays":{"x":{"foo":"bar","y":null}}"#),
+        "reference cycle must be cut at the back-edge: {ctx:?}"
+    );
+    assert!(
+        ctx.contains(r#""keep":"visible""#),
+        "siblings of a cycle must survive: {ctx:?}"
+    );
+    let phpdiag: Vec<_> = tests::captured()
+        .iter()
+        .filter(|c| c.target == "php")
+        .map(|c| c.message.clone())
+        .collect();
+    assert!(phpdiag.is_empty(), "cycles must raise nothing: {phpdiag:?}");
+}
+
 /// A throwing jsonSerialize() must not escape log(): the record still reaches the host.
 #[test]
 fn log_survives_a_throwing_json_serializer() {

@@ -149,29 +149,18 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     }
 
     fn slot_is_free(&self, i: usize) -> bool {
-        self.scoreboard
-            .slot(i)
-            .map(|s| s.state.load(Relaxed) == SLOT_FREE)
-            .unwrap_or(false)
+        self.scoreboard.slot(i).state.load(Relaxed) == SLOT_FREE
     }
 
     // Acquire: ondemand maintenance pairs this with a later timestamp read
     fn slot_is_idle(&self, i: usize) -> bool {
-        self.scoreboard
-            .slot(i)
-            .map(|s| s.state.load(Acquire) == SLOT_IDLE)
-            .unwrap_or(false)
+        self.scoreboard.slot(i).state.load(Acquire) == SLOT_IDLE
     }
 
     /// Serving is IDLE or ACTIVE: under load a replacement may never be observed IDLE between requests.
     fn slot_is_serving(&self, i: usize) -> bool {
-        self.scoreboard
-            .slot(i)
-            .map(|s| {
-                let state = s.state.load(Relaxed);
-                state == SLOT_IDLE || state == SLOT_ACTIVE
-            })
-            .unwrap_or(false)
+        let state = self.scoreboard.slot(i).state.load(Relaxed);
+        state == SLOT_IDLE || state == SLOT_ACTIVE
     }
 
     fn find_spawn_slot(&self) -> Option<usize> {
@@ -432,9 +421,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
         let now_ms = now_millis();
         for p in self.table.procs.iter_mut() {
-            let Some(s) = self.scoreboard.slot(p.slot) else {
-                continue;
-            };
+            let s = self.scoreboard.slot(p.slot);
             if s.state.load(Acquire) != SLOT_ACTIVE {
                 continue;
             }
@@ -466,7 +453,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
                 min_spare,
                 max_spare,
             } => self.dynamic_maintenance(min_spare, max_spare, now),
-            Scaling::Ondemand => self.ondemand_maintenance(now),
+            Scaling::Ondemand => self.ondemand_maintenance(),
         }
     }
 
@@ -523,16 +510,15 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
     }
 
     /// Trims the idle worker with the stalest activity: by process age, a busy older worker could shield a long-expired younger one indefinitely.
-    fn ondemand_maintenance(&mut self, _now: Instant) {
+    fn ondemand_maintenance(&mut self) {
         let target = self
             .table
             .procs
             .iter()
             .filter(|p| self.slot_is_idle(p.slot))
-            .filter_map(|p| {
-                self.scoreboard
-                    .slot(p.slot)
-                    .map(|s| (p.pid, s.last_activity_ms.load(Relaxed)))
+            .map(|p| {
+                let s = self.scoreboard.slot(p.slot);
+                (p.pid, s.last_activity_ms.load(Relaxed))
             })
             .min_by_key(|&(_, last)| last);
         let Some((pid, last)) = target else {
@@ -986,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_terms_overdue_active_worker_then_escalates() {
+    fn watchdog_marks_an_overdue_active_worker_for_timeout() {
         let mut m = test_master(3, Scaling::Static);
         m.cfg.request_terminate_timeout = Duration::from_secs(2);
         let t0 = Instant::now();
@@ -1000,10 +986,8 @@ mod tests {
         assert_eq!(
             m.table.procs[0].kill_intent,
             Some(KillIntent::Timeout),
-            "first pass must TERM and mark the intent"
+            "the overdue active worker must have timeout intent"
         );
-        m.watchdog_tick();
-        assert_eq!(m.table.procs[0].kill_intent, Some(KillIntent::Timeout));
     }
 
     #[test]

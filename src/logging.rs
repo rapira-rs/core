@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn json_layer_emits_flat_single_line_records() {
+    fn json_layer_emits_one_record_with_nested_fields() {
         let sink = Sink::default();
         let sub = tracing_subscriber::registry()
             .with(EnvFilter::new("info"))
@@ -212,13 +212,11 @@ mod tests {
             });
         });
         let out = sink.text();
-        let line = out.lines().next().expect("one record");
-        let v: serde_json::Value = serde_json::from_str(line).expect("json record");
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 1, "one JSON record: {out:?}");
+        let v: serde_json::Value = serde_json::from_str(lines[0]).expect("json record");
         assert_eq!(v["fields"]["message"], "boot-mark");
-        assert_eq!(
-            v["fields"]["answer"], 42,
-            "event fields must be flattened to the top level"
-        );
+        assert_eq!(v["fields"]["answer"], 42);
         assert_eq!(v["target"], "rapira");
         assert_eq!(v["level"], "INFO");
         // ChronoUtc %.3f: RFC 3339 UTC with exactly milliseconds.

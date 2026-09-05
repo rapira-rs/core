@@ -36,7 +36,6 @@ impl std::error::Error for HandleError {}
 pub struct RapiraHandle {
     intake: SyncSender<Job>,
     pending: Arc<AtomicUsize>,
-    superglobals: bool,
     dispatcher: bool,
 }
 
@@ -46,7 +45,6 @@ impl Rapira {
         RapiraHandle {
             intake: intake.tx.clone(),
             pending: intake.pending.clone(),
-            superglobals: self.superglobals,
             dispatcher: self.dispatcher,
         }
     }
@@ -89,7 +87,7 @@ impl RapiraHandle {
         req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
         let mut job = Job {
-            ctx: Context::new(req, tx, self.superglobals),
+            ctx: Context::new(req, tx, !self.dispatcher),
         };
         let pending = PendingGuard::arm(&self.pending);
         let deadline = Instant::now() + INTAKE_WAIT;
@@ -123,7 +121,7 @@ impl RapiraHandle {
         if self
             .intake
             .send(Job {
-                ctx: Context::new(req, tx, self.superglobals),
+                ctx: Context::new(req, tx, !self.dispatcher),
             })
             .is_err()
         {

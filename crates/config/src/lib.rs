@@ -124,7 +124,7 @@ fn merge(file: FileConfig, cli: Overrides, config_dir: Option<&Path>) -> anyhow:
         None => None,
     };
 
-    let pool = resolve_pool(file.pool, &cli, config_dir, "pool")?;
+    let pool = resolve_pool(file.pool, &cli, config_dir)?;
     if file.http.uploads.is_some() && pool.mode != RunMode::Dispatcher {
         bail!(
             "http.uploads applies to dispatcher mode only (pool.mode = \"{}\")",

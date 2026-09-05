@@ -8,10 +8,13 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(not(target_os = "linux"))]
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::watch::{self, channel};
 
 use crate::Config;
+#[cfg(target_os = "linux")]
+use crate::accept_linux::{TcpListener, UnixListener};
 use crate::handler::{RapiraService, Shared};
 
 enum Acceptor {
@@ -46,10 +49,9 @@ pub(crate) async fn serve(
     }
 
     let chain: Arc<[_]> = config.middleware.clone().into();
-    let cfg = Arc::new(config);
     let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let shared = Arc::new(Shared {
-        cfg: Arc::clone(&cfg),
+        cfg: config,
         php,
         chain,
         inflight: Arc::clone(&inflight),
@@ -59,7 +61,7 @@ pub(crate) async fn serve(
     let mut builder = http1::Builder::new();
     builder
         .timer(TokioTimer::new())
-        .header_read_timeout(cfg.keepalive_timeout)
+        .header_read_timeout(shared.cfg.keepalive_timeout)
         .preserve_header_case(false)
         .half_close(false)
         .keep_alive(true);
@@ -70,8 +72,17 @@ pub(crate) async fn serve(
         tokio::select! {
             biased;
             _ = shutdown.wait_for(|stop| *stop) => break,
-            res = accept_connection(&acceptor, &cfg.listen, &builder, &graceful, &shared) => match res {
-                Ok(()) => {}
+            res = accept_connection(&acceptor, &shared.cfg.listen, &builder, &graceful, &shared) => match res {
+                Ok(()) => {
+                    #[cfg(target_os = "linux")]
+                    if let Err(e) = match &acceptor {
+                        Acceptor::Tcp(listener) => listener.on_accept(),
+                        Acceptor::Unix(listener) => listener.on_accept(),
+                    } {
+                        fatal = Some(anyhow!("listener rotation failed: {e}"));
+                        break;
+                    }
+                }
                 Err(e) if is_fatal_accept(&e) => {
                     fatal = Some(anyhow!("listener failed: {e}"));
                     break;
@@ -93,7 +104,7 @@ pub(crate) async fn serve(
     }
 
     drop(acceptor);
-    let deadline = tokio::time::Instant::now() + cfg.drain_grace;
+    let deadline = tokio::time::Instant::now() + shared.cfg.drain_grace;
     if tokio::time::timeout_at(deadline, graceful.shutdown())
         .await
         .is_err()
@@ -101,7 +112,7 @@ pub(crate) async fn serve(
         tracing::warn!(
             target: "http",
             "graceful connection shutdown did not finish within {:?}",
-            cfg.drain_grace
+            shared.cfg.drain_grace
         );
     }
     while inflight.load(Ordering::Acquire) > 0 && tokio::time::Instant::now() < deadline {
@@ -121,7 +132,7 @@ pub(crate) async fn serve(
         return Err(anyhow!(
             "http drain timed out after {:?} with {stranded} request(s) in flight; \
              their responses were cut short",
-            cfg.drain_grace
+            shared.cfg.drain_grace
         ));
     }
     tracing::info!(target: "http", "drained cleanly; accept loop stopped");
@@ -193,4 +204,108 @@ fn spawn_conn<S>(
         }
         let _ = closed_tx.send(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::future::{Future, poll_fn};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::task::Poll;
+
+    use tokio::io::AsyncReadExt;
+
+    use super::*;
+
+    fn assert_nonblocking(stream: &impl AsRawFd) {
+        // SAFETY: fcntl reads flags from the live stream descriptor.
+        let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+    }
+
+    #[tokio::test]
+    async fn queued_tcp_connections_survive_acceptor_replacement() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let replacement = listener.try_clone().unwrap();
+        let mut clients = Vec::new();
+        for byte in 0..16_u8 {
+            let mut client = std::net::TcpStream::connect(addr).unwrap();
+            client.write_all(&[byte]).unwrap();
+            clients.push(client);
+        }
+        let mut listener = TcpListener::from_std(listener).unwrap();
+        let mut received = BTreeSet::new();
+        for index in 0..16 {
+            if index == 8 {
+                listener = TcpListener::from_std(replacement.try_clone().unwrap()).unwrap();
+            }
+            let (mut stream, peer) =
+                tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                    .await
+                    .expect("queued connection must remain ready")
+                    .unwrap();
+            assert!(
+                clients
+                    .iter()
+                    .any(|client| client.local_addr().unwrap() == peer)
+            );
+            assert_nonblocking(&stream);
+            received.insert(stream.read_u8().await.unwrap());
+            #[cfg(target_os = "linux")]
+            listener.on_accept().unwrap();
+        }
+        assert_eq!(received, (0..16).collect());
+    }
+
+    #[tokio::test]
+    async fn canceled_tcp_accept_keeps_the_next_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::from_std(listener).unwrap();
+        let mut pending = Box::pin(listener.accept());
+        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        drop(pending);
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (_, peer) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("accept must remain usable after cancellation")
+            .unwrap();
+        assert_eq!(peer, client.local_addr().unwrap());
+    }
+
+    #[tokio::test]
+    async fn queued_unix_connections_survive_acceptor_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("http.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let replacement = listener.try_clone().unwrap();
+        let mut clients = Vec::new();
+        for byte in 0..16_u8 {
+            let mut client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+            client.write_all(&[byte]).unwrap();
+            clients.push(client);
+        }
+        let mut listener = UnixListener::from_std(listener).unwrap();
+        let mut received = BTreeSet::new();
+        for index in 0..16 {
+            if index == 8 {
+                listener = UnixListener::from_std(replacement.try_clone().unwrap()).unwrap();
+            }
+            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("queued connection must remain ready")
+                .unwrap();
+            assert_nonblocking(&stream);
+            received.insert(stream.read_u8().await.unwrap());
+            #[cfg(target_os = "linux")]
+            listener.on_accept().unwrap();
+        }
+        assert_eq!(received, (0..16).collect());
+    }
 }

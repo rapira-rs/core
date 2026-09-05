@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::harness::{
-    diagnostics, fan_out, fixture_path, http_get, http_get_with_headers, spawn_with_config,
+    Server, diagnostics, fan_out, fixture_path, http_get, http_get_with_headers, spawn_with_config,
     spawn_with_phprc_and_config, wait_workers,
 };
 
@@ -72,66 +72,16 @@ fn browscap_ini() -> String {
     )
 }
 
-/// The `browscap` ini is PHP_INI_SYSTEM: MINIT parses the file once into persistent memory, in the master before the fork.
-fn browscap_probe(ua: &str) -> String {
-    let srv = spawn_with_phprc_and_config(
-        "browscap/browscap-worker.php",
-        1,
-        &browscap_ini(),
-        "mode = \"worker\"\n",
-    );
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+fn browscap_probe(srv: &Server, ua: &str) -> String {
     let (code, body) =
         http_get_with_headers(srv.addr, "/", &[("User-Agent", ua)], REQ).expect("GET /");
-    assert_eq!(code, 200, "UA {ua:?}\n{}", diagnostics(&srv));
+    assert_eq!(code, 200, "UA {ua:?}\n{}", diagnostics(srv));
     String::from_utf8_lossy(&body).into_owned()
 }
 
-/// browser_reg_compare keeps the pattern with the most non-wildcard characters, the parent fills only the keys the winner omits, and browscap_convert_pattern builds the regex.
+/// The `browscap` ini is PHP_INI_SYSTEM: MINIT parses the file once into persistent memory, in the master before the fork.
 #[test]
-fn get_browser_picks_the_longest_pattern_and_inherits_the_parent() {
-    let body = browscap_probe("Rapira/1.0 (Linux x86_64) Bot/9");
-    let expected = "browser=RapiraBot\n\
-                    platform=unknown\n\
-                    crawler=1\n\
-                    version=1.0\n\
-                    parent=RapiraBase\n\
-                    browser_name_pattern=Rapira/1.0 (Linux*) Bot*\n\
-                    browser_name_regex=~^rapira/1\\.0 \\(linux.*\\) bot.*$~";
-    assert_eq!(body, expected);
-}
-
-/// The user agent is shorter than the Bot pattern's literal minimum, so the length check discards that entry and `Rapira/1.0*` wins.
-#[test]
-fn get_browser_falls_through_to_the_less_specific_pattern() {
-    let body = browscap_probe("Rapira/1.0 (Darwin)");
-    let expected = "browser=RapiraProbe\n\
-                    platform=unknown\n\
-                    crawler=\n\
-                    version=1.0\n\
-                    parent=RapiraBase\n\
-                    browser_name_pattern=Rapira/1.0*\n\
-                    browser_name_regex=~^rapira/1\\.0.*$~";
-    assert_eq!(body, expected);
-}
-
-/// No pattern matches, so the DEFAULT_SECTION_NAME entry (browscap.c) answers; it has no Parent, so no parent key.
-#[test]
-fn get_browser_falls_back_to_the_default_section() {
-    let body = browscap_probe("curl/8.5.0");
-    let expected = "browser=RapiraDefault\n\
-                    platform=unknown\n\
-                    crawler=\n\
-                    version=0\n\
-                    parent=<unset>\n\
-                    browser_name_pattern=Default Browser Capability Settings\n\
-                    browser_name_regex=~^default browser capability settings$~";
-    assert_eq!(body, expected);
-}
-
-/// get_browser(null) reads $_SERVER['HTTP_USER_AGENT']; without the header it must warn and return false: the SAPI does not invent a user agent.
-#[test]
-fn get_browser_without_a_user_agent_returns_false() {
+fn get_browser_uses_browscap_and_isolates_user_agent_requests() {
     let srv = spawn_with_phprc_and_config(
         "browscap/browscap-worker.php",
         1,
@@ -139,6 +89,43 @@ fn get_browser_without_a_user_agent_returns_false() {
         "mode = \"worker\"\n",
     );
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+
+    let cases = [
+        (
+            "Rapira/1.0 (Linux x86_64) Bot/9",
+            "browser=RapiraBot\n\
+             platform=unknown\n\
+             crawler=1\n\
+             version=1.0\n\
+             parent=RapiraBase\n\
+             browser_name_pattern=Rapira/1.0 (Linux*) Bot*\n\
+             browser_name_regex=~^rapira/1\\.0 \\(linux.*\\) bot.*$~",
+        ),
+        (
+            "Rapira/1.0 (Darwin)",
+            "browser=RapiraProbe\n\
+             platform=unknown\n\
+             crawler=\n\
+             version=1.0\n\
+             parent=RapiraBase\n\
+             browser_name_pattern=Rapira/1.0*\n\
+             browser_name_regex=~^rapira/1\\.0.*$~",
+        ),
+        (
+            "curl/8.5.0",
+            "browser=RapiraDefault\n\
+             platform=unknown\n\
+             crawler=\n\
+             version=0\n\
+             parent=<unset>\n\
+             browser_name_pattern=Default Browser Capability Settings\n\
+             browser_name_regex=~^default browser capability settings$~",
+        ),
+    ];
+    for (ua, expected) in cases {
+        assert_eq!(browscap_probe(&srv, ua), expected, "UA {ua:?}");
+    }
+
     let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
     let body = String::from_utf8_lossy(&body);
     assert_eq!(code, 200, "{}", diagnostics(&srv));

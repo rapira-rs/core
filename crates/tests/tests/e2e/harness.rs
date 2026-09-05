@@ -320,14 +320,7 @@ pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io
 
 /// A caller-controlled request: no implicit Host or Connection line.
 pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
-    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
-    s.set_read_timeout(Some(timeout))?;
-    s.set_write_timeout(Some(timeout))?;
-    s.write_all(request)?;
-    s.flush()?;
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw)?;
-    parse_status_and_body(&raw)
+    parse_status_and_body(&http_raw_bytes(addr, request, timeout)?)
 }
 
 /// Sibling of [`http_get`] with a body; `content_type` is bytes because a multipart boundary is opaque octets and obs-text is legal in a field value.
@@ -338,9 +331,6 @@ pub fn http_post(
     body: &[u8],
     timeout: Duration,
 ) -> io::Result<(u16, Vec<u8>)> {
-    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
-    s.set_read_timeout(Some(timeout))?;
-    s.set_write_timeout(Some(timeout))?;
     let mut req = Vec::new();
     write!(
         req,
@@ -350,11 +340,7 @@ pub fn http_post(
     req.extend_from_slice(content_type);
     write!(req, "\r\nContent-Length: {}\r\n\r\n", body.len())?;
     req.extend_from_slice(body);
-    s.write_all(&req)?;
-    s.flush()?;
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw)?;
-    parse_status_and_body(&raw)
+    http_raw(addr, &req, timeout)
 }
 
 fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {

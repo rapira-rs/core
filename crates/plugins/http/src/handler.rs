@@ -16,7 +16,7 @@ use crate::response::{error_response, response_headers};
 use crate::{Config, bridge, check, request};
 
 pub(crate) struct Shared {
-    pub cfg: Arc<Config>,
+    pub cfg: Config,
     pub php: Php,
     pub chain: Arc<[Arc<dyn Middleware>]>,
     pub inflight: Arc<AtomicUsize>,
@@ -531,7 +531,7 @@ mod tests {
     ) {
         let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Shared {
-            cfg: Arc::new(Config::default()),
+            cfg: Config::default(),
             php: Php::new(backend),
             chain: chain.into(),
             inflight: Arc::clone(&inflight),
