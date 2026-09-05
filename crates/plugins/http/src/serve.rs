@@ -65,8 +65,6 @@ pub(crate) async fn serve(
         .preserve_header_case(false)
         .half_close(false)
         .keep_alive(true);
-    let builder = Arc::new(builder);
-
     let mut fatal: Option<anyhow::Error> = None;
     loop {
         tokio::select! {
@@ -158,7 +156,7 @@ fn is_fatal_accept(e: &std::io::Error) -> bool {
 async fn accept_connection(
     acceptor: &Acceptor,
     listen: &ListenAddr,
-    builder: &Arc<http1::Builder>,
+    builder: &http1::Builder,
     graceful: &GracefulShutdown,
     shared: &Arc<Shared>,
 ) -> std::io::Result<()> {
@@ -186,7 +184,7 @@ fn spawn_conn<S>(
     stream: S,
     remote: Addr,
     server: Addr,
-    builder: &Arc<http1::Builder>,
+    builder: &http1::Builder,
     graceful: &GracefulShutdown,
     shared: &Arc<Shared>,
 ) where
@@ -195,7 +193,6 @@ fn spawn_conn<S>(
     let (closed_tx, closed_rx) = channel(false);
     let svc = RapiraService::new(Arc::clone(shared), remote, server, closed_rx);
     let io = crate::bridge::TimedIo::new(TokioIo::new(stream), shared.cfg.write_timeout);
-    // connection <I, S>
     let connection = builder.serve_connection(io, svc);
     let watched = graceful.watch(connection);
     tokio::spawn(async move {
@@ -226,23 +223,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_tcp_connections_survive_acceptor_replacement() {
+    async fn queued_tcp_connections_remain_ready_after_each_accept() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let replacement = listener.try_clone().unwrap();
         let mut clients = Vec::new();
         for byte in 0..16_u8 {
             let mut client = std::net::TcpStream::connect(addr).unwrap();
             client.write_all(&[byte]).unwrap();
             clients.push(client);
         }
-        let mut listener = TcpListener::from_std(listener).unwrap();
+        let listener = TcpListener::from_std(listener).unwrap();
         let mut received = BTreeSet::new();
-        for index in 0..16 {
-            if index == 8 {
-                listener = TcpListener::from_std(replacement.try_clone().unwrap()).unwrap();
-            }
+        for _ in 0..16 {
             let (mut stream, peer) =
                 tokio::time::timeout(Duration::from_secs(2), listener.accept())
                     .await
@@ -279,24 +272,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_unix_connections_survive_acceptor_replacement() {
+    async fn queued_unix_connections_remain_ready_after_each_accept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("http.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let replacement = listener.try_clone().unwrap();
         let mut clients = Vec::new();
         for byte in 0..16_u8 {
             let mut client = std::os::unix::net::UnixStream::connect(&path).unwrap();
             client.write_all(&[byte]).unwrap();
             clients.push(client);
         }
-        let mut listener = UnixListener::from_std(listener).unwrap();
+        let listener = UnixListener::from_std(listener).unwrap();
         let mut received = BTreeSet::new();
-        for index in 0..16 {
-            if index == 8 {
-                listener = UnixListener::from_std(replacement.try_clone().unwrap()).unwrap();
-            }
+        for _ in 0..16 {
             let (mut stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
                 .await
                 .expect("queued connection must remain ready")

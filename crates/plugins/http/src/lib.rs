@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result};
-use tokio::runtime::{self, Builder};
+use tokio::runtime::Builder;
 use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
@@ -101,26 +101,20 @@ impl Extension for Server {
         let thread = std::thread::Builder::new()
             .name("rapira-http".into())
             .spawn(move || {
-                let rt: runtime::Runtime = match Builder::new_multi_thread()
+                let rt = Builder::new_multi_thread()
                     .enable_all()
                     .worker_threads(2)
                     .thread_name("rapira-http-io")
                     .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => return Err(anyhow!("building the http runtime: {e}")),
-                };
+                    .map_err(|e| anyhow!("building the http runtime: {e}"))?;
                 rt.block_on(serve::serve(php, config, prepared, shutdown_rx))
             })?;
 
         self.shutdown = Some(shutdown_tx);
-        self.join = Some(tokio::task::spawn_blocking(move || join_thread(thread)));
-
-        let result = self
+        let join = self
             .join
-            .as_mut()
-            .expect("HTTP join handle is installed")
-            .await;
+            .insert(tokio::task::spawn_blocking(move || join_thread(thread)));
+        let result = join.await;
         self.join = None;
         result.map_err(|e| anyhow!("http join task failed: {e}"))?
     }
@@ -152,26 +146,17 @@ fn join_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
 mod tests {
     use std::future::Future as _;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::Poll;
 
     use extension_api::{Backend, Reply, Request};
 
     use super::*;
 
-    struct UnusedBackend {
-        dropped: Arc<AtomicBool>,
-    }
-
-    impl Drop for UnusedBackend {
-        fn drop(&mut self) {
-            self.dropped.store(true, Ordering::Release);
-        }
-    }
+    struct UnusedBackend;
 
     impl Backend for UnusedBackend {
         fn exec(&self, _req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>> {
-            Box::pin(async { panic!("the lifecycle test does not send a request") })
+            unreachable!("the lifecycle test does not send a request")
         }
     }
 
@@ -183,10 +168,8 @@ mod tests {
         });
         let mut ctx = PrepareCtx::new();
         server.prepare(&mut ctx).unwrap();
-        let backend_dropped = Arc::new(AtomicBool::new(false));
-        let php = Php::new(Arc::new(UnusedBackend {
-            dropped: Arc::clone(&backend_dropped),
-        }));
+        let backend = Arc::new(UnusedBackend);
+        let php = Php::new(backend.clone());
 
         let mut run = Box::pin(server.run(php));
         assert!(std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx).is_pending())).await);
@@ -195,6 +178,6 @@ mod tests {
         assert!(server.join.is_some());
         server.shutdown().await.unwrap();
         assert!(server.join.is_none());
-        assert!(backend_dropped.load(Ordering::Acquire));
+        assert_eq!(Arc::strong_count(&backend), 1);
     }
 }

@@ -413,7 +413,7 @@ impl<F: FnMut(WorkerEnv) -> i32> Master<F> {
         }
     }
 
-    /// TERM an ACTIVE worker past `request_terminate_timeout`, KILL if it is still ACTIVE a tick later (TERM could not land, uninterruptible sleep); Acquire on the state load orders the timestamp read after it.
+    /// Sends SIGTERM after the request timeout. A later tick sends SIGKILL if the worker stays active. The Acquire load orders the timestamp read.
     fn watchdog_tick(&mut self) {
         let limit = self.cfg.request_terminate_timeout;
         if limit.is_zero() {
@@ -988,6 +988,43 @@ mod tests {
             Some(KillIntent::Timeout),
             "the overdue active worker must have timeout intent"
         );
+    }
+
+    #[test]
+    fn watchdog_kills_a_worker_with_timeout_intent() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{Child, Command};
+
+        struct TestChild(Child);
+
+        impl Drop for TestChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let mut child = TestChild(Command::new("/bin/sleep").arg("30").spawn().unwrap());
+        let mut m = test_master(1, Scaling::Static);
+        m.cfg.request_terminate_timeout = Duration::from_secs(2);
+        push_proc(&mut m, child.0.id() as libc::pid_t, 0, 0, Instant::now());
+        m.table.procs[0].kill_intent = Some(KillIntent::Timeout);
+        set_slot(&m, 0, SLOT_ACTIVE);
+        m.scoreboard.slots()[0]
+            .last_activity_ms
+            .store(now_millis().saturating_sub(5_000), Relaxed);
+
+        m.watchdog_tick();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "watchdog did not kill the child");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
 
     #[test]

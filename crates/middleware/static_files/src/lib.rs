@@ -304,7 +304,7 @@ mod tests {
         let dir = root();
         std::fs::write(dir.path().join("sub").join("index.html"), "<h1>s</h1>").unwrap();
         let (st, cache) = cached(&dir);
-        for path in ["/", "/assets", "/assets/", "/sub", "/sub/", "/sub"] {
+        for path in ["/", "/assets", "/assets/", "/sub", "/sub/"] {
             let res = run_shared(&st, request("GET", path, "")).await;
             assert_eq!(header(&res, "x-handler"), "php", "{path}");
             assert_eq!(cache.entries(), 0, "{path}");

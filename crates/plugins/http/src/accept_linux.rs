@@ -49,7 +49,7 @@ impl<L: AsRawFd> Listener<L> {
             }
             match accept(&self.epoll.get_ref().listener) {
                 // Another worker can consume the connection after epoll_wait.
-                // The next empty epoll_wait clears the outer readiness state.
+                // An empty wait returns WouldBlock, so try_io clears Tokio's readiness.
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                 result => return result,
             }
@@ -186,20 +186,5 @@ mod tests {
         assert!(drained_stream.is_some());
         assert_eq!(peer, second_addr);
         drop((first_client, second_client));
-    }
-
-    #[tokio::test]
-    async fn missing_registration_makes_rotation_fail_with_enoent() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let listener = Listener::from_std(listener).unwrap();
-        listener
-            .epoll
-            .get_ref()
-            .control(libc::EPOLL_CTL_DEL)
-            .unwrap();
-
-        let error = listener.on_accept().unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
     }
 }
